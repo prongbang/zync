@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use std::collections::HashSet;
 
 pub mod api;
 
@@ -14,6 +15,7 @@ pub fn app() -> Element {
     let stashes = use_signal(Vec::<api::StashSummary>::new);
     let conflicts = use_signal(Vec::<api::ConflictSummary>::new);
     let mut conflict_detail = use_signal(api::ConflictDetail::default);
+    let mut manual_conflict_content = use_signal(String::new);
     let mut diff = use_signal(String::new);
     let mut selected_file = use_signal(String::new);
     let mut editor_content = use_signal(String::new);
@@ -552,6 +554,14 @@ pub fn app() -> Element {
                             }
                             rebase_steps.set(next);
                         },
+                        on_rebase_move: move |(commit, direction): (String, i32)| {
+                            let next = move_rebase_step(rebase_steps.read().clone(), &commit, direction);
+                            rebase_steps.set(next);
+                        },
+                        on_rebase_drop: move |(dragged, target): (String, String)| {
+                            let next = drop_rebase_step(rebase_steps.read().clone(), &dragged, &target);
+                            rebase_steps.set(next);
+                        },
                         on_create_stash: move |_| {
                             if let Some(current) = workspace.read().as_ref().cloned() {
                                 run_stash_action(api.read().clone(), current, StashAction::Create(stash_message.read().clone()), workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
@@ -606,6 +616,7 @@ pub fn app() -> Element {
                     ConflictEditorPanel {
                         conflicts: conflicts.read().clone(),
                         detail: conflict_detail.read().clone(),
+                        manual_content: manual_conflict_content.read().clone(),
                         on_select: move |path: String| {
                             let Some(current) = workspace.read().as_ref().cloned() else {
                                 notice.set("Open a repository before conflict detail".to_string());
@@ -614,7 +625,52 @@ pub fn app() -> Element {
                             let api_client = api.read().clone();
                             spawn(async move {
                                 match api_client.conflict_detail(&current.repository.id, &path).await {
-                                    Ok(detail) => conflict_detail.set(detail),
+                                    Ok(detail) => {
+                                        manual_conflict_content.set(detail.ours_content.clone());
+                                        conflict_detail.set(detail);
+                                    }
+                                    Err(error) => notice.set(error),
+                                }
+                            });
+                        },
+                        on_manual_change: move |content: String| manual_conflict_content.set(content),
+                        on_save_manual: move |_| {
+                            let Some(current) = workspace.read().as_ref().cloned() else {
+                                notice.set("Open a repository before resolving conflicts".to_string());
+                                return;
+                            };
+                            let path = conflict_detail.read().path.clone();
+                            if path.is_empty() {
+                                notice.set("Select a conflicted file first".to_string());
+                                return;
+                            }
+                            let content = manual_conflict_content.read().clone();
+                            let api_client = api.read().clone();
+                            let repository_id = current.repository.id.clone();
+                            let workspace_id = current.workspace.id.clone();
+                            spawn(async move {
+                                match api_client.write_file(&workspace_id, &path, content).await {
+                                    Ok(()) => {
+                                        match api_client.stage_files(&repository_id, vec![path]).await {
+                                            Ok(()) => {
+                                                notice.set("Manual conflict resolution saved".to_string());
+                                                load_workspace(
+                                                    api_client,
+                                                    repository_id,
+                                                    workspace_id,
+                                                    workspace,
+                                                    git_status,
+                                                    branches,
+                                                    commits,
+                                                    stashes,
+                                                    conflicts,
+                                                    diff,
+                                                    notice
+                                                );
+                                            }
+                                            Err(error) => notice.set(error),
+                                        }
+                                    }
                                     Err(error) => notice.set(error),
                                 }
                             });
@@ -909,6 +965,43 @@ fn run_history_action(
     });
 }
 
+fn move_rebase_step(
+    mut steps: Vec<api::RebaseStepRequest>,
+    commit: &str,
+    direction: i32,
+) -> Vec<api::RebaseStepRequest> {
+    let Some(index) = steps.iter().position(|step| step.commit == commit) else {
+        return steps;
+    };
+    let target = if direction < 0 {
+        index.saturating_sub(1)
+    } else {
+        (index + 1).min(steps.len().saturating_sub(1))
+    };
+    steps.swap(index, target);
+    steps
+}
+
+fn drop_rebase_step(
+    mut steps: Vec<api::RebaseStepRequest>,
+    dragged: &str,
+    target: &str,
+) -> Vec<api::RebaseStepRequest> {
+    if dragged == target {
+        return steps;
+    }
+    let Some(from) = steps.iter().position(|step| step.commit == dragged) else {
+        return steps;
+    };
+    let Some(to) = steps.iter().position(|step| step.commit == target) else {
+        return steps;
+    };
+    let step = steps.remove(from);
+    let insert_at = if from < to { to.saturating_sub(1) } else { to };
+    steps.insert(insert_at, step);
+    steps
+}
+
 #[cfg(target_arch = "wasm32")]
 fn start_live_events(
     api: api::ZyncApi,
@@ -1156,6 +1249,7 @@ fn StatusRow(
 
 #[component]
 fn DiffViewer(diff: String, on_stage_patch: EventHandler<String>) -> Element {
+    let mut selected_lines = use_signal(HashSet::<String>::new);
     let hunks = diff_hunks(&diff);
     let stage_all_patch = diff.clone();
     rsx! {
@@ -1173,21 +1267,82 @@ fn DiffViewer(diff: String, on_stage_patch: EventHandler<String>) -> Element {
                 if hunks.is_empty() {
                     pre { class: "font-mono text-xs leading-5 text-zinc-300 whitespace-pre-wrap", "{diff}" }
                 } else {
-                    for hunk in hunks {
+                    for hunk in hunks.clone() {
+                        {
+                            let selected_for_hunk = hunk
+                                .lines
+                                .iter()
+                                .filter(|line| selected_lines.read().contains(&line.key))
+                                .map(|line| line.index)
+                                .collect::<HashSet<_>>();
+                            let selected_patch = selected_patch_for_hunk(&hunk, &selected_for_hunk);
+                            rsx! {
                         article { class: "rounded-md border border-zinc-800 bg-zinc-950/80 overflow-hidden",
                             div { class: "flex items-center justify-between gap-2 border-b border-zinc-800 px-2 py-1.5",
                                 code { class: "min-w-0 truncate text-[11px] text-zinc-400", "{hunk.title}" }
-                                button {
-                                    class: "rounded-md border border-cyan-700/60 px-2 py-1 text-[11px] text-cyan-200 hover:bg-cyan-500/10",
-                                    onclick: move |_| on_stage_patch.call(hunk.patch.clone()),
-                                    "Stage hunk"
+                                div { class: "flex shrink-0 gap-1.5",
+                                    button {
+                                        class: "rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40",
+                                        disabled: selected_patch.is_none(),
+                                        onclick: move |_| {
+                                            if let Some(patch) = selected_patch.clone() {
+                                                on_stage_patch.call(patch);
+                                            }
+                                        },
+                                        "Stage selected"
+                                    }
+                                    button {
+                                        class: "rounded-md border border-cyan-700/60 px-2 py-1 text-[11px] text-cyan-200 hover:bg-cyan-500/10",
+                                        onclick: move |_| on_stage_patch.call(hunk.patch.clone()),
+                                        "Stage hunk"
+                                    }
                                 }
                             }
-                            pre { class: "max-h-64 overflow-auto p-2 font-mono text-xs leading-5 text-zinc-300 whitespace-pre-wrap", "{hunk.patch}" }
+                            div { class: "max-h-72 overflow-auto p-2 font-mono text-xs leading-5",
+                                for line in hunk.lines.clone() {
+                                    {
+                                        let selected = selected_lines.read().contains(&line.key);
+                                        rsx! {
+                                    DiffLineRow {
+                                        line,
+                                        selected,
+                                        on_toggle: move |key: String| {
+                                            let mut next = selected_lines.read().clone();
+                                            if !next.insert(key.clone()) {
+                                                next.remove(&key);
+                                            }
+                                            selected_lines.set(next);
+                                        }
+                                    }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                            }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+#[component]
+fn DiffLineRow(line: DiffLine, selected: bool, on_toggle: EventHandler<String>) -> Element {
+    let key = line.key.clone();
+    rsx! {
+        div { class: format!("grid grid-cols-[28px_1fr] gap-2 rounded px-1 {}", line.row_class),
+            if line.selectable {
+                button {
+                    class: if selected { "my-0.5 h-5 rounded border border-cyan-500 bg-cyan-500 text-[10px] text-zinc-950" } else { "my-0.5 h-5 rounded border border-zinc-700 text-[10px] text-zinc-500 hover:border-cyan-500" },
+                    onclick: move |_| on_toggle.call(key.clone()),
+                    if selected { "✓" } else { "+" }
+                }
+            } else {
+                span {}
+            }
+            pre { class: "overflow-visible whitespace-pre-wrap break-words", "{line.text}" }
         }
     }
 }
@@ -1224,6 +1379,7 @@ fn BranchPanel(
     on_merge: EventHandler<String>,
     on_delete: EventHandler<String>,
 ) -> Element {
+    let mut open_menu = use_signal(|| None::<String>);
     rsx! {
         article { class: "min-h-[240px] rounded-lg border border-zinc-800 bg-zinc-900/55 flex flex-col overflow-hidden",
             header { class: "shrink-0 border-b border-zinc-800 px-3 py-2 space-y-2",
@@ -1244,7 +1400,15 @@ fn BranchPanel(
             }
             ul { class: "min-h-0 flex-1 overflow-y-auto p-3 space-y-1",
                 for branch in branches {
-                    BranchRow { branch, on_checkout, on_merge, on_delete }
+                    BranchRow {
+                        menu_open: open_menu.read().as_ref() == Some(&branch.name),
+                        branch,
+                        on_open_menu: move |name: String| open_menu.set(Some(name)),
+                        on_close_menu: move |_| open_menu.set(None),
+                        on_checkout,
+                        on_merge,
+                        on_delete
+                    }
                 }
             }
         }
@@ -1253,7 +1417,10 @@ fn BranchPanel(
 
 #[component]
 fn BranchRow(
+    menu_open: bool,
     branch: api::BranchSummary,
+    on_open_menu: EventHandler<String>,
+    on_close_menu: EventHandler<()>,
     on_checkout: EventHandler<String>,
     on_merge: EventHandler<String>,
     on_delete: EventHandler<String>,
@@ -1261,55 +1428,103 @@ fn BranchRow(
     let checkout_name = branch.name.clone();
     let merge_name = branch.name.clone();
     let delete_name = branch.name.clone();
+    let menu_name = branch.name.clone();
     rsx! {
-        li { class: "rounded-md border border-zinc-800 bg-zinc-950/35 p-2 text-xs",
+        li {
+            class: "relative rounded-md border border-zinc-800 bg-zinc-950/35 p-2 text-xs",
+            oncontextmenu: move |_| on_open_menu.call(menu_name.clone()),
             div { class: "flex items-center justify-between gap-2",
                 if branch.is_head {
                     strong { class: "truncate text-cyan-300", "{branch.name}" }
                 } else {
                     span { class: "truncate text-zinc-300", "{branch.name}" }
                 }
-                small { class: "shrink-0 text-zinc-600", " {branch.kind}" }
+                div { class: "flex shrink-0 items-center gap-2",
+                    small { class: "text-zinc-600", " {branch.kind}" }
+                    button {
+                        class: "rounded border border-zinc-700 px-1.5 py-0.5 text-[11px] text-zinc-300 hover:bg-zinc-800",
+                        onclick: move |_| on_open_menu.call(branch.name.clone()),
+                        "..."
+                    }
+                }
             }
             div { class: "mt-2 flex flex-wrap gap-1.5",
                 button { class: "rounded border border-zinc-700 px-1.5 py-0.5 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40", disabled: branch.is_head, onclick: move |_| on_checkout.call(checkout_name.clone()), "Checkout" }
                 button { class: "rounded border border-emerald-800/70 px-1.5 py-0.5 text-[11px] text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-40", disabled: branch.is_head, onclick: move |_| on_merge.call(merge_name.clone()), "Merge" }
                 button { class: "rounded border border-red-800/70 px-1.5 py-0.5 text-[11px] text-red-200 hover:bg-red-500/10 disabled:opacity-40", disabled: branch.is_head, onclick: move |_| on_delete.call(delete_name.clone()), "Delete" }
             }
+            if menu_open {
+                BranchContextMenu {
+                    branch: branch.name.clone(),
+                    is_head: branch.is_head,
+                    on_close: on_close_menu,
+                    on_checkout,
+                    on_merge,
+                    on_delete
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn BranchContextMenu(
+    branch: String,
+    is_head: bool,
+    on_close: EventHandler<()>,
+    on_checkout: EventHandler<String>,
+    on_merge: EventHandler<String>,
+    on_delete: EventHandler<String>,
+) -> Element {
+    let checkout_name = branch.clone();
+    let merge_name = branch.clone();
+    let delete_name = branch.clone();
+    rsx! {
+        div { class: "absolute right-2 top-8 z-20 w-40 overflow-hidden rounded-md border border-zinc-700 bg-zinc-950 shadow-xl shadow-black/40",
+            button { class: "block w-full px-3 py-2 text-left text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40", disabled: is_head, onclick: move |_| { on_checkout.call(checkout_name.clone()); on_close.call(()); }, "Checkout" }
+            button { class: "block w-full px-3 py-2 text-left text-xs text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-40", disabled: is_head, onclick: move |_| { on_merge.call(merge_name.clone()); on_close.call(()); }, "Merge into HEAD" }
+            button { class: "block w-full px-3 py-2 text-left text-xs text-red-200 hover:bg-red-500/10 disabled:opacity-40", disabled: is_head, onclick: move |_| { on_delete.call(delete_name.clone()); on_close.call(()); }, "Delete" }
+            button { class: "block w-full border-t border-zinc-800 px-3 py-2 text-left text-xs text-zinc-500 hover:bg-zinc-800", onclick: move |_| on_close.call(()), "Close" }
         }
     }
 }
 
 #[component]
 fn CommitGraph(commits: Vec<api::CommitSummary>) -> Element {
-    let colors = [
-        "bg-cyan-400",
-        "bg-emerald-400",
-        "bg-amber-400",
-        "bg-fuchsia-400",
-        "bg-rose-400",
-    ];
+    let rows = graph_rows(&commits);
     rsx! {
         article { class: "min-h-[240px] rounded-lg border border-zinc-800 bg-zinc-900/55 flex flex-col overflow-hidden",
             h3 { class: "shrink-0 border-b border-zinc-800 px-3 py-2 text-sm font-semibold", "Commit Graph" }
             ol { class: "min-h-0 flex-1 overflow-y-auto p-3 space-y-2",
-                for (index, commit) in commits.into_iter().enumerate() {
-                    li { class: "grid grid-cols-[54px_70px_1fr] gap-2 rounded-md border border-zinc-800 bg-zinc-950/40 p-2 text-xs",
-                        div { class: "relative h-full min-h-10 flex items-center justify-center",
-                            div { class: "absolute left-1/2 top-0 h-full w-px bg-zinc-700" }
-                            if commit.parents.len() > 1 {
-                                div { class: "absolute left-2 right-2 top-1/2 h-px bg-zinc-700" }
-                            }
-                            span { class: format!("relative z-10 h-3 w-3 rounded-full ring-4 ring-zinc-950 {}", colors[index % colors.len()]) }
-                            if commit.parents.len() > 1 {
-                                span { class: "absolute right-1 top-1/2 h-2 w-2 -translate-y-1/2 rounded-full bg-amber-400 ring-2 ring-zinc-950" }
-                            }
-                        }
-                        code { class: "self-center text-cyan-300", "{short_id(&commit.id)}" }
+                for row in rows {
+                    li { class: "grid grid-cols-[120px_70px_1fr] gap-2 rounded-md border border-zinc-800 bg-zinc-950/40 p-2 text-xs",
+                        GraphLaneStrip { row: row.clone() }
+                        code { class: "self-center text-cyan-300", "{short_id(&row.commit.id)}" }
                         div { class: "min-w-0",
-                            span { class: "block truncate text-zinc-200", "{commit.summary}" }
-                            small { class: "text-zinc-600", "{commit.author} - {commit.parents.len()} parent(s)" }
+                            span { class: "block truncate text-zinc-200", "{row.commit.summary}" }
+                            small { class: "text-zinc-600", "{row.commit.author} - lane {row.lane + 1} - {row.commit.parents.len()} parent(s)" }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn GraphLaneStrip(row: GraphRow) -> Element {
+    rsx! {
+        div { class: "relative grid h-full min-h-10 grid-flow-col auto-cols-[16px] items-stretch justify-start",
+            for lane in 0..row.lane_count {
+                div { class: "relative h-full w-4",
+                    if row.active_lanes.contains(&lane) {
+                        div { class: format!("absolute left-1/2 top-0 h-full w-px -translate-x-1/2 {}", lane_color(lane, false)) }
+                    }
+                    if row.merge_lanes.contains(&lane) {
+                        div { class: "absolute left-1/2 top-1/2 h-px w-4 bg-zinc-600" }
+                    }
+                    if lane == row.lane {
+                        span { class: format!("absolute left-1/2 top-1/2 z-10 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full ring-4 ring-zinc-950 {}", lane_color(lane, true)) }
                     }
                 }
             }
@@ -1330,6 +1545,8 @@ fn HistoryToolsPanel(
     on_rebase_base: EventHandler<String>,
     on_load_rebase: EventHandler<()>,
     on_rebase_action: EventHandler<(String, String)>,
+    on_rebase_move: EventHandler<(String, i32)>,
+    on_rebase_drop: EventHandler<(String, String)>,
     on_create_stash: EventHandler<()>,
     on_apply_stash: EventHandler<usize>,
     on_pop_stash: EventHandler<usize>,
@@ -1338,6 +1555,7 @@ fn HistoryToolsPanel(
     on_cherry_abort: EventHandler<()>,
     on_run_rebase: EventHandler<()>,
 ) -> Element {
+    let mut dragging_commit = use_signal(|| None::<String>);
     rsx! {
         article { class: "min-h-[360px] rounded-lg border border-zinc-800 bg-zinc-900/55 flex flex-col overflow-hidden md:col-span-2 xl:col-span-1",
             h3 { class: "shrink-0 border-b border-zinc-800 px-3 py-2 text-sm font-semibold", "Stash / Cherry-pick / Rebase" }
@@ -1391,7 +1609,19 @@ fn HistoryToolsPanel(
                     }
                     div { class: "space-y-1",
                         for step in rebase_steps.clone() {
-                            RebaseStepRow { step, on_rebase_action }
+                            RebaseStepRow {
+                                step,
+                                dragging: dragging_commit.read().clone(),
+                                on_drag_start: move |commit: String| dragging_commit.set(Some(commit)),
+                                on_drop_commit: move |target: String| {
+                                    if let Some(dragged) = dragging_commit.read().clone() {
+                                        on_rebase_drop.call((dragged, target));
+                                    }
+                                    dragging_commit.set(None);
+                                },
+                                on_rebase_action,
+                                on_rebase_move
+                            }
                         }
                     }
                     if !commits.is_empty() && rebase_steps.is_empty() {
@@ -1407,11 +1637,35 @@ fn HistoryToolsPanel(
 #[component]
 fn RebaseStepRow(
     step: api::RebaseStepRequest,
+    dragging: Option<String>,
+    on_drag_start: EventHandler<String>,
+    on_drop_commit: EventHandler<String>,
     on_rebase_action: EventHandler<(String, String)>,
+    on_rebase_move: EventHandler<(String, i32)>,
 ) -> Element {
+    let commit_for_drag = step.commit.clone();
+    let commit_for_drop = step.commit.clone();
+    let move_up_commit = step.commit.clone();
+    let move_down_commit = step.commit.clone();
+    let is_drop_target = dragging
+        .as_ref()
+        .map(|commit| commit != &step.commit)
+        .unwrap_or(false);
     rsx! {
-        div { class: "grid grid-cols-[70px_1fr] gap-2 rounded-md border border-zinc-800 bg-zinc-950/40 p-2 text-xs",
+        div {
+            class: if is_drop_target { "grid grid-cols-[86px_1fr] gap-2 rounded-md border border-cyan-500/50 bg-cyan-500/10 p-2 text-xs" } else { "grid grid-cols-[86px_1fr] gap-2 rounded-md border border-zinc-800 bg-zinc-950/40 p-2 text-xs" },
+            draggable: "true",
+            "data-commit": "{step.commit}",
+            ondragstart: move |_| on_drag_start.call(commit_for_drag.clone()),
+            ondragover: move |_| {},
+            ondrop: move |_| on_drop_commit.call(commit_for_drop.clone()),
+            div { class: "flex items-center gap-1",
+                div { class: "flex flex-col gap-1",
+                    button { class: "h-4 rounded border border-zinc-700 px-1 text-[10px] text-zinc-400 hover:bg-zinc-800", onclick: move |_| on_rebase_move.call((move_up_commit.clone(), -1)), "↑" }
+                    button { class: "h-4 rounded border border-zinc-700 px-1 text-[10px] text-zinc-400 hover:bg-zinc-800", onclick: move |_| on_rebase_move.call((move_down_commit.clone(), 1)), "↓" }
+                }
             code { class: "text-cyan-300", "{short_id(&step.commit)}" }
+            }
             div { class: "flex flex-wrap gap-1.5",
                 for action in ["pick", "squash", "fixup", "drop", "edit"] {
                     button {
@@ -1432,7 +1686,10 @@ fn RebaseStepRow(
 fn ConflictEditorPanel(
     conflicts: Vec<api::ConflictSummary>,
     detail: api::ConflictDetail,
+    manual_content: String,
     on_select: EventHandler<String>,
+    on_manual_change: EventHandler<String>,
+    on_save_manual: EventHandler<()>,
     on_accept: EventHandler<(String, String)>,
 ) -> Element {
     let selected_path = detail.path.clone();
@@ -1472,6 +1729,21 @@ fn ConflictEditorPanel(
                             ConflictPane { title: "BASE".to_string(), path: detail.ancestor_path.clone().unwrap_or_default(), content: detail.ancestor_content.clone() }
                             ConflictPane { title: "REMOTE".to_string(), path: detail.theirs_path.clone().unwrap_or_default(), content: detail.theirs_content.clone() }
                         }
+                        section { class: "rounded-md border border-cyan-900/70 bg-cyan-950/20 flex flex-col overflow-hidden",
+                            div { class: "flex items-center justify-between gap-2 border-b border-cyan-900/60 px-2 py-1.5",
+                                h4 { class: "text-xs font-semibold text-cyan-200", "MANUAL MERGE" }
+                                button {
+                                    class: "rounded-md bg-cyan-500 px-2 py-1 text-xs font-medium text-zinc-950 hover:bg-cyan-400",
+                                    onclick: move |_| on_save_manual.call(()),
+                                    "Save + Mark Resolved"
+                                }
+                            }
+                            textarea {
+                                class: "min-h-[220px] resize-y bg-zinc-950/70 p-2 font-mono text-xs leading-5 text-zinc-100 outline-none",
+                                value: "{manual_content}",
+                                oninput: move |event| on_manual_change.call(event.value())
+                            }
+                        }
                     }
                 }
             }
@@ -1496,10 +1768,125 @@ fn ConflictPane(title: String, path: String, content: String) -> Element {
     }
 }
 
+#[derive(Clone, PartialEq)]
+struct GraphRow {
+    commit: api::CommitSummary,
+    lane: usize,
+    lane_count: usize,
+    active_lanes: HashSet<usize>,
+    merge_lanes: HashSet<usize>,
+}
+
+fn graph_rows(commits: &[api::CommitSummary]) -> Vec<GraphRow> {
+    let mut lanes = Vec::<Option<String>>::new();
+    let mut rows = Vec::new();
+
+    for commit in commits {
+        let lane = lanes
+            .iter()
+            .position(|id| id.as_ref() == Some(&commit.id))
+            .unwrap_or_else(|| {
+                let next = lanes
+                    .iter()
+                    .position(Option::is_none)
+                    .unwrap_or(lanes.len());
+                if next == lanes.len() {
+                    lanes.push(None);
+                }
+                next
+            });
+
+        let active_lanes = lanes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, id)| id.as_ref().map(|_| index))
+            .chain(std::iter::once(lane))
+            .collect::<HashSet<_>>();
+        let merge_lanes = if commit.parents.len() > 1 {
+            (lane..(lane + commit.parents.len()).min(lanes.len().max(lane + 1))).collect()
+        } else {
+            HashSet::new()
+        };
+
+        rows.push(GraphRow {
+            commit: commit.clone(),
+            lane,
+            lane_count: lanes.len().max(lane + commit.parents.len()).max(1),
+            active_lanes,
+            merge_lanes,
+        });
+
+        if let Some(first_parent) = commit.parents.first() {
+            lanes[lane] = Some(first_parent.clone());
+        } else {
+            lanes[lane] = None;
+        }
+
+        for parent in commit.parents.iter().skip(1) {
+            let target = lanes
+                .iter()
+                .position(Option::is_none)
+                .unwrap_or(lanes.len());
+            if target == lanes.len() {
+                lanes.push(Some(parent.clone()));
+            } else {
+                lanes[target] = Some(parent.clone());
+            }
+        }
+
+        while lanes.last().is_some_and(Option::is_none) {
+            lanes.pop();
+        }
+        if lanes.is_empty() {
+            lanes.push(None);
+        }
+    }
+
+    rows
+}
+
+fn lane_color(lane: usize, dot: bool) -> &'static str {
+    let colors = if dot {
+        [
+            "bg-cyan-400",
+            "bg-emerald-400",
+            "bg-amber-400",
+            "bg-fuchsia-400",
+            "bg-rose-400",
+            "bg-blue-400",
+            "bg-lime-400",
+        ]
+    } else {
+        [
+            "bg-cyan-700",
+            "bg-emerald-700",
+            "bg-amber-700",
+            "bg-fuchsia-700",
+            "bg-rose-700",
+            "bg-blue-700",
+            "bg-lime-700",
+        ]
+    };
+    colors[lane % colors.len()]
+}
+
 #[derive(Clone)]
 struct DiffHunk {
     title: String,
+    header: Vec<String>,
+    old_start: usize,
+    new_start: usize,
+    lines: Vec<DiffLine>,
     patch: String,
+}
+
+#[derive(Clone, PartialEq)]
+struct DiffLine {
+    key: String,
+    index: usize,
+    text: String,
+    selectable: bool,
+    row_class: &'static str,
 }
 
 fn diff_is_patch(diff: &str) -> bool {
@@ -1513,15 +1900,23 @@ fn diff_hunks(diff: &str) -> Vec<DiffHunk> {
     let mut file_header = Vec::<String>::new();
     let mut current = Vec::<String>::new();
     let mut title = String::new();
+    let mut old_start = 0usize;
+    let mut new_start = 0usize;
     let mut hunks = Vec::new();
+    let mut hunk_index = 0usize;
 
     for line in diff.lines() {
         if line.starts_with("diff --git ") {
             if !current.is_empty() {
                 hunks.push(DiffHunk {
                     title: title.clone(),
+                    header: file_header.clone(),
+                    old_start,
+                    new_start,
+                    lines: diff_lines(hunk_index, &current),
                     patch: build_patch(&file_header, &current),
                 });
+                hunk_index += 1;
                 current.clear();
             }
             file_header.clear();
@@ -1531,11 +1926,20 @@ fn diff_hunks(diff: &str) -> Vec<DiffHunk> {
             if !current.is_empty() {
                 hunks.push(DiffHunk {
                     title: title.clone(),
+                    header: file_header.clone(),
+                    old_start,
+                    new_start,
+                    lines: diff_lines(hunk_index, &current),
                     patch: build_patch(&file_header, &current),
                 });
+                hunk_index += 1;
                 current.clear();
             }
             title = line.to_string();
+            if let Some((old, new)) = parse_hunk_starts(line) {
+                old_start = old;
+                new_start = new;
+            }
             current.push(line.to_string());
         } else if current.is_empty() {
             file_header.push(line.to_string());
@@ -1547,10 +1951,99 @@ fn diff_hunks(diff: &str) -> Vec<DiffHunk> {
     if !current.is_empty() {
         hunks.push(DiffHunk {
             title,
+            header: file_header.clone(),
+            old_start,
+            new_start,
+            lines: diff_lines(hunk_index, &current),
             patch: build_patch(&file_header, &current),
         });
     }
     hunks
+}
+
+fn diff_lines(hunk_index: usize, lines: &[String]) -> Vec<DiffLine> {
+    lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let selectable = index > 0
+                && (line.starts_with('+') || line.starts_with('-'))
+                && !line.starts_with("+++ ")
+                && !line.starts_with("--- ");
+            let row_class = if line.starts_with('+') && !line.starts_with("+++ ") {
+                "bg-emerald-500/10 text-emerald-200"
+            } else if line.starts_with('-') && !line.starts_with("--- ") {
+                "bg-red-500/10 text-red-200"
+            } else if line.starts_with("@@") {
+                "bg-cyan-500/10 text-cyan-200"
+            } else {
+                "text-zinc-400"
+            };
+            DiffLine {
+                key: format!("{hunk_index}:{index}"),
+                index,
+                text: line.clone(),
+                selectable,
+                row_class,
+            }
+        })
+        .collect()
+}
+
+fn parse_hunk_starts(header: &str) -> Option<(usize, usize)> {
+    let mut parts = header.split_whitespace();
+    parts.next()?;
+    let old_part = parts.next()?.trim_start_matches('-');
+    let new_part = parts.next()?.trim_start_matches('+');
+    Some((parse_range_start(old_part)?, parse_range_start(new_part)?))
+}
+
+fn parse_range_start(value: &str) -> Option<usize> {
+    value.split(',').next()?.parse().ok()
+}
+
+fn selected_patch_for_hunk(hunk: &DiffHunk, selected: &HashSet<usize>) -> Option<String> {
+    if selected.is_empty() {
+        return None;
+    }
+
+    let mut body = Vec::<String>::new();
+    let mut old_count = 0usize;
+    let mut new_count = 0usize;
+    for line in hunk.lines.iter().skip(1) {
+        let is_context = line.text.starts_with(' ') || line.text.starts_with('\\');
+        let is_selected = selected.contains(&line.index);
+        if is_context || is_selected {
+            if line.text.starts_with('+') && !line.text.starts_with("+++ ") {
+                new_count += 1;
+            } else if line.text.starts_with('-') && !line.text.starts_with("--- ") {
+                old_count += 1;
+            } else if line.text.starts_with(' ') {
+                old_count += 1;
+                new_count += 1;
+            }
+            body.push(line.text.clone());
+        }
+    }
+
+    if body
+        .iter()
+        .all(|line| line.starts_with(' ') || line.starts_with('\\'))
+    {
+        return None;
+    }
+
+    let mut patch = hunk.header.join("\n");
+    if !patch.is_empty() {
+        patch.push('\n');
+    }
+    patch.push_str(&format!(
+        "@@ -{},{} +{},{} @@\n",
+        hunk.old_start, old_count, hunk.new_start, new_count
+    ));
+    patch.push_str(&body.join("\n"));
+    patch.push('\n');
+    Some(patch)
 }
 
 fn build_patch(header: &[String], hunk: &[String]) -> String {
