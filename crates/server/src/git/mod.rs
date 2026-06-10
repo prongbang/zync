@@ -31,6 +31,15 @@ pub fn routes() -> Router<Arc<AppState>> {
             get(remotes).post(add_remote),
         )
         .route("/repositories/:id/git/remotes/delete", post(delete_remote))
+        .route("/repositories/:id/git/remotes/prune", post(prune_remote))
+        .route(
+            "/repositories/:id/git/remotes/branch/delete",
+            post(delete_remote_branch),
+        )
+        .route(
+            "/repositories/:id/git/push/force-with-lease",
+            post(push_force_with_lease),
+        )
         .route(
             "/repositories/:id/git/branches",
             get(branches).post(create_branch),
@@ -43,6 +52,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/repositories/:id/git/branches/rename", post(rename_branch))
         .route("/repositories/:id/git/branches/merge", post(merge_branch))
         .route("/repositories/:id/git/branches/delete", post(delete_branch))
+        .route(
+            "/repositories/:id/git/branches/upstream",
+            post(set_upstream),
+        )
         .route("/repositories/:id/git/tags", get(tags).post(create_tag))
         .route("/repositories/:id/git/tags/delete", post(delete_tag))
         .route("/repositories/:id/git/revert", post(revert_commit))
@@ -54,12 +67,35 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/repositories/:id/git/reflog", get(reflog))
         .route("/repositories/:id/git/reset", post(reset_to_revision))
         .route("/repositories/:id/git/submodules", get(submodules))
+        .route(
+            "/repositories/:id/git/submodules/init",
+            post(submodule_init),
+        )
+        .route(
+            "/repositories/:id/git/submodules/update",
+            post(submodule_update),
+        )
+        .route(
+            "/repositories/:id/git/submodules/sync",
+            post(submodule_sync),
+        )
         .route("/repositories/:id/git/lfs", get(lfs_summary))
+        .route("/repositories/:id/git/lfs/install", post(lfs_install))
+        .route("/repositories/:id/git/lfs/track", post(lfs_track))
+        .route("/repositories/:id/git/lfs/untrack", post(lfs_untrack))
+        .route("/repositories/:id/git/lfs/pull", post(lfs_pull))
+        .route("/repositories/:id/git/lfs/push", post(lfs_push))
         .route("/repositories/:id/git/rebase/plan", get(rebase_plan))
         .route(
             "/repositories/:id/git/rebase/interactive",
             post(interactive_rebase),
         )
+        .route(
+            "/repositories/:id/git/rebase/continue",
+            post(rebase_continue),
+        )
+        .route("/repositories/:id/git/rebase/abort", post(rebase_abort))
+        .route("/repositories/:id/git/rebase/skip", post(rebase_skip))
         .route("/repositories/:id/git/cherry-pick", post(cherry_pick))
         .route(
             "/repositories/:id/git/cherry-pick/abort",
@@ -106,6 +142,13 @@ struct RemoteRequest {
     remote: Option<String>,
     branch: Option<String>,
     url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LfsRequest {
+    pattern: Option<String>,
+    remote: Option<String>,
+    branch: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -352,6 +395,45 @@ async fn delete_remote(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn prune_remote(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<RemoteRequest>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let name = request.remote.as_deref().unwrap_or("origin");
+    zync_git_core::prune_remote(repository.path, name).map_err(internal_error)
+}
+
+async fn delete_remote_branch(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<RemoteRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let remote = request.remote.as_deref().unwrap_or("origin");
+    let branch = request
+        .branch
+        .as_deref()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "branch is required".to_string()))?;
+    zync_git_core::delete_remote_branch(repository.path, remote, branch).map_err(internal_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn push_force_with_lease(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<RemoteRequest>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let remote = request.remote.as_deref().unwrap_or("origin");
+    let branch = request
+        .branch
+        .as_deref()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "branch is required".to_string()))?;
+    zync_git_core::push_force_with_lease(repository.path, remote, branch).map_err(internal_error)
+}
+
 async fn branches(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -439,6 +521,20 @@ async fn merge_branch(
     let repository = repository(&state, &id)?;
     zync_git_core::merge_branch(repository.path, &request.name).map_err(internal_error)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn set_upstream(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<RemoteRequest>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let remote = request.remote.as_deref().unwrap_or("origin");
+    let branch = request
+        .branch
+        .as_deref()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "branch is required".to_string()))?;
+    zync_git_core::set_upstream(repository.path, branch, remote, branch).map_err(internal_error)
 }
 
 async fn tags(
@@ -620,6 +716,30 @@ async fn submodules(
         .map_err(internal_error)
 }
 
+async fn submodule_init(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    zync_git_core::submodule_init(repository.path).map_err(internal_error)
+}
+
+async fn submodule_update(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    zync_git_core::submodule_update(repository.path).map_err(internal_error)
+}
+
+async fn submodule_sync(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    zync_git_core::submodule_sync(repository.path).map_err(internal_error)
+}
+
 async fn lfs_summary(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -628,6 +748,62 @@ async fn lfs_summary(
     zync_git_core::lfs_summary(repository.path)
         .map(Json)
         .map_err(internal_error)
+}
+
+async fn lfs_install(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    zync_git_core::lfs_install(repository.path).map_err(internal_error)
+}
+
+async fn lfs_track(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<LfsRequest>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let pattern = request
+        .pattern
+        .as_deref()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "pattern is required".to_string()))?;
+    zync_git_core::lfs_track(repository.path, pattern).map_err(internal_error)
+}
+
+async fn lfs_untrack(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<LfsRequest>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let pattern = request
+        .pattern
+        .as_deref()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "pattern is required".to_string()))?;
+    zync_git_core::lfs_untrack(repository.path, pattern).map_err(internal_error)
+}
+
+async fn lfs_pull(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    zync_git_core::lfs_pull(repository.path).map_err(internal_error)
+}
+
+async fn lfs_push(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<LfsRequest>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let remote = request.remote.as_deref().unwrap_or("origin");
+    let branch = request
+        .branch
+        .as_deref()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "branch is required".to_string()))?;
+    zync_git_core::lfs_push(repository.path, remote, branch).map_err(internal_error)
 }
 
 async fn interactive_rebase(
@@ -647,6 +823,30 @@ async fn interactive_rebase(
     zync_git_core::interactive_rebase(repository.path, &request.base, &steps)
         .map(Json)
         .map_err(internal_error)
+}
+
+async fn rebase_continue(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    zync_git_core::rebase_continue(repository.path).map_err(internal_error)
+}
+
+async fn rebase_abort(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    zync_git_core::rebase_abort(repository.path).map_err(internal_error)
+}
+
+async fn rebase_skip(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    zync_git_core::rebase_skip(repository.path).map_err(internal_error)
 }
 
 async fn stashes(

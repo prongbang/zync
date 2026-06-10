@@ -941,6 +941,21 @@ enum ToolAction {
     Remotes,
     AddRemote,
     DeleteRemote,
+    PruneRemote,
+    DeleteRemoteBranch,
+    SetUpstream,
+    PushForceWithLease,
+    SubmoduleInit,
+    SubmoduleUpdate,
+    SubmoduleSync,
+    LfsInstall,
+    LfsTrack,
+    LfsUntrack,
+    LfsPull,
+    LfsPush,
+    RebaseContinue,
+    RebaseAbort,
+    RebaseSkip,
     GitFlowDevelop,
     GitFlowFeature,
     GitFlowRelease,
@@ -1438,6 +1453,61 @@ fn run_repository_tool(
                         .map(|_| format!("Deleted remote {remote_name}"))
                 }
             }
+            ToolAction::PruneRemote => api.prune_remote(&repository_id, &remote_name).await,
+            ToolAction::DeleteRemoteBranch => {
+                if flow_name.is_empty() {
+                    Err("Branch name is required".to_string())
+                } else {
+                    api.delete_remote_branch(&repository_id, &remote_name, &flow_name)
+                        .await
+                        .map(|_| format!("Deleted {remote_name}/{flow_name}"))
+                }
+            }
+            ToolAction::SetUpstream => {
+                if flow_name.is_empty() {
+                    Err("Branch name is required".to_string())
+                } else {
+                    api.set_upstream(&repository_id, &remote_name, &flow_name)
+                        .await
+                }
+            }
+            ToolAction::PushForceWithLease => {
+                if flow_name.is_empty() {
+                    Err("Branch name is required".to_string())
+                } else {
+                    api.push_force_with_lease(&repository_id, &remote_name, &flow_name)
+                        .await
+                }
+            }
+            ToolAction::SubmoduleInit => api.submodule_init(&repository_id).await,
+            ToolAction::SubmoduleUpdate => api.submodule_update(&repository_id).await,
+            ToolAction::SubmoduleSync => api.submodule_sync(&repository_id).await,
+            ToolAction::LfsInstall => api.lfs_install(&repository_id).await,
+            ToolAction::LfsTrack => {
+                if flow_name.is_empty() {
+                    Err("LFS pattern is required".to_string())
+                } else {
+                    api.lfs_track(&repository_id, &flow_name).await
+                }
+            }
+            ToolAction::LfsUntrack => {
+                if flow_name.is_empty() {
+                    Err("LFS pattern is required".to_string())
+                } else {
+                    api.lfs_untrack(&repository_id, &flow_name).await
+                }
+            }
+            ToolAction::LfsPull => api.lfs_pull(&repository_id).await,
+            ToolAction::LfsPush => {
+                if flow_name.is_empty() {
+                    Err("Branch name is required".to_string())
+                } else {
+                    api.lfs_push(&repository_id, &remote_name, &flow_name).await
+                }
+            }
+            ToolAction::RebaseContinue => api.rebase_continue(&repository_id).await,
+            ToolAction::RebaseAbort => api.rebase_abort(&repository_id).await,
+            ToolAction::RebaseSkip => api.rebase_skip(&repository_id).await,
             ToolAction::GitFlowDevelop => api
                 .create_branch(&repository_id, "develop", true)
                 .await
@@ -2661,14 +2731,29 @@ fn RepositoryToolsPanel(
                             input { class: "rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-cyan-500", value: "{remote_name}", placeholder: "remote", oninput: move |event| on_remote_name.call(event.value()) }
                             input { class: "rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-cyan-500 sm:col-span-2", value: "{remote_url}", placeholder: "remote url", oninput: move |event| on_remote_url.call(event.value()) }
                         }
-                        input { class: "w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-cyan-500", value: "{flow_name}", placeholder: "git-flow name", oninput: move |event| on_flow_name.call(event.value()) }
+                        input { class: "w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-cyan-500", value: "{flow_name}", placeholder: "branch name / LFS pattern / git-flow name", oninput: move |event| on_flow_name.call(event.value()) }
                         div { class: "flex flex-wrap gap-2",
                             ToolButton { label: "List Remotes".to_string(), action: ToolAction::Remotes, on_action }
                             ToolButton { label: "Add Remote".to_string(), action: ToolAction::AddRemote, on_action }
                             ToolButton { label: "Delete Remote".to_string(), action: ToolAction::DeleteRemote, on_action }
+                            ToolButton { label: "Prune Remote".to_string(), action: ToolAction::PruneRemote, on_action }
+                            ToolButton { label: "Set Upstream".to_string(), action: ToolAction::SetUpstream, on_action }
+                            ToolButton { label: "Delete Remote Branch".to_string(), action: ToolAction::DeleteRemoteBranch, on_action }
+                            ToolButton { label: "Force Lease Push".to_string(), action: ToolAction::PushForceWithLease, on_action }
                             ToolButton { label: "GitHub Links".to_string(), action: ToolAction::GithubLinks, on_action }
                             ToolButton { label: "Submodules".to_string(), action: ToolAction::Submodules, on_action }
+                            ToolButton { label: "Submodule Init".to_string(), action: ToolAction::SubmoduleInit, on_action }
+                            ToolButton { label: "Submodule Update".to_string(), action: ToolAction::SubmoduleUpdate, on_action }
+                            ToolButton { label: "Submodule Sync".to_string(), action: ToolAction::SubmoduleSync, on_action }
                             ToolButton { label: "LFS".to_string(), action: ToolAction::Lfs, on_action }
+                            ToolButton { label: "LFS Install".to_string(), action: ToolAction::LfsInstall, on_action }
+                            ToolButton { label: "LFS Track".to_string(), action: ToolAction::LfsTrack, on_action }
+                            ToolButton { label: "LFS Untrack".to_string(), action: ToolAction::LfsUntrack, on_action }
+                            ToolButton { label: "LFS Pull".to_string(), action: ToolAction::LfsPull, on_action }
+                            ToolButton { label: "LFS Push".to_string(), action: ToolAction::LfsPush, on_action }
+                            ToolButton { label: "Rebase Continue".to_string(), action: ToolAction::RebaseContinue, on_action }
+                            ToolButton { label: "Rebase Abort".to_string(), action: ToolAction::RebaseAbort, on_action }
+                            ToolButton { label: "Rebase Skip".to_string(), action: ToolAction::RebaseSkip, on_action }
                             ToolButton { label: "Develop".to_string(), action: ToolAction::GitFlowDevelop, on_action }
                             ToolButton { label: "Feature".to_string(), action: ToolAction::GitFlowFeature, on_action }
                             ToolButton { label: "Release".to_string(), action: ToolAction::GitFlowRelease, on_action }

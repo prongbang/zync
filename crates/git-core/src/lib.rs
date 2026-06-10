@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,6 +247,48 @@ pub fn delete_remote(path: impl AsRef<Path>, name: &str) -> anyhow::Result<()> {
     let repo = Repository::open(path.as_ref())?;
     repo.remote_delete(name)?;
     Ok(())
+}
+
+pub fn prune_remote(path: impl AsRef<Path>, remote_name: &str) -> anyhow::Result<String> {
+    run_git(path.as_ref(), &["remote", "prune", remote_name])
+}
+
+pub fn delete_remote_branch(
+    path: impl AsRef<Path>,
+    remote_name: &str,
+    branch: &str,
+) -> anyhow::Result<()> {
+    let repo = Repository::open(path.as_ref())?;
+    let mut remote = repo.find_remote(remote_name)?;
+    let refspec = format!(":refs/heads/{branch}");
+    let mut options = PushOptions::new();
+    options.remote_callbacks(callbacks());
+    remote.push(&[refspec], Some(&mut options))?;
+    Ok(())
+}
+
+pub fn set_upstream(
+    path: impl AsRef<Path>,
+    branch: &str,
+    remote_name: &str,
+    remote_branch: &str,
+) -> anyhow::Result<String> {
+    let upstream = format!("{remote_name}/{remote_branch}");
+    run_git(
+        path.as_ref(),
+        &["branch", "--set-upstream-to", &upstream, branch],
+    )
+}
+
+pub fn push_force_with_lease(
+    path: impl AsRef<Path>,
+    remote_name: &str,
+    branch: &str,
+) -> anyhow::Result<String> {
+    run_git(
+        path.as_ref(),
+        &["push", "--force-with-lease", remote_name, branch],
+    )
 }
 
 pub fn status(path: impl AsRef<Path>) -> anyhow::Result<Vec<FileStatus>> {
@@ -762,6 +805,18 @@ pub fn submodules(path: impl AsRef<Path>) -> anyhow::Result<Vec<SubmoduleSummary
     Ok(modules)
 }
 
+pub fn submodule_init(path: impl AsRef<Path>) -> anyhow::Result<String> {
+    run_git(path.as_ref(), &["submodule", "init"])
+}
+
+pub fn submodule_update(path: impl AsRef<Path>) -> anyhow::Result<String> {
+    run_git(path.as_ref(), &["submodule", "update", "--recursive"])
+}
+
+pub fn submodule_sync(path: impl AsRef<Path>) -> anyhow::Result<String> {
+    run_git(path.as_ref(), &["submodule", "sync", "--recursive"])
+}
+
 pub fn lfs_summary(path: impl AsRef<Path>) -> anyhow::Result<LfsSummary> {
     let repo = Repository::open(path.as_ref())?;
     let root = repo
@@ -779,6 +834,26 @@ pub fn lfs_summary(path: impl AsRef<Path>) -> anyhow::Result<LfsSummary> {
         configured: !tracked_patterns.is_empty(),
         tracked_patterns,
     })
+}
+
+pub fn lfs_install(path: impl AsRef<Path>) -> anyhow::Result<String> {
+    run_git(path.as_ref(), &["lfs", "install", "--local"])
+}
+
+pub fn lfs_track(path: impl AsRef<Path>, pattern: &str) -> anyhow::Result<String> {
+    run_git(path.as_ref(), &["lfs", "track", pattern])
+}
+
+pub fn lfs_untrack(path: impl AsRef<Path>, pattern: &str) -> anyhow::Result<String> {
+    run_git(path.as_ref(), &["lfs", "untrack", pattern])
+}
+
+pub fn lfs_pull(path: impl AsRef<Path>) -> anyhow::Result<String> {
+    run_git(path.as_ref(), &["lfs", "pull"])
+}
+
+pub fn lfs_push(path: impl AsRef<Path>, remote_name: &str, branch: &str) -> anyhow::Result<String> {
+    run_git(path.as_ref(), &["lfs", "push", remote_name, branch])
 }
 
 pub fn cherry_pick(path: impl AsRef<Path>, commit_ids: &[String]) -> anyhow::Result<()> {
@@ -865,6 +940,18 @@ pub fn interactive_rebase(
     }
 
     Ok(result)
+}
+
+pub fn rebase_continue(path: impl AsRef<Path>) -> anyhow::Result<String> {
+    run_git(path.as_ref(), &["rebase", "--continue"])
+}
+
+pub fn rebase_abort(path: impl AsRef<Path>) -> anyhow::Result<String> {
+    run_git(path.as_ref(), &["rebase", "--abort"])
+}
+
+pub fn rebase_skip(path: impl AsRef<Path>) -> anyhow::Result<String> {
+    run_git(path.as_ref(), &["rebase", "--skip"])
 }
 
 pub fn conflicts(path: impl AsRef<Path>) -> anyhow::Result<Vec<ConflictSummary>> {
@@ -1161,6 +1248,26 @@ fn current_branch(repo: &Repository) -> anyhow::Result<Option<String>> {
     } else {
         None
     })
+}
+
+fn run_git(repo_path: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo_path)
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if output.status.success() {
+        if stdout.is_empty() {
+            Ok(stderr)
+        } else {
+            Ok(stdout)
+        }
+    } else {
+        let command = format!("git {}", args.join(" "));
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        anyhow::bail!("{command} failed: {detail}")
+    }
 }
 
 fn callbacks<'a>() -> RemoteCallbacks<'a> {

@@ -222,6 +222,13 @@ pub struct RemoteRequest {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct LfsRequest {
+    pub pattern: Option<String>,
+    pub remote: Option<String>,
+    pub branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct RevisionRequest {
     pub revision: String,
     pub hard: Option<bool>,
@@ -720,6 +727,75 @@ impl ZyncApi {
         .await
     }
 
+    pub async fn prune_remote(&self, repository_id: &str, name: &str) -> Result<String, String> {
+        post_text(
+            &self.url(&format!("/repositories/{repository_id}/git/remotes/prune")),
+            &RemoteRequest {
+                remote: Some(name.to_string()),
+                branch: None,
+                url: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn delete_remote_branch(
+        &self,
+        repository_id: &str,
+        remote: &str,
+        branch: &str,
+    ) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!(
+                "/repositories/{repository_id}/git/remotes/branch/delete"
+            )),
+            &RemoteRequest {
+                remote: Some(remote.to_string()),
+                branch: Some(branch.to_string()),
+                url: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn set_upstream(
+        &self,
+        repository_id: &str,
+        remote: &str,
+        branch: &str,
+    ) -> Result<String, String> {
+        post_text(
+            &self.url(&format!(
+                "/repositories/{repository_id}/git/branches/upstream"
+            )),
+            &RemoteRequest {
+                remote: Some(remote.to_string()),
+                branch: Some(branch.to_string()),
+                url: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn push_force_with_lease(
+        &self,
+        repository_id: &str,
+        remote: &str,
+        branch: &str,
+    ) -> Result<String, String> {
+        post_text(
+            &self.url(&format!(
+                "/repositories/{repository_id}/git/push/force-with-lease"
+            )),
+            &RemoteRequest {
+                remote: Some(remote.to_string()),
+                branch: Some(branch.to_string()),
+                url: None,
+            },
+        )
+        .await
+    }
+
     pub async fn fetch(&self, repository_id: &str) -> Result<(), String> {
         post_empty(
             &self.url(&format!("/repositories/{repository_id}/git/fetch")),
@@ -815,8 +891,95 @@ impl ZyncApi {
         get_json(&self.url(&format!("/repositories/{repository_id}/git/submodules"))).await
     }
 
+    pub async fn submodule_init(&self, repository_id: &str) -> Result<String, String> {
+        post_text(
+            &self.url(&format!(
+                "/repositories/{repository_id}/git/submodules/init"
+            )),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    pub async fn submodule_update(&self, repository_id: &str) -> Result<String, String> {
+        post_text(
+            &self.url(&format!(
+                "/repositories/{repository_id}/git/submodules/update"
+            )),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    pub async fn submodule_sync(&self, repository_id: &str) -> Result<String, String> {
+        post_text(
+            &self.url(&format!(
+                "/repositories/{repository_id}/git/submodules/sync"
+            )),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
     pub async fn lfs_summary(&self, repository_id: &str) -> Result<LfsSummary, String> {
         get_json(&self.url(&format!("/repositories/{repository_id}/git/lfs"))).await
+    }
+
+    pub async fn lfs_install(&self, repository_id: &str) -> Result<String, String> {
+        post_text(
+            &self.url(&format!("/repositories/{repository_id}/git/lfs/install")),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    pub async fn lfs_track(&self, repository_id: &str, pattern: &str) -> Result<String, String> {
+        post_text(
+            &self.url(&format!("/repositories/{repository_id}/git/lfs/track")),
+            &LfsRequest {
+                pattern: Some(pattern.to_string()),
+                remote: None,
+                branch: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn lfs_untrack(&self, repository_id: &str, pattern: &str) -> Result<String, String> {
+        post_text(
+            &self.url(&format!("/repositories/{repository_id}/git/lfs/untrack")),
+            &LfsRequest {
+                pattern: Some(pattern.to_string()),
+                remote: None,
+                branch: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn lfs_pull(&self, repository_id: &str) -> Result<String, String> {
+        post_text(
+            &self.url(&format!("/repositories/{repository_id}/git/lfs/pull")),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    pub async fn lfs_push(
+        &self,
+        repository_id: &str,
+        remote: &str,
+        branch: &str,
+    ) -> Result<String, String> {
+        post_text(
+            &self.url(&format!("/repositories/{repository_id}/git/lfs/push")),
+            &LfsRequest {
+                pattern: None,
+                remote: Some(remote.to_string()),
+                branch: Some(branch.to_string()),
+            },
+        )
+        .await
     }
 
     pub async fn commit(
@@ -861,6 +1024,32 @@ impl ZyncApi {
                 "/repositories/{repository_id}/git/rebase/interactive"
             )),
             request,
+        )
+        .await
+    }
+
+    pub async fn rebase_continue(&self, repository_id: &str) -> Result<String, String> {
+        post_text(
+            &self.url(&format!(
+                "/repositories/{repository_id}/git/rebase/continue"
+            )),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    pub async fn rebase_abort(&self, repository_id: &str) -> Result<String, String> {
+        post_text(
+            &self.url(&format!("/repositories/{repository_id}/git/rebase/abort")),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    pub async fn rebase_skip(&self, repository_id: &str) -> Result<String, String> {
+        post_text(
+            &self.url(&format!("/repositories/{repository_id}/git/rebase/skip")),
+            &serde_json::json!({}),
         )
         .await
     }
@@ -1031,6 +1220,38 @@ async fn post_json<T, R>(_url: &str, _body: &T) -> Result<R, String>
 where
     T: Serialize,
     R: for<'de> Deserialize<'de>,
+{
+    Err("ZyncApi network calls are available in wasm32 browser builds".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn post_text<T>(url: &str, body: &T) -> Result<String, String>
+where
+    T: Serialize,
+{
+    let response = gloo_net::http::Request::post(url)
+        .json(body)
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    let text = response.text().await.map_err(|error| error.to_string())?;
+    if (200..300).contains(&status) {
+        Ok(text)
+    } else {
+        Err(if text.is_empty() {
+            format!("request failed with status {status}")
+        } else {
+            text
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn post_text<T>(_url: &str, _body: &T) -> Result<String, String>
+where
+    T: Serialize,
 {
     Err("ZyncApi network calls are available in wasm32 browser builds".to_string())
 }
