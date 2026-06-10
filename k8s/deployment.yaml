@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zync
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: zync
+  template:
+    metadata:
+      labels:
+        app: zync
+    spec:
+      containers:
+        - name: zync
+          image: zync:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ZYNC_BIND
+              value: 0.0.0.0:58271
+            - name: ZYNC_DB
+              value: /data/zync.db
+          ports:
+            - containerPort: 58271
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+

@@ -1,0 +1,17 @@
+services:
+  zync:
+    build: .
+    environment:
+      ZYNC_BIND: 0.0.0.0:58271
+      ZYNC_DB: /data/zync.db
+    ports:
+      - "58271:58271"
+    volumes:
+      - zync-data:/data
+      - zync-workspaces:/workspaces
+      # Mount host Git projects here, then add /workspaces/<project> in the UI.
+      # - /Users/you/Development/my-git-project:/workspaces/my-git-project
+
+volumes:
+  zync-data:
+  zync-workspaces:

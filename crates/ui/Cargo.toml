@@ -1,0 +1,17 @@
+[package]
+name = "zync-ui"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+dioxus = { version = "0.5", features = ["web"] }
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+urlencoding = "2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo-net = "0.6"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Location", "Window"] }

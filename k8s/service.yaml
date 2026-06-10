@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: zync
+spec:
+  selector:
+    app: zync
+  ports:
+    - name: http
+      port: 58271
+      targetPort: 58271
+
