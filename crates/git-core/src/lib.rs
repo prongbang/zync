@@ -1,7 +1,7 @@
 use git2::{
-    ApplyLocation, BranchType, Cred, DiffFormat, DiffOptions, FetchOptions, IndexAddOption,
-    MergeOptions, Oid, PushOptions, RemoteCallbacks, Repository, ResetType, Signature,
-    StatusOptions, TreeWalkMode, TreeWalkResult,
+    ApplyLocation, BranchType, Cred, DiffFormat, DiffOptions, IndexAddOption, MergeOptions, Oid,
+    PushOptions, RemoteCallbacks, Repository, ResetType, Signature, StatusOptions, TreeWalkMode,
+    TreeWalkResult,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -158,68 +158,41 @@ pub fn clone_repo(url: &str, destination: impl AsRef<Path>) -> anyhow::Result<Re
     repo_info(&repo)
 }
 
-pub fn fetch(path: impl AsRef<Path>, remote_name: Option<&str>) -> anyhow::Result<()> {
-    let repo = Repository::open(path.as_ref())?;
+pub fn fetch(path: impl AsRef<Path>, remote_name: Option<&str>) -> anyhow::Result<String> {
     let remote_name = remote_name.unwrap_or("origin");
-    let mut remote = repo.find_remote(remote_name)?;
-    let mut options = FetchOptions::new();
-    options.remote_callbacks(callbacks());
-    remote.fetch(&[] as &[&str], Some(&mut options), None)?;
-    Ok(())
+    run_git(path.as_ref(), &["fetch", "--prune", remote_name])
 }
 
 pub fn pull(
     path: impl AsRef<Path>,
     remote_name: Option<&str>,
     branch: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     let repo = Repository::open(path.as_ref())?;
     let remote_name = remote_name.unwrap_or("origin");
     let branch_name = branch
         .map(ToOwned::to_owned)
+        .or_else(|| upstream_branch(&repo).ok().flatten())
         .or_else(|| current_branch(&repo).ok().flatten())
         .ok_or_else(|| anyhow::anyhow!("cannot pull without a current branch"))?;
-
-    fetch(path, Some(remote_name))?;
-
-    let fetch_head = format!("refs/remotes/{remote_name}/{branch_name}");
-    let oid = repo.refname_to_id(&fetch_head)?;
-    let annotated = repo.find_annotated_commit(oid)?;
-    let (analysis, _) = repo.merge_analysis(&[&annotated])?;
-
-    if analysis.is_up_to_date() {
-        return Ok(());
-    }
-
-    if !analysis.is_fast_forward() {
-        anyhow::bail!("non-fast-forward pull is not implemented yet");
-    }
-
-    let local_ref = format!("refs/heads/{branch_name}");
-    let mut reference = repo.find_reference(&local_ref)?;
-    reference.set_target(oid, "Fast-forward pull")?;
-    repo.set_head(&local_ref)?;
-    repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
-    Ok(())
+    run_git(
+        path.as_ref(),
+        &["pull", "--ff-only", remote_name, &branch_name],
+    )
 }
 
 pub fn push(
     path: impl AsRef<Path>,
     remote_name: Option<&str>,
     branch: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     let repo = Repository::open(path.as_ref())?;
     let remote_name = remote_name.unwrap_or("origin");
     let branch_name = branch
         .map(ToOwned::to_owned)
         .or_else(|| current_branch(&repo).ok().flatten())
         .ok_or_else(|| anyhow::anyhow!("cannot push without a current branch"))?;
-    let mut remote = repo.find_remote(remote_name)?;
-    let refspec = format!("refs/heads/{branch_name}:refs/heads/{branch_name}");
-    let mut options = PushOptions::new();
-    options.remote_callbacks(callbacks());
-    remote.push(&[refspec], Some(&mut options))?;
-    Ok(())
+    run_git(path.as_ref(), &["push", "-u", remote_name, &branch_name])
 }
 
 pub fn remotes(path: impl AsRef<Path>) -> anyhow::Result<Vec<RemoteSummary>> {
@@ -1248,6 +1221,21 @@ fn current_branch(repo: &Repository) -> anyhow::Result<Option<String>> {
     } else {
         None
     })
+}
+
+fn upstream_branch(repo: &Repository) -> anyhow::Result<Option<String>> {
+    let Some(branch_name) = current_branch(repo)? else {
+        return Ok(None);
+    };
+    let branch = repo.find_branch(&branch_name, BranchType::Local)?;
+    let upstream = match branch.upstream() {
+        Ok(upstream) => upstream,
+        Err(_) => return Ok(None),
+    };
+    Ok(upstream
+        .name()?
+        .and_then(|name| name.rsplit('/').next())
+        .map(ToOwned::to_owned))
 }
 
 fn run_git(repo_path: &Path, args: &[&str]) -> anyhow::Result<String> {

@@ -796,11 +796,15 @@ impl ZyncApi {
         .await
     }
 
-    pub async fn fetch(&self, repository_id: &str) -> Result<(), String> {
-        post_empty(
+    pub async fn fetch(&self, repository_id: &str) -> Result<String, String> {
+        self.fetch_remote(repository_id, "origin").await
+    }
+
+    pub async fn fetch_remote(&self, repository_id: &str, remote: &str) -> Result<String, String> {
+        post_text(
             &self.url(&format!("/repositories/{repository_id}/git/fetch")),
             &RemoteRequest {
-                remote: None,
+                remote: Some(remote.to_string()),
                 branch: None,
                 url: None,
             },
@@ -808,24 +812,42 @@ impl ZyncApi {
         .await
     }
 
-    pub async fn pull(&self, repository_id: &str) -> Result<(), String> {
-        post_empty(
+    pub async fn pull(&self, repository_id: &str) -> Result<String, String> {
+        self.pull_remote(repository_id, "origin", None).await
+    }
+
+    pub async fn pull_remote(
+        &self,
+        repository_id: &str,
+        remote: &str,
+        branch: Option<&str>,
+    ) -> Result<String, String> {
+        post_text(
             &self.url(&format!("/repositories/{repository_id}/git/pull")),
             &RemoteRequest {
-                remote: None,
-                branch: None,
+                remote: Some(remote.to_string()),
+                branch: branch.map(ToOwned::to_owned),
                 url: None,
             },
         )
         .await
     }
 
-    pub async fn push(&self, repository_id: &str) -> Result<(), String> {
-        post_empty(
+    pub async fn push(&self, repository_id: &str) -> Result<String, String> {
+        self.push_remote(repository_id, "origin", None).await
+    }
+
+    pub async fn push_remote(
+        &self,
+        repository_id: &str,
+        remote: &str,
+        branch: Option<&str>,
+    ) -> Result<String, String> {
+        post_text(
             &self.url(&format!("/repositories/{repository_id}/git/push")),
             &RemoteRequest {
-                remote: None,
-                branch: None,
+                remote: Some(remote.to_string()),
+                branch: branch.map(ToOwned::to_owned),
                 url: None,
             },
         )

@@ -546,7 +546,13 @@ pub fn app() -> Element {
                                     Ok(_) => {
                                         if push_after {
                                             match api_client.push(&repository_id).await {
-                                                Ok(()) => notice.set("Committed and pushed".to_string()),
+                                                Ok(output) => {
+                                                    if output.trim().is_empty() {
+                                                        notice.set("Committed and pushed".to_string());
+                                                    } else {
+                                                        notice.set(format!("Committed and pushed: {}", output.trim()));
+                                                    }
+                                                }
                                                 Err(error) => notice.set(format!("Committed, push failed: {error}")),
                                             }
                                         } else {
@@ -1209,8 +1215,13 @@ fn run_remote_action(
             RemoteAction::Push => api.push(&repository_id).await,
         };
         match result {
-            Ok(()) => {
-                notice.set(format!("{label} complete"));
+            Ok(output) => {
+                let detail = if output.trim().is_empty() {
+                    format!("{label} complete")
+                } else {
+                    format!("{label} complete: {}", output.trim())
+                };
+                notice.set(detail);
                 load_workspace(
                     api,
                     repository_id,

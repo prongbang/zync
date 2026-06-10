@@ -323,40 +323,37 @@ async fn fetch(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(request): Json<RemoteRequest>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::fetch(repository.path, request.remote.as_deref()).map_err(internal_error)?;
-    Ok(StatusCode::NO_CONTENT)
+    zync_git_core::fetch(repository.path, request.remote.as_deref()).map_err(internal_error)
 }
 
 async fn pull(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(request): Json<RemoteRequest>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     zync_git_core::pull(
         repository.path,
         request.remote.as_deref(),
         request.branch.as_deref(),
     )
-    .map_err(internal_error)?;
-    Ok(StatusCode::NO_CONTENT)
+    .map_err(internal_error)
 }
 
 async fn push(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(request): Json<RemoteRequest>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     zync_git_core::push(
         repository.path,
         request.remote.as_deref(),
         request.branch.as_deref(),
     )
-    .map_err(internal_error)?;
-    Ok(StatusCode::NO_CONTENT)
+    .map_err(internal_error)
 }
 
 async fn remotes(
