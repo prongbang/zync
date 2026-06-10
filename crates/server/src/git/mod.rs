@@ -207,17 +207,21 @@ async fn commit(
 async fn diff_workdir(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::diff_workdir(repository.path).map_err(internal_error)
+    zync_git_core::diff_workdir_path(repository.path, query.get("path").map(String::as_str))
+        .map_err(internal_error)
 }
 
 async fn diff_staged(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::diff_staged(repository.path).map_err(internal_error)
+    zync_git_core::diff_staged_path(repository.path, query.get("path").map(String::as_str))
+        .map_err(internal_error)
 }
 
 async fn diff_commit(

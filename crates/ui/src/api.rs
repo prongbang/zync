@@ -204,6 +204,30 @@ impl ZyncApi {
         get_text(&self.url(&format!("/repositories/{repository_id}/git/diff/workdir"))).await
     }
 
+    pub async fn diff_workdir_file(
+        &self,
+        repository_id: &str,
+        path: &str,
+    ) -> Result<String, String> {
+        get_text(&self.url(&format!(
+            "/repositories/{repository_id}/git/diff/workdir?path={}",
+            urlencoding::encode(path)
+        )))
+        .await
+    }
+
+    pub async fn diff_staged_file(
+        &self,
+        repository_id: &str,
+        path: &str,
+    ) -> Result<String, String> {
+        get_text(&self.url(&format!(
+            "/repositories/{repository_id}/git/diff/staged?path={}",
+            urlencoding::encode(path)
+        )))
+        .await
+    }
+
     pub async fn read_file(&self, workspace_id: &str, path: &str) -> Result<FileContent, String> {
         get_json(&self.url(&format!(
             "/workspace/{workspace_id}/files/{}",

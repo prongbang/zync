@@ -11,7 +11,7 @@ pub fn app() -> Element {
     let git_status = use_signal(Vec::<api::FileStatus>::new);
     let branches = use_signal(Vec::<api::BranchSummary>::new);
     let commits = use_signal(Vec::<api::CommitSummary>::new);
-    let diff = use_signal(String::new);
+    let mut diff = use_signal(String::new);
     let mut selected_file = use_signal(String::new);
     let mut editor_content = use_signal(String::new);
     let mut repo_path = use_signal(String::new);
@@ -263,12 +263,40 @@ pub fn app() -> Element {
 
                     GitStatusPanel {
                         files: git_status.read().clone(),
+                        on_stage_all: move |paths: Vec<String>| {
+                            run_file_action_from_workspace(
+                                api.read().clone(),
+                                workspace.read().as_ref().cloned(),
+                                paths,
+                                FileAction::Stage,
+                                workspace,
+                                git_status,
+                                branches,
+                                commits,
+                                diff,
+                                notice,
+                            );
+                        },
                         on_stage: move |path: String| {
                             run_file_action_from_workspace(
                                 api.read().clone(),
                                 workspace.read().as_ref().cloned(),
                                 vec![path],
                                 FileAction::Stage,
+                                workspace,
+                                git_status,
+                                branches,
+                                commits,
+                                diff,
+                                notice,
+                            );
+                        },
+                        on_unstage_all: move |paths: Vec<String>| {
+                            run_file_action_from_workspace(
+                                api.read().clone(),
+                                workspace.read().as_ref().cloned(),
+                                paths,
+                                FileAction::Unstage,
                                 workspace,
                                 git_status,
                                 branches,
@@ -304,6 +332,25 @@ pub fn app() -> Element {
                                 diff,
                                 notice,
                             );
+                        },
+                        on_diff: move |path: String| {
+                            let Some(current) = workspace.read().as_ref().cloned() else {
+                                notice.set("Open a repository before viewing diff".to_string());
+                                return;
+                            };
+                            let api_client = api.read().clone();
+                            let repository_id = current.repository.id;
+                            spawn(async move {
+                                let staged = api_client.diff_staged_file(&repository_id, &path).await.unwrap_or_default();
+                                let workdir = api_client.diff_workdir_file(&repository_id, &path).await.unwrap_or_default();
+                                let patch = if staged.is_empty() && workdir.is_empty() {
+                                    format!("No diff for {path}")
+                                } else {
+                                    format!("--- staged: {path} ---\n{staged}\n--- working tree: {path} ---\n{workdir}")
+                                };
+                                diff.set(patch);
+                                notice.set(format!("Showing diff for {path}"));
+                            });
                         }
                     }
 
@@ -594,9 +641,12 @@ fn EditorPanel(
 #[component]
 fn GitStatusPanel(
     files: Vec<api::FileStatus>,
+    on_stage_all: EventHandler<Vec<String>>,
     on_stage: EventHandler<String>,
+    on_unstage_all: EventHandler<Vec<String>>,
     on_unstage: EventHandler<String>,
     on_discard: EventHandler<String>,
+    on_diff: EventHandler<String>,
 ) -> Element {
     let staged = files
         .iter()
@@ -617,15 +667,21 @@ fn GitStatusPanel(
                 title: "Staged".to_string(),
                 files: staged,
                 primary_label: "Unstage".to_string(),
+                bulk_label: "Unstage all".to_string(),
+                on_bulk: on_unstage_all,
                 on_primary: on_unstage,
-                on_discard
+                on_discard,
+                on_diff
             }
             StatusGroup {
                 title: "Unstaged".to_string(),
                 files: unstaged,
                 primary_label: "Stage".to_string(),
+                bulk_label: "Stage all".to_string(),
+                on_bulk: on_stage_all,
                 on_primary: on_stage,
-                on_discard
+                on_discard,
+                on_diff
             }
             }
         }
@@ -637,18 +693,34 @@ fn StatusGroup(
     title: String,
     files: Vec<api::FileStatus>,
     primary_label: String,
+    bulk_label: String,
+    on_bulk: EventHandler<Vec<String>>,
     on_primary: EventHandler<String>,
     on_discard: EventHandler<String>,
+    on_diff: EventHandler<String>,
 ) -> Element {
+    let bulk_paths = files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
     rsx! {
         section { class: "space-y-2",
-            h4 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-500", "{title}" }
+            div { class: "flex items-center justify-between gap-2",
+                h4 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-500", "{title}" }
+                button {
+                    class: "rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40",
+                    disabled: bulk_paths.is_empty(),
+                    onclick: move |_| on_bulk.call(bulk_paths.clone()),
+                    "{bulk_label}"
+                }
+            }
             for file in files {
                 StatusRow {
                     path: file.path,
                     primary_label: primary_label.clone(),
                     on_primary,
-                    on_discard
+                    on_discard,
+                    on_diff
                 }
             }
         }
@@ -661,13 +733,16 @@ fn StatusRow(
     primary_label: String,
     on_primary: EventHandler<String>,
     on_discard: EventHandler<String>,
+    on_diff: EventHandler<String>,
 ) -> Element {
     let primary_path = path.clone();
     let discard_path = path.clone();
+    let diff_path = path.clone();
     rsx! {
         div { class: "rounded-md border border-zinc-800 bg-zinc-950/45 p-2 space-y-2",
             code { class: "block truncate text-xs text-zinc-300", "{path}" }
-            div { class: "flex gap-2",
+            div { class: "flex flex-wrap gap-2",
+                button { class: "rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-200 hover:bg-zinc-800", onclick: move |_| on_diff.call(diff_path.clone()), "Diff" }
                 button { class: "rounded-md border border-cyan-700/60 px-2 py-1 text-[11px] text-cyan-200 hover:bg-cyan-500/10", onclick: move |_| on_primary.call(primary_path.clone()), "{primary_label}" }
                 button { class: "rounded-md border border-red-800/70 px-2 py-1 text-[11px] text-red-200 hover:bg-red-500/10", onclick: move |_| on_discard.call(discard_path.clone()), "Discard" }
             }

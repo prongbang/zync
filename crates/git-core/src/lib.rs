@@ -1,6 +1,7 @@
 use git2::{
-    ApplyLocation, BranchType, Cred, DiffFormat, FetchOptions, IndexAddOption, MergeOptions, Oid,
-    PushOptions, RemoteCallbacks, Repository, ResetType, Signature, StatusOptions,
+    ApplyLocation, BranchType, Cred, DiffFormat, DiffOptions, FetchOptions, IndexAddOption,
+    MergeOptions, Oid, PushOptions, RemoteCallbacks, Repository, ResetType, Signature,
+    StatusOptions,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -394,15 +395,34 @@ pub fn merge_branch(path: impl AsRef<Path>, name: &str) -> anyhow::Result<()> {
 }
 
 pub fn diff_workdir(path: impl AsRef<Path>) -> anyhow::Result<String> {
+    diff_workdir_path(path, None)
+}
+
+pub fn diff_workdir_path(
+    path: impl AsRef<Path>,
+    file_path: Option<&str>,
+) -> anyhow::Result<String> {
     let repo = Repository::open(path.as_ref())?;
-    let diff = repo.diff_index_to_workdir(None, None)?;
+    let mut options = DiffOptions::new();
+    if let Some(file_path) = file_path {
+        options.pathspec(file_path);
+    }
+    let diff = repo.diff_index_to_workdir(None, Some(&mut options))?;
     diff_to_patch(&diff)
 }
 
 pub fn diff_staged(path: impl AsRef<Path>) -> anyhow::Result<String> {
+    diff_staged_path(path, None)
+}
+
+pub fn diff_staged_path(path: impl AsRef<Path>, file_path: Option<&str>) -> anyhow::Result<String> {
     let repo = Repository::open(path.as_ref())?;
     let head_tree = repo.head().ok().and_then(|head| head.peel_to_tree().ok());
-    let diff = repo.diff_tree_to_index(head_tree.as_ref(), None, None)?;
+    let mut options = DiffOptions::new();
+    if let Some(file_path) = file_path {
+        options.pathspec(file_path);
+    }
+    let diff = repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut options))?;
     diff_to_patch(&diff)
 }
 
