@@ -8,7 +8,7 @@ pub fn app() -> Element {
     let api_base = api.read().base_url.clone();
 
     let mut repositories = use_signal(Vec::<api::RepositoryRecord>::new);
-    let workspace = use_signal(|| None::<api::WorkspaceResponse>);
+    let mut workspace = use_signal(|| None::<api::WorkspaceResponse>);
     let git_status = use_signal(Vec::<api::FileStatus>::new);
     let branches = use_signal(Vec::<api::BranchSummary>::new);
     let mut commits = use_signal(Vec::<api::CommitSummary>::new);
@@ -22,6 +22,9 @@ pub fn app() -> Element {
     let mut repo_path = use_signal(String::new);
     let mut repo_name = use_signal(String::new);
     let mut commit_message = use_signal(String::new);
+    let mut commit_amend = use_signal(|| false);
+    let mut commit_sign_off = use_signal(|| false);
+    let mut commit_push_after = use_signal(|| false);
     let mut stash_message = use_signal(|| "WIP from Zync".to_string());
     let mut cherry_pick_input = use_signal(String::new);
     let mut new_branch_name = use_signal(String::new);
@@ -240,7 +243,70 @@ pub fn app() -> Element {
                             } else {
                                 notice.set("Open a workspace first".to_string());
                             }
-                        }
+                        },
+                        on_create: move |(path, is_dir): (String, bool)| {
+                            run_file_tree_action(
+                                api.read().clone(),
+                                workspace.read().as_ref().cloned(),
+                                FileTreeAction::Create(path, is_dir),
+                                workspace,
+                                git_status,
+                                branches,
+                                commits,
+                                stashes,
+                                conflicts,
+                                diff,
+                                notice,
+                            );
+                        },
+                        on_rename: move |(old_path, new_path): (String, String)| {
+                            run_file_tree_action(
+                                api.read().clone(),
+                                workspace.read().as_ref().cloned(),
+                                FileTreeAction::Rename(old_path, new_path),
+                                workspace,
+                                git_status,
+                                branches,
+                                commits,
+                                stashes,
+                                conflicts,
+                                diff,
+                                notice,
+                            );
+                        },
+                        on_delete: move |path: String| {
+                            run_file_tree_action(
+                                api.read().clone(),
+                                workspace.read().as_ref().cloned(),
+                                FileTreeAction::Delete(path),
+                                workspace,
+                                git_status,
+                                branches,
+                                commits,
+                                stashes,
+                                conflicts,
+                                diff,
+                                notice,
+                            );
+                        },
+                        on_search: move |query: String| {
+                            let Some(current) = workspace.read().as_ref().cloned() else {
+                                notice.set("Open a workspace before searching files".to_string());
+                                return;
+                            };
+                            let api_client = api.read().clone();
+                            spawn(async move {
+                                match api_client.search_files(&current.workspace.id, &query).await {
+                                    Ok(files) => {
+                                        let mut next = current.clone();
+                                        next.files = files;
+                                        workspace.set(Some(next));
+                                        notice.set(format!("Search matched files for '{query}'"));
+                                    }
+                                    Err(error) => notice.set(error),
+                                }
+                            });
+                        },
                     }
 
                     EditorPanel {
@@ -426,7 +492,13 @@ pub fn app() -> Element {
 
                     CommitPanel {
                         message: commit_message.read().clone(),
+                        amend: *commit_amend.read(),
+                        sign_off: *commit_sign_off.read(),
+                        push_after: *commit_push_after.read(),
                         on_message: move |message: String| commit_message.set(message),
+                        on_amend: move |checked: bool| commit_amend.set(checked),
+                        on_sign_off: move |checked: bool| commit_sign_off.set(checked),
+                        on_push_after: move |checked: bool| commit_push_after.set(checked),
                         on_commit: move |_| {
                             let Some(current) = workspace.read().as_ref().cloned() else {
                                 notice.set("Open a repository before committing".to_string());
@@ -440,17 +512,27 @@ pub fn app() -> Element {
                             let api_client = api.read().clone();
                             let repository_id = current.repository.id.clone();
                             let workspace_id = current.workspace.id.clone();
+                            let amend = *commit_amend.read();
+                            let sign_off = *commit_sign_off.read();
+                            let push_after = *commit_push_after.read();
                             spawn(async move {
                                 let request = api::CommitRequest {
                                     message,
                                     author_name: "Zync".to_string(),
                                     author_email: "zync@local".to_string(),
-                                    amend: false,
-                                    sign_off: false,
+                                    amend,
+                                    sign_off,
                                 };
                                 match api_client.commit(&repository_id, &request).await {
                                     Ok(_) => {
-                                        notice.set("Committed".to_string());
+                                        if push_after {
+                                            match api_client.push(&repository_id).await {
+                                                Ok(()) => notice.set("Committed and pushed".to_string()),
+                                                Err(error) => notice.set(format!("Committed, push failed: {error}")),
+                                            }
+                                        } else {
+                                            notice.set("Committed".to_string());
+                                        }
                                         commit_message.set(String::new());
                                         load_workspace(
                                             api_client,
@@ -741,6 +823,12 @@ enum FileAction {
     Discard,
 }
 
+enum FileTreeAction {
+    Create(String, bool),
+    Rename(String, String),
+    Delete(String),
+}
+
 enum BranchAction {
     Create(String),
     Checkout(String),
@@ -856,6 +944,71 @@ fn run_file_action_from_workspace(
         match result {
             Ok(()) => {
                 notice.set("Git status updated".to_string());
+                load_workspace(
+                    api,
+                    repository_id,
+                    workspace_id,
+                    workspace,
+                    git_status,
+                    branches,
+                    commits,
+                    stashes,
+                    conflicts,
+                    diff,
+                    notice,
+                );
+            }
+            Err(error) => notice.set(error),
+        }
+    });
+}
+
+fn run_file_tree_action(
+    api: api::ZyncApi,
+    current: Option<api::WorkspaceResponse>,
+    action: FileTreeAction,
+    workspace: Signal<Option<api::WorkspaceResponse>>,
+    git_status: Signal<Vec<api::FileStatus>>,
+    branches: Signal<Vec<api::BranchSummary>>,
+    commits: Signal<Vec<api::CommitSummary>>,
+    stashes: Signal<Vec<api::StashSummary>>,
+    conflicts: Signal<Vec<api::ConflictSummary>>,
+    diff: Signal<String>,
+    mut notice: Signal<String>,
+) {
+    let Some(current) = current else {
+        notice.set("Open a workspace first".to_string());
+        return;
+    };
+    let repository_id = current.repository.id;
+    let workspace_id = current.workspace.id;
+    spawn(async move {
+        let result = match action {
+            FileTreeAction::Create(path, is_dir) => {
+                if path.trim().is_empty() {
+                    Err("Path is required".to_string())
+                } else {
+                    api.create_file(&workspace_id, &path, is_dir).await
+                }
+            }
+            FileTreeAction::Rename(old_path, new_path) => {
+                if old_path.trim().is_empty() || new_path.trim().is_empty() {
+                    Err("Both old and new paths are required".to_string())
+                } else {
+                    api.rename_file(&workspace_id, &old_path, &new_path).await
+                }
+            }
+            FileTreeAction::Delete(path) => {
+                if path.trim().is_empty() {
+                    Err("Select a file before deleting".to_string())
+                } else {
+                    api.delete_file(&workspace_id, &path).await
+                }
+            }
+        };
+        match result {
+            Ok(()) => {
+                notice.set("File tree updated".to_string());
                 load_workspace(
                     api,
                     repository_id,
@@ -1195,17 +1348,75 @@ fn FileExplorer(
     files: Vec<api::FileNode>,
     selected: String,
     on_select: EventHandler<String>,
+    on_create: EventHandler<(String, bool)>,
+    on_rename: EventHandler<(String, String)>,
+    on_delete: EventHandler<String>,
+    on_search: EventHandler<String>,
 ) -> Element {
+    let mut search = use_signal(String::new);
+    let mut draft_path = use_signal(String::new);
+    let mut rename_path = use_signal(|| selected.clone());
+    let rename_selected = selected.clone();
+    let delete_selected = selected.clone();
+    let has_selection = !selected.is_empty();
     rsx! {
         article { class: "min-h-[260px] md:min-h-[320px] xl:min-h-0 xl:row-span-2 rounded-lg border border-zinc-800 bg-zinc-900/55 flex flex-col overflow-hidden",
-            h3 { class: "shrink-0 border-b border-zinc-800 px-3 py-2 text-sm font-semibold", "Files" }
+            header { class: "shrink-0 border-b border-zinc-800 px-3 py-2 space-y-2",
+                h3 { class: "text-sm font-semibold", "Files" }
+                input {
+                    class: "w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-cyan-500",
+                    placeholder: "search files",
+                    value: "{search}",
+                    oninput: move |event| {
+                        let value = event.value();
+                        search.set(value.clone());
+                        on_search.call(value);
+                    }
+                }
+                div { class: "flex gap-2",
+                    input {
+                        class: "min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-cyan-500",
+                        placeholder: "path/to/file.rs",
+                        value: "{draft_path}",
+                        oninput: move |event| draft_path.set(event.value())
+                    }
+                    button { class: "rounded-md border border-cyan-700/60 px-2 py-1.5 text-xs text-cyan-200 hover:bg-cyan-500/10", onclick: move |_| on_create.call((draft_path.read().trim().to_string(), false)), "File" }
+                    button { class: "rounded-md border border-zinc-700 px-2 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800", onclick: move |_| on_create.call((draft_path.read().trim().to_string(), true)), "Dir" }
+                }
+                div { class: "flex gap-2",
+                    input {
+                        class: "min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-cyan-500",
+                        placeholder: "rename selected to",
+                        value: "{rename_path}",
+                        oninput: move |event| rename_path.set(event.value())
+                    }
+                    button {
+                        class: "rounded-md border border-amber-800/70 px-2 py-1.5 text-xs text-amber-200 hover:bg-amber-500/10 disabled:opacity-40",
+                        disabled: !has_selection,
+                        onclick: move |_| on_rename.call((rename_selected.clone(), rename_path.read().trim().to_string())),
+                        "Rename"
+                    }
+                    button {
+                        class: "rounded-md border border-red-800/70 px-2 py-1.5 text-xs text-red-200 hover:bg-red-500/10 disabled:opacity-40",
+                        disabled: !has_selection,
+                        onclick: move |_| on_delete.call(delete_selected.clone()),
+                        "Delete"
+                    }
+                }
+            }
             ul { class: "min-h-0 flex-1 overflow-y-auto p-2 space-y-1",
-                for file in files.into_iter().filter(|file| !file.is_dir).take(300) {
+                for file in files.into_iter().take(500) {
                     li {
                         button {
                             class: if file.path == selected { "w-full rounded-md bg-cyan-500/15 px-2 py-1.5 text-left text-xs text-cyan-200 border border-cyan-500/30 truncate" } else { "w-full rounded-md px-2 py-1.5 text-left text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 truncate" },
-                            onclick: move |_| on_select.call(file.path.clone()),
-                            "{file.path}"
+                            disabled: file.is_dir,
+                            onclick: move |_| {
+                                rename_path.set(file.path.clone());
+                                if !file.is_dir {
+                                    on_select.call(file.path.clone());
+                                }
+                            },
+                            if file.is_dir { "[dir] {file.path}" } else { "{file.path}" }
                         }
                     }
                 }
@@ -1457,7 +1668,7 @@ fn DiffLineRow(line: DiffLine, selected: bool, on_toggle: EventHandler<String>) 
                 button {
                     class: if selected { "my-0.5 h-5 rounded border border-cyan-500 bg-cyan-500 text-[10px] text-zinc-950" } else { "my-0.5 h-5 rounded border border-zinc-700 text-[10px] text-zinc-500 hover:border-cyan-500" },
                     onclick: move |_| on_toggle.call(key.clone()),
-                    if selected { "✓" } else { "+" }
+                    if selected { "x" } else { "+" }
                 }
             } else {
                 span {}
@@ -1470,7 +1681,13 @@ fn DiffLineRow(line: DiffLine, selected: bool, on_toggle: EventHandler<String>) 
 #[component]
 fn CommitPanel(
     message: String,
+    amend: bool,
+    sign_off: bool,
+    push_after: bool,
     on_message: EventHandler<String>,
+    on_amend: EventHandler<bool>,
+    on_sign_off: EventHandler<bool>,
+    on_push_after: EventHandler<bool>,
     on_commit: EventHandler<()>,
 ) -> Element {
     rsx! {
@@ -1482,7 +1699,21 @@ fn CommitPanel(
                 placeholder: "Commit message",
                 oninput: move |event| on_message.call(event.value())
             }
-            div { class: "border-t border-zinc-800 p-3",
+            div { class: "border-t border-zinc-800 p-3 space-y-3",
+                div { class: "grid grid-cols-1 gap-2 text-xs text-zinc-300",
+                    label { class: "flex items-center gap-2",
+                        input { r#type: "checkbox", checked: amend, onchange: move |event| on_amend.call(event.checked()) }
+                        "Amend previous commit"
+                    }
+                    label { class: "flex items-center gap-2",
+                        input { r#type: "checkbox", checked: sign_off, onchange: move |event| on_sign_off.call(event.checked()) }
+                        "Sign off"
+                    }
+                    label { class: "flex items-center gap-2",
+                        input { r#type: "checkbox", checked: push_after, onchange: move |event| on_push_after.call(event.checked()) }
+                        "Push after commit"
+                    }
+                }
                 button { class: "w-full rounded-md bg-emerald-500 px-3 py-2 text-sm font-medium text-zinc-950 hover:bg-emerald-400", onclick: move |_| on_commit.call(()), "Commit staged changes" }
             }
         }
@@ -1819,8 +2050,8 @@ fn RebaseStepRow(
             ondrop: move |_| on_drop_commit.call(commit_for_drop.clone()),
             div { class: "flex items-center gap-1",
                 div { class: "flex flex-col gap-1",
-                    button { class: "h-4 rounded border border-zinc-700 px-1 text-[10px] text-zinc-400 hover:bg-zinc-800", onclick: move |_| on_rebase_move.call((move_up_commit.clone(), -1)), "↑" }
-                    button { class: "h-4 rounded border border-zinc-700 px-1 text-[10px] text-zinc-400 hover:bg-zinc-800", onclick: move |_| on_rebase_move.call((move_down_commit.clone(), 1)), "↓" }
+                    button { class: "h-4 rounded border border-zinc-700 px-1 text-[10px] text-zinc-400 hover:bg-zinc-800", onclick: move |_| on_rebase_move.call((move_up_commit.clone(), -1)), "Up" }
+                    button { class: "h-4 rounded border border-zinc-700 px-1 text-[10px] text-zinc-400 hover:bg-zinc-800", onclick: move |_| on_rebase_move.call((move_down_commit.clone(), 1)), "Dn" }
                 }
             code { class: "text-cyan-300", "{short_id(&step.commit)}" }
             }
@@ -1853,6 +2084,11 @@ fn ConflictEditorPanel(
     let selected_path = detail.path.clone();
     let accept_local_path = detail.path.clone();
     let accept_remote_path = detail.path.clone();
+    let accept_both_content = format!(
+        "{}\n{}",
+        detail.ours_content.trim_end(),
+        detail.theirs_content.trim_start()
+    );
     rsx! {
         article { class: "min-h-[360px] rounded-lg border border-zinc-800 bg-zinc-900/55 flex flex-col overflow-hidden md:col-span-2 xl:col-span-2",
             header { class: "shrink-0 border-b border-zinc-800 px-3 py-2 flex items-center justify-between gap-2",
@@ -1880,6 +2116,7 @@ fn ConflictEditorPanel(
                             div { class: "flex gap-2",
                                 button { class: "rounded-md border border-emerald-800/70 px-2 py-1 text-xs text-emerald-200 hover:bg-emerald-500/10", onclick: move |_| on_accept.call((accept_local_path.clone(), "local".to_string())), "Accept Local" }
                                 button { class: "rounded-md border border-amber-800/70 px-2 py-1 text-xs text-amber-200 hover:bg-amber-500/10", onclick: move |_| on_accept.call((accept_remote_path.clone(), "remote".to_string())), "Accept Remote" }
+                                button { class: "rounded-md border border-cyan-700/70 px-2 py-1 text-xs text-cyan-200 hover:bg-cyan-500/10", onclick: move |_| on_manual_change.call(accept_both_content.clone()), "Accept Both" }
                             }
                         }
                         div { class: "grid grid-cols-1 xl:grid-cols-3 gap-3",

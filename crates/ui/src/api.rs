@@ -140,6 +140,19 @@ pub struct WriteFileRequest {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct CreateFileRequest {
+    pub path: String,
+    pub content: Option<String>,
+    pub is_dir: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RenameFileRequest {
+    pub old_path: String,
+    pub new_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct BranchRequest {
     pub name: String,
     pub new_name: Option<String>,
@@ -334,6 +347,59 @@ impl ZyncApi {
             )),
             &WriteFileRequest { content },
         )
+        .await
+    }
+
+    pub async fn create_file(
+        &self,
+        workspace_id: &str,
+        path: &str,
+        is_dir: bool,
+    ) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/workspace/{workspace_id}/files")),
+            &CreateFileRequest {
+                path: path.to_string(),
+                content: None,
+                is_dir: Some(is_dir),
+            },
+        )
+        .await
+    }
+
+    pub async fn rename_file(
+        &self,
+        workspace_id: &str,
+        old_path: &str,
+        new_path: &str,
+    ) -> Result<(), String> {
+        put_empty(
+            &self.url(&format!("/workspace/{workspace_id}/files/rename")),
+            &RenameFileRequest {
+                old_path: old_path.to_string(),
+                new_path: new_path.to_string(),
+            },
+        )
+        .await
+    }
+
+    pub async fn delete_file(&self, workspace_id: &str, path: &str) -> Result<(), String> {
+        delete_empty(&self.url(&format!(
+            "/workspace/{workspace_id}/files/{}",
+            urlencoding::encode(path)
+        )))
+        .await
+    }
+
+    pub async fn search_files(
+        &self,
+        workspace_id: &str,
+        query: &str,
+    ) -> Result<Vec<FileNode>, String> {
+        get_json(&self.url(&format!(
+            "/workspace/{workspace_id}/files/search?q={}",
+            urlencoding::encode(query)
+        )))
         .await
     }
 
@@ -749,5 +815,23 @@ async fn put_empty<T>(_url: &str, _body: &T) -> Result<(), String>
 where
     T: Serialize,
 {
+    Err("ZyncApi network calls are available in wasm32 browser builds".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn delete_empty(url: &str) -> Result<(), String> {
+    let response = gloo_net::http::Request::delete(url)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if response.ok() {
+        Ok(())
+    } else {
+        Err(format!("request failed with status {}", response.status()))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn delete_empty(_url: &str) -> Result<(), String> {
     Err("ZyncApi network calls are available in wasm32 browser builds".to_string())
 }
