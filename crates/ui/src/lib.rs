@@ -66,29 +66,29 @@ pub fn app() -> Element {
 
     rsx! {
         script { src: "https://cdn.tailwindcss.com" }
-        main { class: "min-h-screen bg-zinc-950 text-zinc-100 flex flex-col lg:flex-row overflow-x-hidden lg:overflow-hidden",
-            aside { class: "w-full lg:w-[340px] lg:h-screen shrink-0 border-b lg:border-b-0 lg:border-r border-zinc-800 bg-zinc-950/95 p-3 sm:p-4 flex flex-col gap-3 sm:gap-4",
-                header { class: "space-y-1 flex items-start justify-between gap-3 lg:block",
-                    h1 { class: "text-xl font-semibold tracking-tight", "Zync" }
-                    p { class: "max-w-[220px] sm:max-w-none text-xs text-zinc-500 truncate", "API {api_base}" }
+        main { class: "min-h-screen xl:h-screen bg-zinc-950 text-zinc-100 flex flex-col xl:flex-row overflow-y-auto xl:overflow-hidden",
+            aside { class: "w-full xl:w-[280px] xl:h-screen shrink-0 border-b xl:border-b-0 xl:border-r border-zinc-800 bg-zinc-950 flex flex-col",
+                header { class: "h-12 shrink-0 border-b border-zinc-800 px-3 flex items-center justify-between gap-3",
+                    h1 { class: "text-sm font-semibold tracking-tight", "Zync" }
+                    p { class: "min-w-0 truncate text-[11px] text-zinc-500", "API {api_base}" }
                 }
 
-                section { class: "rounded-lg border border-zinc-800 bg-zinc-900/60 p-3 space-y-3",
+                section { class: "shrink-0 border-b border-zinc-800 bg-zinc-900/40 p-2 space-y-2",
                     input {
-                        class: "w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-cyan-500",
+                        class: "w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-cyan-500",
                         placeholder: "Repository path mounted on server",
                         value: "{repo_path}",
                         oninput: move |event| repo_path.set(event.value())
                     }
                     input {
-                        class: "w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-cyan-500",
+                        class: "w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-cyan-500",
                         placeholder: "Name",
                         value: "{repo_name}",
                         oninput: move |event| repo_name.set(event.value())
                     }
-                    div { class: "flex flex-col sm:flex-row gap-2",
+                    div { class: "grid grid-cols-[1fr_auto] gap-2",
                         button {
-                            class: "flex-1 rounded-md bg-cyan-500 px-3 py-2 text-sm font-medium text-zinc-950 hover:bg-cyan-400 disabled:opacity-50",
+                            class: "rounded bg-cyan-500 px-2 py-1.5 text-xs font-medium text-zinc-950 hover:bg-cyan-400 disabled:opacity-50",
                             onclick: move |_| {
                                 let api_client = api.read().clone();
                                 let path = repo_path.read().trim().to_string();
@@ -142,7 +142,7 @@ pub fn app() -> Element {
                             "Add mounted repo"
                         }
                         button {
-                            class: "rounded-md border border-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800",
+                            class: "rounded border border-zinc-700 px-2 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800",
                             onclick: move |_| load_repositories(api.read().clone(), repositories, notice),
                             "Refresh"
                         }
@@ -191,11 +191,11 @@ pub fn app() -> Element {
                 }
             }
 
-            section { class: "min-w-0 flex-1 flex flex-col bg-zinc-950",
-                header { class: "shrink-0 border-b border-zinc-800 px-3 sm:px-5 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4 bg-zinc-950/95",
+            section { class: "min-w-0 flex-1 min-h-[70vh] xl:min-h-0 flex flex-col bg-zinc-900",
+                header { class: "h-auto xl:h-12 shrink-0 border-b border-zinc-800 px-3 flex flex-col xl:flex-row xl:items-center justify-between gap-2 bg-zinc-950",
                     if let Some(current) = workspace.read().as_ref() {
                         div { class: "min-w-0",
-                            h2 { class: "text-lg font-semibold truncate", "{current.repository.name}" }
+                            h2 { class: "text-sm font-semibold truncate", "{current.repository.name}" }
                             p { class: "text-xs text-zinc-500 truncate", "{current.repository.path}" }
                         }
                         div { class: "hidden xl:flex flex-col items-end gap-1 text-[11px] text-zinc-500 min-w-0",
@@ -233,7 +233,7 @@ pub fn app() -> Element {
                     }
                 }
 
-                div { class: "flex-1 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[280px_minmax(0,1.35fr)_minmax(360px,0.9fr)] xl:grid-rows-[minmax(0,1fr)_290px] gap-3 p-3 overflow-y-auto lg:overflow-hidden",
+                div { class: "min-h-0 flex-1 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[260px_minmax(0,1fr)_380px] xl:grid-rows-[minmax(260px,0.95fr)_minmax(260px,0.75fr)_minmax(220px,0.55fr)_minmax(360px,auto)] gap-px bg-zinc-800 overflow-y-auto xl:overflow-hidden",
                     FileExplorer {
                         files: workspace.read().as_ref().map(|item| item.files.clone()).unwrap_or_default(),
                         selected: selected_file.read().clone(),
@@ -881,7 +881,7 @@ pub fn app() -> Element {
                     }
                 }
 
-                footer { class: "h-8 shrink-0 border-t border-zinc-800 px-4 flex items-center text-xs text-zinc-400 bg-zinc-950", "{notice}" }
+                footer { class: "h-7 shrink-0 border-t border-zinc-800 px-3 flex items-center text-xs text-zinc-400 bg-zinc-950", "{notice}" }
             }
         }
     }
@@ -1736,7 +1736,7 @@ fn RepositoryList(
     on_open: EventHandler<String>,
 ) -> Element {
     rsx! {
-        section { class: "max-h-64 lg:max-h-none lg:min-h-0 lg:flex-1 overflow-y-auto space-y-2 pr-1",
+        section { class: "min-h-0 flex-1 overflow-y-auto p-2 space-y-1",
             for repository in repositories {
                 article { class: "group rounded-lg border border-zinc-800 bg-zinc-900/40 hover:border-cyan-700/80 hover:bg-zinc-900",
                     button {
@@ -1768,9 +1768,9 @@ fn FileExplorer(
     let delete_selected = selected.clone();
     let has_selection = !selected.is_empty();
     rsx! {
-        article { class: "min-h-[260px] md:min-h-[320px] xl:min-h-0 xl:row-span-2 rounded-lg border border-zinc-800 bg-zinc-900/55 flex flex-col overflow-hidden",
-            header { class: "shrink-0 border-b border-zinc-800 px-3 py-2 space-y-2",
-                h3 { class: "text-sm font-semibold", "Files" }
+        article { class: "min-h-[260px] md:min-h-[320px] xl:min-h-0 xl:col-start-1 xl:row-start-2 xl:row-span-2 bg-zinc-950 flex flex-col overflow-hidden",
+            header { class: "shrink-0 border-b border-zinc-800 px-2 py-2 space-y-2",
+                h3 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-400", "Files" }
                 input {
                     class: "w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-cyan-500",
                     placeholder: "search files",
@@ -1842,11 +1842,11 @@ fn WorkspaceToolbar(
     on_push: EventHandler<()>,
 ) -> Element {
     rsx! {
-        div { class: "grid w-full grid-cols-2 gap-2 sm:w-auto sm:grid-cols-4",
-            button { class: "rounded-md border border-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40", disabled, onclick: move |_| on_fetch.call(()), "Fetch" }
-            button { class: "rounded-md border border-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40", disabled, onclick: move |_| on_pull.call(()), "Pull" }
-            button { class: "rounded-md border border-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40", disabled, onclick: move |_| on_push.call(()), "Push" }
-            button { class: "rounded-md border border-cyan-700/60 px-3 py-2 text-sm text-cyan-200 hover:bg-cyan-500/10 disabled:cursor-not-allowed disabled:opacity-40", disabled, onclick: move |_| on_refresh.call(()), "Refresh" }
+        div { class: "flex w-full flex-wrap gap-1 xl:w-auto",
+            button { class: "rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40", disabled, onclick: move |_| on_fetch.call(()), "Fetch" }
+            button { class: "rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40", disabled, onclick: move |_| on_pull.call(()), "Pull" }
+            button { class: "rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40", disabled, onclick: move |_| on_push.call(()), "Push" }
+            button { class: "rounded border border-cyan-700/60 bg-cyan-500/10 px-2 py-1 text-xs text-cyan-200 hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-40", disabled, onclick: move |_| on_refresh.call(()), "Refresh" }
         }
     }
 }
@@ -1859,10 +1859,10 @@ fn EditorPanel(
     on_save: EventHandler<()>,
 ) -> Element {
     rsx! {
-        article { class: "min-h-[420px] md:min-h-[520px] xl:min-h-0 rounded-lg border border-zinc-800 bg-zinc-900/55 flex flex-col overflow-hidden",
+        article { class: "min-h-[420px] md:min-h-[520px] xl:min-h-0 xl:col-start-3 xl:row-start-3 bg-zinc-950 flex flex-col overflow-hidden",
             header { class: "shrink-0 border-b border-zinc-800 px-3 py-2 flex items-center justify-between gap-3",
-                h3 { class: "min-w-0 truncate text-sm font-semibold", if path.is_empty() { "Editor" } else { "{path}" } }
-                button { class: "rounded-md bg-cyan-500 px-3 py-1.5 text-xs font-medium text-zinc-950 hover:bg-cyan-400", onclick: move |_| on_save.call(()), "Save" }
+                h3 { class: "min-w-0 truncate text-xs font-semibold uppercase tracking-wide text-zinc-400", if path.is_empty() { "File Preview" } else { "{path}" } }
+                button { class: "rounded bg-cyan-500 px-2 py-1 text-xs font-medium text-zinc-950 hover:bg-cyan-400", onclick: move |_| on_save.call(()), "Save" }
             }
             textarea {
                 class: "min-h-0 flex-1 resize-none bg-zinc-950/70 p-3 font-mono text-xs leading-5 text-zinc-100 outline-none placeholder:text-zinc-600",
@@ -1896,9 +1896,9 @@ fn GitStatusPanel(
         .collect::<Vec<_>>();
 
     rsx! {
-        article { class: "min-h-[320px] md:min-h-[420px] xl:min-h-0 rounded-lg border border-zinc-800 bg-zinc-900/55 flex flex-col overflow-hidden",
-            h3 { class: "shrink-0 border-b border-zinc-800 px-3 py-2 text-sm font-semibold", "Git Status" }
-            div { class: "min-h-0 flex-1 overflow-y-auto p-3 space-y-4",
+        article { class: "min-h-[320px] md:min-h-[420px] xl:min-h-0 xl:col-start-3 xl:row-start-1 bg-zinc-950 flex flex-col overflow-hidden",
+            h3 { class: "h-9 shrink-0 border-b border-zinc-800 px-3 flex items-center text-xs font-semibold uppercase tracking-wide text-zinc-400", "Changes" }
+            div { class: "min-h-0 flex-1 overflow-y-auto p-2 space-y-3",
             StatusGroup {
                 title: "Staged".to_string(),
                 files: staged,
@@ -1940,11 +1940,11 @@ fn StatusGroup(
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
     rsx! {
-        section { class: "space-y-2",
+        section { class: "space-y-1.5",
             div { class: "flex items-center justify-between gap-2",
                 h4 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-500", "{title}" }
                 button {
-                    class: "rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40",
+                    class: "rounded border border-zinc-700 px-1.5 py-0.5 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40",
                     disabled: bulk_paths.is_empty(),
                     onclick: move |_| on_bulk.call(bulk_paths.clone()),
                     "{bulk_label}"
@@ -1975,12 +1975,12 @@ fn StatusRow(
     let discard_path = path.clone();
     let diff_path = path.clone();
     rsx! {
-        div { class: "rounded-md border border-zinc-800 bg-zinc-950/45 p-2 space-y-2",
-            code { class: "block truncate text-xs text-zinc-300", "{path}" }
-            div { class: "flex flex-wrap gap-2",
-                button { class: "rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-200 hover:bg-zinc-800", onclick: move |_| on_diff.call(diff_path.clone()), "Diff" }
-                button { class: "rounded-md border border-cyan-700/60 px-2 py-1 text-[11px] text-cyan-200 hover:bg-cyan-500/10", onclick: move |_| on_primary.call(primary_path.clone()), "{primary_label}" }
-                button { class: "rounded-md border border-red-800/70 px-2 py-1 text-[11px] text-red-200 hover:bg-red-500/10", onclick: move |_| on_discard.call(discard_path.clone()), "Discard" }
+        div { class: "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 border-b border-zinc-900 py-1.5",
+            code { class: "min-w-0 truncate text-xs text-zinc-300", "{path}" }
+            div { class: "flex shrink-0 gap-1",
+                button { class: "rounded border border-zinc-700 px-1.5 py-0.5 text-[11px] text-zinc-200 hover:bg-zinc-800", onclick: move |_| on_diff.call(diff_path.clone()), "Diff" }
+                button { class: "rounded border border-cyan-700/60 px-1.5 py-0.5 text-[11px] text-cyan-200 hover:bg-cyan-500/10", onclick: move |_| on_primary.call(primary_path.clone()), "{primary_label}" }
+                button { class: "rounded border border-red-800/70 px-1.5 py-0.5 text-[11px] text-red-200 hover:bg-red-500/10", onclick: move |_| on_discard.call(discard_path.clone()), "Discard" }
             }
         }
     }
@@ -2001,9 +2001,9 @@ fn DiffViewer(
     let show_image_diff =
         is_image_path(&image_path) && !image_before_url.is_empty() && !image_after_url.is_empty();
     rsx! {
-        article { class: "min-h-[320px] md:min-h-[420px] xl:min-h-0 rounded-lg border border-zinc-800 bg-zinc-900/55 flex flex-col overflow-hidden",
+        article { class: "min-h-[320px] md:min-h-[420px] xl:min-h-0 xl:col-start-2 xl:row-start-2 xl:row-span-2 bg-zinc-950 flex flex-col overflow-hidden",
             header { class: "shrink-0 border-b border-zinc-800 px-3 py-2 flex items-center justify-between gap-2",
-                h3 { class: "text-sm font-semibold", "Partial Staging" }
+                h3 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-400", "Diff / Partial Staging" }
                 button {
                     class: "rounded-md border border-cyan-700/60 px-2 py-1 text-[11px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-40",
                     disabled: !diff_is_patch(&stage_all_patch),
@@ -2209,8 +2209,8 @@ fn CommitPanel(
     on_commit: EventHandler<()>,
 ) -> Element {
     rsx! {
-        article { class: "min-h-[260px] rounded-lg border border-zinc-800 bg-zinc-900/55 flex flex-col overflow-hidden",
-            h3 { class: "shrink-0 border-b border-zinc-800 px-3 py-2 text-sm font-semibold", "Commit" }
+        article { class: "min-h-[260px] xl:min-h-0 xl:col-start-3 xl:row-start-2 bg-zinc-950 flex flex-col overflow-hidden",
+            h3 { class: "h-9 shrink-0 border-b border-zinc-800 px-3 flex items-center text-xs font-semibold uppercase tracking-wide text-zinc-400", "Commit" }
             textarea {
                 class: "min-h-0 flex-1 resize-none bg-zinc-950/70 p-3 text-sm text-zinc-100 outline-none placeholder:text-zinc-600",
                 value: "{message}",
@@ -2251,9 +2251,9 @@ fn BranchPanel(
 ) -> Element {
     let mut open_menu = use_signal(|| None::<String>);
     rsx! {
-        article { class: "min-h-[240px] rounded-lg border border-zinc-800 bg-zinc-900/55 flex flex-col overflow-hidden",
-            header { class: "shrink-0 border-b border-zinc-800 px-3 py-2 space-y-2",
-                h3 { class: "text-sm font-semibold", "Branches" }
+        article { class: "min-h-[240px] xl:min-h-0 xl:col-start-1 xl:row-start-1 bg-zinc-950 flex flex-col overflow-hidden",
+            header { class: "shrink-0 border-b border-zinc-800 px-2 py-2 space-y-2",
+                h3 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-400", "Branches" }
                 div { class: "flex gap-2",
                     input {
                         class: "min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-cyan-500",
@@ -2268,7 +2268,7 @@ fn BranchPanel(
                     }
                 }
             }
-            ul { class: "min-h-0 flex-1 overflow-y-auto p-3 space-y-1",
+            ul { class: "min-h-0 flex-1 overflow-y-auto p-2 space-y-1",
                 for branch in branches {
                     BranchRow {
                         menu_open: open_menu.read().as_ref() == Some(&branch.name),
@@ -2392,25 +2392,29 @@ fn CommitGraph(
 ) -> Element {
     let rows = graph_rows(&commits);
     rsx! {
-        article { class: "min-h-[240px] rounded-lg border border-zinc-800 bg-zinc-900/55 flex flex-col overflow-hidden",
-            header { class: "shrink-0 border-b border-zinc-800 px-3 py-2 flex items-center justify-between gap-2",
-                h3 { class: "text-sm font-semibold", "Commit Graph" }
-                button { class: "rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800", onclick: move |_| on_load_more.call(()), "Load more" }
+        article { class: "min-h-[240px] xl:min-h-0 xl:col-start-2 xl:row-start-1 bg-zinc-950 flex flex-col overflow-hidden",
+            header { class: "h-9 shrink-0 border-b border-zinc-800 px-3 flex items-center justify-between gap-2",
+                h3 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-400", "History" }
+                button { class: "rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800", onclick: move |_| on_load_more.call(()), "Load more" }
             }
-            ol { class: "min-h-0 flex-1 overflow-y-auto p-3 space-y-2",
+            div { class: "grid grid-cols-[128px_76px_minmax(0,1fr)_150px] border-b border-zinc-800 bg-zinc-900/60 px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-zinc-500",
+                span { "Graph" }
+                span { "Commit" }
+                span { "Message" }
+                span { "Author" }
+            }
+            ol { class: "min-h-0 flex-1 overflow-y-auto",
                 for row in rows {
                     li {
-                        class: "grid grid-cols-[120px_70px_1fr] gap-2 rounded-md border border-zinc-800 bg-zinc-950/40 p-2 text-xs hover:border-cyan-800/80 hover:bg-zinc-900/70",
+                        class: "grid grid-cols-[128px_76px_minmax(0,1fr)_150px] gap-2 border-b border-zinc-900 px-2 py-1.5 text-xs hover:bg-cyan-500/10",
                         onclick: {
                             let commit_id = row.commit.id.clone();
                             move |_| on_select_commit.call(commit_id.clone())
                         },
                         GraphLaneStrip { row: row.clone() }
                         code { class: "self-center text-cyan-300", "{short_id(&row.commit.id)}" }
-                        div { class: "min-w-0",
-                            span { class: "block truncate text-zinc-200", "{row.commit.summary}" }
-                            small { class: "text-zinc-600", "{row.commit.author} - lane {row.lane + 1} - {row.commit.parents.len()} parent(s)" }
-                        }
+                        span { class: "min-w-0 truncate self-center text-zinc-200", "{row.commit.summary}" }
+                        span { class: "min-w-0 truncate self-center text-zinc-500", "{row.commit.author}" }
                     }
                 }
             }
@@ -2464,7 +2468,7 @@ fn HistoryToolsPanel(
 ) -> Element {
     let mut dragging_commit = use_signal(|| None::<String>);
     rsx! {
-        article { class: "min-h-[360px] rounded-lg border border-zinc-800 bg-zinc-900/55 flex flex-col overflow-hidden md:col-span-2 xl:col-span-1",
+        article { class: "min-h-[360px] xl:min-h-0 xl:col-start-1 xl:row-start-4 bg-zinc-950 flex flex-col overflow-hidden",
             h3 { class: "shrink-0 border-b border-zinc-800 px-3 py-2 text-sm font-semibold", "Stash / Cherry-pick / Rebase" }
             div { class: "min-h-0 flex-1 overflow-y-auto p-3 space-y-4",
                 section { class: "space-y-2",
@@ -2608,7 +2612,7 @@ fn ConflictEditorPanel(
         detail.theirs_content.trim_start()
     );
     rsx! {
-        article { class: "min-h-[360px] rounded-lg border border-zinc-800 bg-zinc-900/55 flex flex-col overflow-hidden md:col-span-2 xl:col-span-2",
+        article { class: "min-h-[360px] xl:min-h-0 xl:col-start-2 xl:row-start-4 bg-zinc-950 flex flex-col overflow-hidden",
             header { class: "shrink-0 border-b border-zinc-800 px-3 py-2 flex items-center justify-between gap-2",
                 h3 { class: "text-sm font-semibold", "3-way Conflict Editor" }
                 span { class: "text-[11px] text-zinc-500", "{conflicts.len()} conflict(s)" }
@@ -2702,7 +2706,7 @@ fn RepositoryToolsPanel(
     on_action: EventHandler<ToolAction>,
 ) -> Element {
     rsx! {
-        article { class: "min-h-[420px] rounded-lg border border-zinc-800 bg-zinc-900/55 flex flex-col overflow-hidden md:col-span-2 xl:col-span-3",
+        article { class: "min-h-[420px] xl:min-h-0 xl:col-start-3 xl:row-start-4 bg-zinc-950 flex flex-col overflow-hidden",
             h3 { class: "shrink-0 border-b border-zinc-800 px-3 py-2 text-sm font-semibold", "Repository Tools" }
             div { class: "min-h-0 flex-1 grid grid-cols-1 xl:grid-cols-[1.2fr_1fr] gap-3 overflow-y-auto p-3",
                 div { class: "space-y-4",
