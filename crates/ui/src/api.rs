@@ -66,6 +66,31 @@ pub struct BranchSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StashSummary {
+    pub index: usize,
+    pub name: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConflictSummary {
+    pub ancestor: Option<String>,
+    pub ours: Option<String>,
+    pub theirs: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConflictDetail {
+    pub path: String,
+    pub ancestor_path: Option<String>,
+    pub ours_path: Option<String>,
+    pub theirs_path: Option<String>,
+    pub ancestor_content: String,
+    pub ours_content: String,
+    pub theirs_content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PresenceUser {
     pub user_id: String,
     pub name: String,
@@ -105,11 +130,34 @@ pub struct FilesRequest {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PatchRequest {
+    pub patch: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct WriteFileRequest {
     pub content: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct BranchRequest {
+    pub name: String,
+    pub new_name: Option<String>,
+    pub checkout: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CherryPickRequest {
+    pub commits: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConflictResolveRequest {
+    pub path: String,
+    pub side: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RebaseStepRequest {
     pub commit: String,
     pub action: String,
@@ -119,6 +167,15 @@ pub struct RebaseStepRequest {
 pub struct InteractiveRebaseRequest {
     pub base: String,
     pub steps: Vec<RebaseStepRequest>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StashRequest {
+    pub message: Option<String>,
+    pub author_name: Option<String>,
+    pub author_email: Option<String>,
+    pub index: Option<usize>,
+    pub pop: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -284,6 +341,69 @@ impl ZyncApi {
         .await
     }
 
+    pub async fn stage_patch(&self, repository_id: &str, patch: String) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/repositories/{repository_id}/git/stage-patch")),
+            &PatchRequest { patch },
+        )
+        .await
+    }
+
+    pub async fn checkout_branch(&self, repository_id: &str, name: &str) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/repositories/{repository_id}/git/checkout")),
+            &BranchRequest {
+                name: name.to_string(),
+                new_name: None,
+                checkout: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn merge_branch(&self, repository_id: &str, name: &str) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/repositories/{repository_id}/git/branches/merge")),
+            &BranchRequest {
+                name: name.to_string(),
+                new_name: None,
+                checkout: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn delete_branch(&self, repository_id: &str, name: &str) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!(
+                "/repositories/{repository_id}/git/branches/delete"
+            )),
+            &BranchRequest {
+                name: name.to_string(),
+                new_name: None,
+                checkout: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn create_branch(
+        &self,
+        repository_id: &str,
+        name: &str,
+        checkout: bool,
+    ) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/repositories/{repository_id}/git/branches")),
+            &BranchRequest {
+                name: name.to_string(),
+                new_name: None,
+                checkout: Some(checkout),
+            },
+        )
+        .await
+    }
+
     pub async fn commit(
         &self,
         repository_id: &str,
@@ -293,6 +413,17 @@ impl ZyncApi {
             &self.url(&format!("/repositories/{repository_id}/git/commit")),
             request,
         )
+        .await
+    }
+
+    pub async fn rebase_plan(
+        &self,
+        repository_id: &str,
+        limit: usize,
+    ) -> Result<Vec<CommitSummary>, String> {
+        get_json(&self.url(&format!(
+            "/repositories/{repository_id}/git/rebase/plan?limit={limit}"
+        )))
         .await
     }
 
@@ -315,6 +446,113 @@ impl ZyncApi {
                 "/repositories/{repository_id}/git/rebase/interactive"
             )),
             request,
+        )
+        .await
+    }
+
+    pub async fn cherry_pick(
+        &self,
+        repository_id: &str,
+        commits: Vec<String>,
+    ) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/repositories/{repository_id}/git/cherry-pick")),
+            &CherryPickRequest { commits },
+        )
+        .await
+    }
+
+    pub async fn cherry_pick_abort(&self, repository_id: &str) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!(
+                "/repositories/{repository_id}/git/cherry-pick/abort"
+            )),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    pub async fn conflicts(&self, repository_id: &str) -> Result<Vec<ConflictSummary>, String> {
+        get_json(&self.url(&format!("/repositories/{repository_id}/git/conflicts"))).await
+    }
+
+    pub async fn conflict_detail(
+        &self,
+        repository_id: &str,
+        path: &str,
+    ) -> Result<ConflictDetail, String> {
+        get_json(&self.url(&format!(
+            "/repositories/{repository_id}/git/conflicts/detail?path={}",
+            urlencoding::encode(path)
+        )))
+        .await
+    }
+
+    pub async fn resolve_conflict(
+        &self,
+        repository_id: &str,
+        path: &str,
+        side: &str,
+    ) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!(
+                "/repositories/{repository_id}/git/conflicts/resolve"
+            )),
+            &ConflictResolveRequest {
+                path: path.to_string(),
+                side: side.to_string(),
+            },
+        )
+        .await
+    }
+
+    pub async fn stashes(&self, repository_id: &str) -> Result<Vec<StashSummary>, String> {
+        get_json(&self.url(&format!("/repositories/{repository_id}/git/stashes"))).await
+    }
+
+    pub async fn create_stash(&self, repository_id: &str, message: &str) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/repositories/{repository_id}/git/stashes")),
+            &StashRequest {
+                message: Some(message.to_string()),
+                author_name: Some("Zync".to_string()),
+                author_email: Some("zync@local".to_string()),
+                index: None,
+                pop: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn apply_stash(
+        &self,
+        repository_id: &str,
+        index: usize,
+        pop: bool,
+    ) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/repositories/{repository_id}/git/stashes/apply")),
+            &StashRequest {
+                message: None,
+                author_name: None,
+                author_email: None,
+                index: Some(index),
+                pop: Some(pop),
+            },
+        )
+        .await
+    }
+
+    pub async fn drop_stash(&self, repository_id: &str, index: usize) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/repositories/{repository_id}/git/stashes/drop")),
+            &StashRequest {
+                message: None,
+                author_name: None,
+                author_email: None,
+                index: Some(index),
+                pop: None,
+            },
         )
         .await
     }

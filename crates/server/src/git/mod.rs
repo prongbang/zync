@@ -46,6 +46,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
         .route("/repositories/:id/git/conflicts", get(conflicts))
         .route(
+            "/repositories/:id/git/conflicts/detail",
+            get(conflict_detail),
+        )
+        .route(
             "/repositories/:id/git/conflicts/resolve",
             post(resolve_conflict),
         )
@@ -427,6 +431,20 @@ async fn conflicts(
 ) -> Result<Json<Vec<zync_git_core::ConflictSummary>>, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     zync_git_core::conflicts(repository.path)
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn conflict_detail(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<zync_git_core::ConflictDetail>, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let path = query
+        .get("path")
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "path is required".to_string()))?;
+    zync_git_core::conflict_detail(repository.path, path)
         .map(Json)
         .map_err(internal_error)
 }

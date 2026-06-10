@@ -56,6 +56,17 @@ pub struct ConflictSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConflictDetail {
+    pub path: String,
+    pub ancestor_path: Option<String>,
+    pub ours_path: Option<String>,
+    pub theirs_path: Option<String>,
+    pub ancestor_content: String,
+    pub ours_content: String,
+    pub theirs_content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebaseStep {
     pub commit: String,
     pub action: RebaseAction,
@@ -551,6 +562,45 @@ pub fn conflicts(path: impl AsRef<Path>) -> anyhow::Result<Vec<ConflictSummary>>
     Ok(conflicts)
 }
 
+pub fn conflict_detail(path: impl AsRef<Path>, file: &str) -> anyhow::Result<ConflictDetail> {
+    let repo = Repository::open(path.as_ref())?;
+    let index = repo.index()?;
+    for conflict in index.conflicts()? {
+        let conflict = conflict?;
+        let ancestor_path = conflict
+            .ancestor
+            .as_ref()
+            .and_then(|entry| String::from_utf8(entry.path.clone()).ok());
+        let ours_path = conflict
+            .our
+            .as_ref()
+            .and_then(|entry| String::from_utf8(entry.path.clone()).ok());
+        let theirs_path = conflict
+            .their
+            .as_ref()
+            .and_then(|entry| String::from_utf8(entry.path.clone()).ok());
+        let matches = [&ancestor_path, &ours_path, &theirs_path]
+            .into_iter()
+            .flatten()
+            .any(|path| path == file);
+        if !matches {
+            continue;
+        }
+
+        return Ok(ConflictDetail {
+            path: file.to_string(),
+            ancestor_content: conflict_blob(&repo, conflict.ancestor.as_ref())?,
+            ours_content: conflict_blob(&repo, conflict.our.as_ref())?,
+            theirs_content: conflict_blob(&repo, conflict.their.as_ref())?,
+            ancestor_path,
+            ours_path,
+            theirs_path,
+        });
+    }
+
+    anyhow::bail!("conflict not found for {file}")
+}
+
 pub fn resolve_conflict_with_checkout(
     path: impl AsRef<Path>,
     file: &str,
@@ -649,6 +699,17 @@ fn diff_to_patch(diff: &git2::Diff<'_>) -> anyhow::Result<String> {
         true
     })?;
     Ok(String::from_utf8_lossy(&output).to_string())
+}
+
+fn conflict_blob(repo: &Repository, entry: Option<&git2::IndexEntry>) -> anyhow::Result<String> {
+    let Some(entry) = entry else {
+        return Ok(String::new());
+    };
+    if entry.id == Oid::zero() {
+        return Ok(String::new());
+    }
+    let blob = repo.find_blob(entry.id)?;
+    Ok(String::from_utf8_lossy(blob.content()).to_string())
 }
 
 enum ReplayMode {
