@@ -147,6 +147,12 @@ pub struct BranchRequest {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct RemoteRequest {
+    pub remote: Option<String>,
+    pub branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct CherryPickRequest {
     pub commits: Vec<String>,
 }
@@ -254,7 +260,18 @@ impl ZyncApi {
     }
 
     pub async fn graph(&self, repository_id: &str) -> Result<Vec<CommitSummary>, String> {
-        get_json(&self.url(&format!("/repositories/{repository_id}/git/graph"))).await
+        self.graph_with_limit(repository_id, 500).await
+    }
+
+    pub async fn graph_with_limit(
+        &self,
+        repository_id: &str,
+        limit: usize,
+    ) -> Result<Vec<CommitSummary>, String> {
+        get_json(&self.url(&format!(
+            "/repositories/{repository_id}/git/graph?limit={limit}"
+        )))
+        .await
     }
 
     pub async fn diff_workdir(&self, repository_id: &str) -> Result<String, String> {
@@ -281,6 +298,17 @@ impl ZyncApi {
         get_text(&self.url(&format!(
             "/repositories/{repository_id}/git/diff/staged?path={}",
             urlencoding::encode(path)
+        )))
+        .await
+    }
+
+    pub async fn diff_commit(
+        &self,
+        repository_id: &str,
+        commit_id: &str,
+    ) -> Result<String, String> {
+        get_text(&self.url(&format!(
+            "/repositories/{repository_id}/git/diff/commit/{commit_id}"
         )))
         .await
     }
@@ -399,6 +427,58 @@ impl ZyncApi {
                 name: name.to_string(),
                 new_name: None,
                 checkout: Some(checkout),
+            },
+        )
+        .await
+    }
+
+    pub async fn rename_branch(
+        &self,
+        repository_id: &str,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!(
+                "/repositories/{repository_id}/git/branches/rename"
+            )),
+            &BranchRequest {
+                name: old_name.to_string(),
+                new_name: Some(new_name.to_string()),
+                checkout: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn fetch(&self, repository_id: &str) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/repositories/{repository_id}/git/fetch")),
+            &RemoteRequest {
+                remote: None,
+                branch: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn pull(&self, repository_id: &str) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/repositories/{repository_id}/git/pull")),
+            &RemoteRequest {
+                remote: None,
+                branch: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn push(&self, repository_id: &str) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/repositories/{repository_id}/git/push")),
+            &RemoteRequest {
+                remote: None,
+                branch: None,
             },
         )
         .await

@@ -11,7 +11,7 @@ pub fn app() -> Element {
     let workspace = use_signal(|| None::<api::WorkspaceResponse>);
     let git_status = use_signal(Vec::<api::FileStatus>::new);
     let branches = use_signal(Vec::<api::BranchSummary>::new);
-    let commits = use_signal(Vec::<api::CommitSummary>::new);
+    let mut commits = use_signal(Vec::<api::CommitSummary>::new);
     let stashes = use_signal(Vec::<api::StashSummary>::new);
     let conflicts = use_signal(Vec::<api::ConflictSummary>::new);
     let mut conflict_detail = use_signal(api::ConflictDetail::default);
@@ -27,6 +27,7 @@ pub fn app() -> Element {
     let mut new_branch_name = use_signal(String::new);
     let mut rebase_base = use_signal(String::new);
     let mut rebase_steps = use_signal(Vec::<api::RebaseStepRequest>::new);
+    let mut graph_limit = use_signal(|| 500usize);
     let mut notice = use_signal(|| "Ready".to_string());
 
     {
@@ -196,27 +197,28 @@ pub fn app() -> Element {
                             p { class: "text-xs text-zinc-500", "Mount a project into the server, add its server-side path, then open it here." }
                         }
                     }
-                    button {
-                        class: "w-full sm:w-auto rounded-md border border-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40",
+                    WorkspaceToolbar {
                         disabled: current_repository_id.is_empty(),
-                        onclick: move |_| {
+                        on_refresh: move |_| {
                             if let Some(current) = workspace.read().as_ref() {
-                                load_workspace(
-                                    api.read().clone(),
-                                    current.repository.id.clone(),
-                                    current.workspace.id.clone(),
-                                    workspace,
-                                    git_status,
-                                    branches,
-                                    commits,
-                                    stashes,
-                                    conflicts,
-                                    diff,
-                                    notice
-                                );
+                                load_workspace(api.read().clone(), current.repository.id.clone(), current.workspace.id.clone(), workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
                             }
                         },
-                        "Refresh workspace"
+                        on_fetch: move |_| {
+                            if let Some(current) = workspace.read().as_ref().cloned() {
+                                run_remote_action(api.read().clone(), current, RemoteAction::Fetch, workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                            }
+                        },
+                        on_pull: move |_| {
+                            if let Some(current) = workspace.read().as_ref().cloned() {
+                                run_remote_action(api.read().clone(), current, RemoteAction::Pull, workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                            }
+                        },
+                        on_push: move |_| {
+                            if let Some(current) = workspace.read().as_ref().cloned() {
+                                run_remote_action(api.read().clone(), current, RemoteAction::Push, workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                            }
+                        }
                     }
                 }
 
@@ -514,9 +516,50 @@ pub fn app() -> Element {
                             if let Some(current) = workspace.read().as_ref().cloned() {
                                 run_branch_action(api.read().clone(), current, BranchAction::Delete(name), workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
                             }
+                        },
+                        on_rename: move |(name, new_name): (String, String)| {
+                            if let Some(current) = workspace.read().as_ref().cloned() {
+                                run_branch_action(api.read().clone(), current, BranchAction::Rename(name, new_name), workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                            }
                         }
                     }
-                    CommitGraph { commits: commits.read().clone() }
+                    CommitGraph {
+                        commits: commits.read().clone(),
+                        on_select_commit: move |commit_id: String| {
+                            let Some(current) = workspace.read().as_ref().cloned() else {
+                                notice.set("Open a repository before viewing commit diff".to_string());
+                                return;
+                            };
+                            let api_client = api.read().clone();
+                            spawn(async move {
+                                match api_client.diff_commit(&current.repository.id, &commit_id).await {
+                                    Ok(patch) => {
+                                        diff.set(patch);
+                                        notice.set(format!("Showing commit {}", short_id(&commit_id)));
+                                    }
+                                    Err(error) => notice.set(error),
+                                }
+                            });
+                        },
+                        on_load_more: move |_| {
+                            let Some(current) = workspace.read().as_ref().cloned() else {
+                                notice.set("Open a repository before loading history".to_string());
+                                return;
+                            };
+                            let next_limit = (*graph_limit.read() + 500).min(5000);
+                            graph_limit.set(next_limit);
+                            let api_client = api.read().clone();
+                            spawn(async move {
+                                match api_client.graph_with_limit(&current.repository.id, next_limit).await {
+                                    Ok(items) => {
+                                        commits.set(items);
+                                        notice.set(format!("Loaded {next_limit} graph commits"));
+                                    }
+                                    Err(error) => notice.set(error),
+                                }
+                            });
+                        }
+                    }
                     HistoryToolsPanel {
                         stashes: stashes.read().clone(),
                         commits: commits.read().clone(),
@@ -703,6 +746,13 @@ enum BranchAction {
     Checkout(String),
     Merge(String),
     Delete(String),
+    Rename(String, String),
+}
+
+enum RemoteAction {
+    Fetch,
+    Pull,
+    Push,
 }
 
 enum StashAction {
@@ -846,10 +896,62 @@ fn run_branch_action(
             BranchAction::Checkout(name) => api.checkout_branch(&repository_id, &name).await,
             BranchAction::Merge(name) => api.merge_branch(&repository_id, &name).await,
             BranchAction::Delete(name) => api.delete_branch(&repository_id, &name).await,
+            BranchAction::Rename(name, new_name) => {
+                api.rename_branch(&repository_id, &name, &new_name).await
+            }
         };
         match result {
             Ok(()) => {
                 notice.set("Branch action complete".to_string());
+                load_workspace(
+                    api,
+                    repository_id,
+                    workspace_id,
+                    workspace,
+                    git_status,
+                    branches,
+                    commits,
+                    stashes,
+                    conflicts,
+                    diff,
+                    notice,
+                );
+            }
+            Err(error) => notice.set(error),
+        }
+    });
+}
+
+fn run_remote_action(
+    api: api::ZyncApi,
+    current: api::WorkspaceResponse,
+    action: RemoteAction,
+    workspace: Signal<Option<api::WorkspaceResponse>>,
+    git_status: Signal<Vec<api::FileStatus>>,
+    branches: Signal<Vec<api::BranchSummary>>,
+    commits: Signal<Vec<api::CommitSummary>>,
+    stashes: Signal<Vec<api::StashSummary>>,
+    conflicts: Signal<Vec<api::ConflictSummary>>,
+    diff: Signal<String>,
+    mut notice: Signal<String>,
+) {
+    let repository_id = current.repository.id;
+    let workspace_id = current.workspace.id;
+    spawn(async move {
+        let label = match action {
+            RemoteAction::Fetch => "Fetch",
+            RemoteAction::Pull => "Pull",
+            RemoteAction::Push => "Push",
+        };
+        notice.set(format!("{label} running"));
+        let result = match action {
+            RemoteAction::Fetch => api.fetch(&repository_id).await,
+            RemoteAction::Pull => api.pull(&repository_id).await,
+            RemoteAction::Push => api.push(&repository_id).await,
+        };
+        match result {
+            Ok(()) => {
+                notice.set(format!("{label} complete"));
                 load_workspace(
                     api,
                     repository_id,
@@ -1108,6 +1210,24 @@ fn FileExplorer(
                     }
                 }
             }
+        }
+    }
+}
+
+#[component]
+fn WorkspaceToolbar(
+    disabled: bool,
+    on_refresh: EventHandler<()>,
+    on_fetch: EventHandler<()>,
+    on_pull: EventHandler<()>,
+    on_push: EventHandler<()>,
+) -> Element {
+    rsx! {
+        div { class: "grid w-full grid-cols-2 gap-2 sm:w-auto sm:grid-cols-4",
+            button { class: "rounded-md border border-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40", disabled, onclick: move |_| on_fetch.call(()), "Fetch" }
+            button { class: "rounded-md border border-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40", disabled, onclick: move |_| on_pull.call(()), "Pull" }
+            button { class: "rounded-md border border-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40", disabled, onclick: move |_| on_push.call(()), "Push" }
+            button { class: "rounded-md border border-cyan-700/60 px-3 py-2 text-sm text-cyan-200 hover:bg-cyan-500/10 disabled:cursor-not-allowed disabled:opacity-40", disabled, onclick: move |_| on_refresh.call(()), "Refresh" }
         }
     }
 }
@@ -1378,6 +1498,7 @@ fn BranchPanel(
     on_checkout: EventHandler<String>,
     on_merge: EventHandler<String>,
     on_delete: EventHandler<String>,
+    on_rename: EventHandler<(String, String)>,
 ) -> Element {
     let mut open_menu = use_signal(|| None::<String>);
     rsx! {
@@ -1407,7 +1528,8 @@ fn BranchPanel(
                         on_close_menu: move |_| open_menu.set(None),
                         on_checkout,
                         on_merge,
-                        on_delete
+                        on_delete,
+                        on_rename
                     }
                 }
             }
@@ -1424,7 +1546,9 @@ fn BranchRow(
     on_checkout: EventHandler<String>,
     on_merge: EventHandler<String>,
     on_delete: EventHandler<String>,
+    on_rename: EventHandler<(String, String)>,
 ) -> Element {
+    let mut rename_value = use_signal(|| branch.name.clone());
     let checkout_name = branch.name.clone();
     let merge_name = branch.name.clone();
     let delete_name = branch.name.clone();
@@ -1460,7 +1584,10 @@ fn BranchRow(
                     on_close: on_close_menu,
                     on_checkout,
                     on_merge,
-                    on_delete
+                    on_delete,
+                    rename_value: rename_value.read().clone(),
+                    on_rename_value: move |value: String| rename_value.set(value),
+                    on_rename
                 }
             }
         }
@@ -1475,29 +1602,60 @@ fn BranchContextMenu(
     on_checkout: EventHandler<String>,
     on_merge: EventHandler<String>,
     on_delete: EventHandler<String>,
+    rename_value: String,
+    on_rename_value: EventHandler<String>,
+    on_rename: EventHandler<(String, String)>,
 ) -> Element {
     let checkout_name = branch.clone();
     let merge_name = branch.clone();
     let delete_name = branch.clone();
     rsx! {
-        div { class: "absolute right-2 top-8 z-20 w-40 overflow-hidden rounded-md border border-zinc-700 bg-zinc-950 shadow-xl shadow-black/40",
+        div { class: "absolute right-2 top-8 z-20 w-48 overflow-hidden rounded-md border border-zinc-700 bg-zinc-950 shadow-xl shadow-black/40",
             button { class: "block w-full px-3 py-2 text-left text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40", disabled: is_head, onclick: move |_| { on_checkout.call(checkout_name.clone()); on_close.call(()); }, "Checkout" }
             button { class: "block w-full px-3 py-2 text-left text-xs text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-40", disabled: is_head, onclick: move |_| { on_merge.call(merge_name.clone()); on_close.call(()); }, "Merge into HEAD" }
             button { class: "block w-full px-3 py-2 text-left text-xs text-red-200 hover:bg-red-500/10 disabled:opacity-40", disabled: is_head, onclick: move |_| { on_delete.call(delete_name.clone()); on_close.call(()); }, "Delete" }
+            div { class: "border-t border-zinc-800 p-2 space-y-2",
+                input {
+                    class: "w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none focus:border-cyan-500",
+                    value: "{rename_value}",
+                    oninput: move |event| on_rename_value.call(event.value())
+                }
+                button {
+                    class: "w-full rounded border border-cyan-700/60 px-2 py-1 text-left text-xs text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-40",
+                    disabled: is_head,
+                    onclick: move |_| {
+                        on_rename.call((branch.clone(), rename_value.clone()));
+                        on_close.call(());
+                    },
+                    "Rename"
+                }
+            }
             button { class: "block w-full border-t border-zinc-800 px-3 py-2 text-left text-xs text-zinc-500 hover:bg-zinc-800", onclick: move |_| on_close.call(()), "Close" }
         }
     }
 }
 
 #[component]
-fn CommitGraph(commits: Vec<api::CommitSummary>) -> Element {
+fn CommitGraph(
+    commits: Vec<api::CommitSummary>,
+    on_select_commit: EventHandler<String>,
+    on_load_more: EventHandler<()>,
+) -> Element {
     let rows = graph_rows(&commits);
     rsx! {
         article { class: "min-h-[240px] rounded-lg border border-zinc-800 bg-zinc-900/55 flex flex-col overflow-hidden",
-            h3 { class: "shrink-0 border-b border-zinc-800 px-3 py-2 text-sm font-semibold", "Commit Graph" }
+            header { class: "shrink-0 border-b border-zinc-800 px-3 py-2 flex items-center justify-between gap-2",
+                h3 { class: "text-sm font-semibold", "Commit Graph" }
+                button { class: "rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800", onclick: move |_| on_load_more.call(()), "Load more" }
+            }
             ol { class: "min-h-0 flex-1 overflow-y-auto p-3 space-y-2",
                 for row in rows {
-                    li { class: "grid grid-cols-[120px_70px_1fr] gap-2 rounded-md border border-zinc-800 bg-zinc-950/40 p-2 text-xs",
+                    li {
+                        class: "grid grid-cols-[120px_70px_1fr] gap-2 rounded-md border border-zinc-800 bg-zinc-950/40 p-2 text-xs hover:border-cyan-800/80 hover:bg-zinc-900/70",
+                        onclick: {
+                            let commit_id = row.commit.id.clone();
+                            move |_| on_select_commit.call(commit_id.clone())
+                        },
                         GraphLaneStrip { row: row.clone() }
                         code { class: "self-center text-cyan-300", "{short_id(&row.commit.id)}" }
                         div { class: "min-w-0",
