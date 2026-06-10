@@ -3,6 +3,8 @@ use std::collections::HashSet;
 
 pub mod api;
 
+const APP_CSS: &str = include_str!("style.css");
+
 pub fn app() -> Element {
     let api = use_signal(api::ZyncApi::default);
     let api_base = api.read().base_url.clone();
@@ -65,7 +67,7 @@ pub fn app() -> Element {
     };
 
     rsx! {
-        script { src: "https://cdn.tailwindcss.com" }
+        style { "{APP_CSS}" }
         main { class: "min-h-screen xl:h-screen bg-zinc-950 text-zinc-100 flex flex-col xl:flex-row overflow-y-auto xl:overflow-hidden",
             aside { class: "w-full xl:w-[280px] xl:h-screen shrink-0 border-b xl:border-b-0 xl:border-r border-zinc-800 bg-zinc-950 flex flex-col",
                 header { class: "h-12 shrink-0 border-b border-zinc-800 px-3 flex items-center justify-between gap-3",
