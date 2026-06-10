@@ -330,3 +330,85 @@ code,
   .xl\:grid-cols-\[220px_1fr\] { grid-template-columns: 220px minmax(0, 1fr); }
 }
 
+@media (min-width: 1280px) {
+  .app-shell .workspace-sidebar {
+    width: var(--sidebar-width, 280px);
+  }
+
+  .app-shell .workspace-grid {
+    grid-template-columns: var(--left-pane, 260px) minmax(0, 1fr) var(--right-pane, 380px);
+    grid-template-rows: var(--history-height, 320px) minmax(260px, 1fr) minmax(220px, 0.55fr) minmax(360px, auto);
+  }
+}
+
+.pane-size-controls {
+  position: relative;
+  align-self: stretch;
+}
+
+.pane-size-controls > summary {
+  list-style: none;
+  border: 1px solid rgba(14, 116, 144, 0.6);
+  border-radius: 0.25rem;
+  background: rgba(6, 182, 212, 0.1);
+  color: #a5f3fc;
+  cursor: pointer;
+  font-size: 0.75rem;
+  line-height: 1rem;
+  padding: 0.25rem 0.5rem;
+  user-select: none;
+}
+
+.pane-size-controls > summary::-webkit-details-marker {
+  display: none;
+}
+
+.pane-size-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.375rem);
+  z-index: 40;
+  width: min(340px, calc(100vw - 1rem));
+  border: 1px solid #3f3f46;
+  border-radius: 0.5rem;
+  background: #09090b;
+  box-shadow: 0 20px 35px rgba(0, 0, 0, 0.45);
+  padding: 0.75rem;
+}
+
+.pane-slider {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr) 58px;
+  align-items: center;
+  gap: 0.5rem;
+  color: #d4d4d8;
+  font-size: 0.75rem;
+  line-height: 1rem;
+  padding: 0.35rem 0;
+}
+
+.pane-slider input[type="range"] {
+  width: 100%;
+  accent-color: #06b6d4;
+}
+
+.pane-slider output {
+  color: #71717a;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.pane-reset-button {
+  width: 100%;
+  margin-top: 0.5rem;
+  border: 1px solid #3f3f46;
+  border-radius: 0.25rem;
+  background: #18181b;
+  color: #e4e4e7;
+  font-size: 0.75rem;
+  padding: 0.4rem 0.5rem;
+}
+
+.pane-reset-button:hover {
+  background: #27272a;
+}

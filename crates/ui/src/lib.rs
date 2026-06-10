@@ -41,6 +41,10 @@ pub fn app() -> Element {
     let mut tool_remote_url = use_signal(String::new);
     let mut tool_flow_name = use_signal(String::new);
     let tool_output = use_signal(String::new);
+    let mut sidebar_width = use_signal(|| 280u16);
+    let mut left_pane_width = use_signal(|| 260u16);
+    let mut inspector_width = use_signal(|| 380u16);
+    let mut history_height = use_signal(|| 320u16);
     let mut notice = use_signal(|| "Ready".to_string());
 
     {
@@ -65,11 +69,18 @@ pub fn app() -> Element {
     } else {
         api.read().websocket_url(&current_workspace_id)
     };
+    let layout_style = format!(
+        "--sidebar-width:{}px;--left-pane:{}px;--right-pane:{}px;--history-height:{}px;",
+        *sidebar_width.read(),
+        *left_pane_width.read(),
+        *inspector_width.read(),
+        *history_height.read()
+    );
 
     rsx! {
         style { "{APP_CSS}" }
-        main { class: "min-h-screen xl:h-screen bg-zinc-950 text-zinc-100 flex flex-col xl:flex-row overflow-y-auto xl:overflow-hidden",
-            aside { class: "w-full xl:w-[280px] xl:h-screen shrink-0 border-b xl:border-b-0 xl:border-r border-zinc-800 bg-zinc-950 flex flex-col",
+        main { class: "app-shell min-h-screen xl:h-screen bg-zinc-950 text-zinc-100 flex flex-col xl:flex-row overflow-y-auto xl:overflow-hidden", style: "{layout_style}",
+            aside { class: "workspace-sidebar w-full xl:w-[280px] xl:h-screen shrink-0 border-b xl:border-b-0 xl:border-r border-zinc-800 bg-zinc-950 flex flex-col",
                 header { class: "h-12 shrink-0 border-b border-zinc-800 px-3 flex items-center justify-between gap-3",
                     h1 { class: "text-sm font-semibold tracking-tight", "Zync" }
                     p { class: "min-w-0 truncate text-[11px] text-zinc-500", "API {api_base}" }
@@ -233,9 +244,25 @@ pub fn app() -> Element {
                             }
                         }
                     }
+                    PaneSizeControls {
+                        sidebar_width: *sidebar_width.read(),
+                        left_pane_width: *left_pane_width.read(),
+                        inspector_width: *inspector_width.read(),
+                        history_height: *history_height.read(),
+                        on_sidebar: move |value: u16| sidebar_width.set(value),
+                        on_left_pane: move |value: u16| left_pane_width.set(value),
+                        on_inspector: move |value: u16| inspector_width.set(value),
+                        on_history: move |value: u16| history_height.set(value),
+                        on_reset: move |_| {
+                            sidebar_width.set(280);
+                            left_pane_width.set(260);
+                            inspector_width.set(380);
+                            history_height.set(320);
+                        }
+                    }
                 }
 
-                div { class: "min-h-0 flex-1 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[260px_minmax(0,1fr)_380px] xl:grid-rows-[minmax(260px,0.95fr)_minmax(260px,0.75fr)_minmax(220px,0.55fr)_minmax(360px,auto)] gap-px bg-zinc-800 overflow-y-auto xl:overflow-hidden",
+                div { class: "workspace-grid min-h-0 flex-1 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[260px_minmax(0,1fr)_380px] xl:grid-rows-[minmax(260px,0.95fr)_minmax(260px,0.75fr)_minmax(220px,0.55fr)_minmax(360px,auto)] gap-px bg-zinc-800 overflow-y-auto xl:overflow-hidden",
                     FileExplorer {
                         files: workspace.read().as_ref().map(|item| item.files.clone()).unwrap_or_default(),
                         selected: selected_file.read().clone(),
@@ -1831,6 +1858,83 @@ fn FileExplorer(
                     }
                 }
             }
+        }
+    }
+}
+
+#[component]
+fn PaneSizeControls(
+    sidebar_width: u16,
+    left_pane_width: u16,
+    inspector_width: u16,
+    history_height: u16,
+    on_sidebar: EventHandler<u16>,
+    on_left_pane: EventHandler<u16>,
+    on_inspector: EventHandler<u16>,
+    on_history: EventHandler<u16>,
+    on_reset: EventHandler<()>,
+) -> Element {
+    rsx! {
+        details { class: "pane-size-controls",
+            summary { "Layout" }
+            div { class: "pane-size-popover",
+                PaneSlider {
+                    label: "Sidebar".to_string(),
+                    value: sidebar_width,
+                    min: 220,
+                    max: 420,
+                    on_change: on_sidebar
+                }
+                PaneSlider {
+                    label: "Left".to_string(),
+                    value: left_pane_width,
+                    min: 220,
+                    max: 420,
+                    on_change: on_left_pane
+                }
+                PaneSlider {
+                    label: "Inspector".to_string(),
+                    value: inspector_width,
+                    min: 320,
+                    max: 560,
+                    on_change: on_inspector
+                }
+                PaneSlider {
+                    label: "History".to_string(),
+                    value: history_height,
+                    min: 240,
+                    max: 520,
+                    on_change: on_history
+                }
+                button { class: "pane-reset-button", onclick: move |_| on_reset.call(()), "Reset layout" }
+            }
+        }
+    }
+}
+
+#[component]
+fn PaneSlider(
+    label: String,
+    value: u16,
+    min: u16,
+    max: u16,
+    on_change: EventHandler<u16>,
+) -> Element {
+    rsx! {
+        label { class: "pane-slider",
+            span { "{label}" }
+            input {
+                r#type: "range",
+                min: "{min}",
+                max: "{max}",
+                value: "{value}",
+                oninput: move |event| {
+                    if let Ok(value) = event.value().parse::<u16>() {
+                        on_change.call(value);
+                    }
+                }
+            }
+            output { "{value}px" }
         }
     }
 }
