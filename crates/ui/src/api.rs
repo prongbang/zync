@@ -66,6 +66,60 @@ pub struct BranchSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TagSummary {
+    pub name: String,
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RemoteSummary {
+    pub name: String,
+    pub url: Option<String>,
+    pub push_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BlameLine {
+    pub start_line: usize,
+    pub line_count: usize,
+    pub commit: String,
+    pub author: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TreeEntrySummary {
+    pub path: String,
+    pub kind: String,
+    pub id: String,
+    pub size: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReflogEntrySummary {
+    pub index: usize,
+    pub old_id: String,
+    pub new_id: String,
+    pub message: String,
+    pub committer: String,
+    pub time: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubmoduleSummary {
+    pub name: String,
+    pub path: String,
+    pub url: Option<String>,
+    pub head: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct LfsSummary {
+    pub configured: bool,
+    pub tracked_patterns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StashSummary {
     pub index: usize,
     pub name: String,
@@ -157,12 +211,31 @@ pub struct BranchRequest {
     pub name: String,
     pub new_name: Option<String>,
     pub checkout: Option<bool>,
+    pub revision: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RemoteRequest {
     pub remote: Option<String>,
     pub branch: Option<String>,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RevisionRequest {
+    pub revision: String,
+    pub hard: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TagRequest {
+    pub name: String,
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CommitIdRequest {
+    pub commit: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -334,6 +407,21 @@ impl ZyncApi {
         .await
     }
 
+    pub fn asset_url(&self, workspace_id: &str, path: &str) -> String {
+        self.url(&format!(
+            "/workspace/{workspace_id}/assets/{}",
+            urlencoding::encode(path)
+        ))
+    }
+
+    pub fn blob_url(&self, repository_id: &str, revision: &str, path: &str) -> String {
+        self.url(&format!(
+            "/repositories/{repository_id}/git/blob?revision={}&path={}",
+            urlencoding::encode(revision),
+            urlencoding::encode(path)
+        ))
+    }
+
     pub async fn write_file(
         &self,
         workspace_id: &str,
@@ -450,6 +538,7 @@ impl ZyncApi {
                 name: name.to_string(),
                 new_name: None,
                 checkout: None,
+                revision: None,
             },
         )
         .await
@@ -462,6 +551,7 @@ impl ZyncApi {
                 name: name.to_string(),
                 new_name: None,
                 checkout: None,
+                revision: None,
             },
         )
         .await
@@ -476,6 +566,7 @@ impl ZyncApi {
                 name: name.to_string(),
                 new_name: None,
                 checkout: None,
+                revision: None,
             },
         )
         .await
@@ -493,6 +584,26 @@ impl ZyncApi {
                 name: name.to_string(),
                 new_name: None,
                 checkout: Some(checkout),
+                revision: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn create_branch_at(
+        &self,
+        repository_id: &str,
+        name: &str,
+        revision: &str,
+        checkout: bool,
+    ) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/repositories/{repository_id}/git/branches")),
+            &BranchRequest {
+                name: name.to_string(),
+                new_name: None,
+                checkout: Some(checkout),
+                revision: Some(revision.to_string()),
             },
         )
         .await
@@ -512,6 +623,98 @@ impl ZyncApi {
                 name: old_name.to_string(),
                 new_name: Some(new_name.to_string()),
                 checkout: None,
+                revision: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn checkout_revision(
+        &self,
+        repository_id: &str,
+        revision: &str,
+    ) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!(
+                "/repositories/{repository_id}/git/checkout/revision"
+            )),
+            &RevisionRequest {
+                revision: revision.to_string(),
+                hard: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn revert_commit(&self, repository_id: &str, commit: &str) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/repositories/{repository_id}/git/revert")),
+            &CommitIdRequest {
+                commit: commit.to_string(),
+            },
+        )
+        .await
+    }
+
+    pub async fn tags(&self, repository_id: &str) -> Result<Vec<TagSummary>, String> {
+        get_json(&self.url(&format!("/repositories/{repository_id}/git/tags"))).await
+    }
+
+    pub async fn create_tag(
+        &self,
+        repository_id: &str,
+        name: &str,
+        target: Option<&str>,
+    ) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/repositories/{repository_id}/git/tags")),
+            &TagRequest {
+                name: name.to_string(),
+                target: target.map(ToOwned::to_owned),
+            },
+        )
+        .await
+    }
+
+    pub async fn delete_tag(&self, repository_id: &str, name: &str) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/repositories/{repository_id}/git/tags/delete")),
+            &TagRequest {
+                name: name.to_string(),
+                target: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn remotes(&self, repository_id: &str) -> Result<Vec<RemoteSummary>, String> {
+        get_json(&self.url(&format!("/repositories/{repository_id}/git/remotes"))).await
+    }
+
+    pub async fn add_remote(
+        &self,
+        repository_id: &str,
+        name: &str,
+        url: &str,
+    ) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/repositories/{repository_id}/git/remotes")),
+            &RemoteRequest {
+                remote: Some(name.to_string()),
+                branch: None,
+                url: Some(url.to_string()),
+            },
+        )
+        .await
+    }
+
+    pub async fn delete_remote(&self, repository_id: &str, name: &str) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/repositories/{repository_id}/git/remotes/delete")),
+            &RemoteRequest {
+                remote: Some(name.to_string()),
+                branch: None,
+                url: None,
             },
         )
         .await
@@ -523,6 +726,7 @@ impl ZyncApi {
             &RemoteRequest {
                 remote: None,
                 branch: None,
+                url: None,
             },
         )
         .await
@@ -534,6 +738,7 @@ impl ZyncApi {
             &RemoteRequest {
                 remote: None,
                 branch: None,
+                url: None,
             },
         )
         .await
@@ -545,9 +750,73 @@ impl ZyncApi {
             &RemoteRequest {
                 remote: None,
                 branch: None,
+                url: None,
             },
         )
         .await
+    }
+
+    pub async fn blame(&self, repository_id: &str, path: &str) -> Result<Vec<BlameLine>, String> {
+        get_json(&self.url(&format!(
+            "/repositories/{repository_id}/git/blame?path={}",
+            urlencoding::encode(path)
+        )))
+        .await
+    }
+
+    pub async fn file_history(
+        &self,
+        repository_id: &str,
+        path: &str,
+    ) -> Result<Vec<CommitSummary>, String> {
+        get_json(&self.url(&format!(
+            "/repositories/{repository_id}/git/history/file?path={}&limit=100",
+            urlencoding::encode(path)
+        )))
+        .await
+    }
+
+    pub async fn tree_at_revision(
+        &self,
+        repository_id: &str,
+        revision: &str,
+    ) -> Result<Vec<TreeEntrySummary>, String> {
+        get_json(&self.url(&format!(
+            "/repositories/{repository_id}/git/tree?revision={}",
+            urlencoding::encode(revision)
+        )))
+        .await
+    }
+
+    pub async fn reflog(&self, repository_id: &str) -> Result<Vec<ReflogEntrySummary>, String> {
+        get_json(&self.url(&format!(
+            "/repositories/{repository_id}/git/reflog?limit=100"
+        )))
+        .await
+    }
+
+    pub async fn reset_to_revision(
+        &self,
+        repository_id: &str,
+        revision: &str,
+        hard: bool,
+    ) -> Result<(), String> {
+        post_empty(
+            &self.url(&format!("/repositories/{repository_id}/git/reset")),
+            &RevisionRequest {
+                revision: revision.to_string(),
+                hard: Some(hard),
+            },
+        )
+        .await
+    }
+
+    pub async fn submodules(&self, repository_id: &str) -> Result<Vec<SubmoduleSummary>, String> {
+        get_json(&self.url(&format!("/repositories/{repository_id}/git/submodules"))).await
+    }
+
+    pub async fn lfs_summary(&self, repository_id: &str) -> Result<LfsSummary, String> {
+        get_json(&self.url(&format!("/repositories/{repository_id}/git/lfs"))).await
     }
 
     pub async fn commit(

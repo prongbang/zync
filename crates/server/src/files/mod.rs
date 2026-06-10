@@ -1,7 +1,8 @@
 use crate::{websocket::WorkspaceEvent, AppState};
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
+    response::IntoResponse,
     routing::{get, post, put},
     Json, Router,
 };
@@ -13,6 +14,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/workspace/:id/files", post(create_file))
         .route("/workspace/:id/files/rename", put(rename_file))
         .route("/workspace/:id/files/search", get(search_files))
+        .route("/workspace/:id/assets/*path", get(read_asset))
         .route(
             "/workspace/:id/files/*path",
             get(read_file).put(write_file).delete(delete_file),
@@ -71,6 +73,18 @@ async fn read_file(
     let target = safe_join(&root, &path)?;
     let content = fs::read_to_string(target).map_err(io_error)?;
     Ok(Json(FileContent { path, content }))
+}
+
+async fn read_asset(
+    State(state): State<Arc<AppState>>,
+    Path((workspace_id, path)): Path<(String, String)>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let root = workspace_root(&state, &workspace_id)?;
+    let target = safe_join(&root, &path)?;
+    let bytes = fs::read(&target).map_err(io_error)?;
+    let content_type = content_type_for_path(&path);
+    let headers = [(header::CONTENT_TYPE, HeaderValue::from_static(content_type))];
+    Ok((headers, bytes))
 }
 
 async fn write_file(
@@ -160,6 +174,25 @@ fn broadcast_path(state: &AppState, workspace_id: &str, kind: &str, path: String
     let mut event = WorkspaceEvent::new(kind);
     event.path = Some(path);
     state.hub.broadcast(workspace_id, event);
+}
+
+fn content_type_for_path(path: &str) -> &'static str {
+    match path
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "apng" => "image/apng",
+        "avif" => "image/avif",
+        "gif" => "image/gif",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        _ => "application/octet-stream",
+    }
 }
 
 fn io_error(error: std::io::Error) -> (StatusCode, String) {

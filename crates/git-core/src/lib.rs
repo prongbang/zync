@@ -1,10 +1,13 @@
 use git2::{
     ApplyLocation, BranchType, Cred, DiffFormat, DiffOptions, FetchOptions, IndexAddOption,
     MergeOptions, Oid, PushOptions, RemoteCallbacks, Repository, ResetType, Signature,
-    StatusOptions,
+    StatusOptions, TreeWalkMode, TreeWalkResult,
 };
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoInfo {
@@ -39,6 +42,60 @@ pub struct BranchSummary {
     pub is_head: bool,
     pub kind: String,
     pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TagSummary {
+    pub name: String,
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteSummary {
+    pub name: String,
+    pub url: Option<String>,
+    pub push_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlameLine {
+    pub start_line: usize,
+    pub line_count: usize,
+    pub commit: String,
+    pub author: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TreeEntrySummary {
+    pub path: String,
+    pub kind: String,
+    pub id: String,
+    pub size: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReflogEntrySummary {
+    pub index: usize,
+    pub old_id: String,
+    pub new_id: String,
+    pub message: String,
+    pub committer: String,
+    pub time: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmoduleSummary {
+    pub name: String,
+    pub path: String,
+    pub url: Option<String>,
+    pub head: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LfsSummary {
+    pub configured: bool,
+    pub tracked_patterns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +218,33 @@ pub fn push(
     let mut options = PushOptions::new();
     options.remote_callbacks(callbacks());
     remote.push(&[refspec], Some(&mut options))?;
+    Ok(())
+}
+
+pub fn remotes(path: impl AsRef<Path>) -> anyhow::Result<Vec<RemoteSummary>> {
+    let repo = Repository::open(path.as_ref())?;
+    let names = repo.remotes()?;
+    let mut remotes = Vec::new();
+    for name in names.iter().flatten() {
+        let remote = repo.find_remote(name)?;
+        remotes.push(RemoteSummary {
+            name: name.to_string(),
+            url: remote.url().map(ToOwned::to_owned),
+            push_url: remote.pushurl().map(ToOwned::to_owned),
+        });
+    }
+    Ok(remotes)
+}
+
+pub fn add_remote(path: impl AsRef<Path>, name: &str, url: &str) -> anyhow::Result<()> {
+    let repo = Repository::open(path.as_ref())?;
+    repo.remote(name, url)?;
+    Ok(())
+}
+
+pub fn delete_remote(path: impl AsRef<Path>, name: &str) -> anyhow::Result<()> {
+    let repo = Repository::open(path.as_ref())?;
+    repo.remote_delete(name)?;
     Ok(())
 }
 
@@ -322,6 +406,38 @@ pub fn branches(path: impl AsRef<Path>) -> anyhow::Result<Vec<BranchSummary>> {
     Ok(branches)
 }
 
+pub fn tags(path: impl AsRef<Path>) -> anyhow::Result<Vec<TagSummary>> {
+    let repo = Repository::open(path.as_ref())?;
+    let names = repo.tag_names(None)?;
+    let mut tags = Vec::new();
+    for name in names.iter().flatten() {
+        let target = repo
+            .revparse_single(&format!("refs/tags/{name}"))
+            .ok()
+            .map(|object| object.id().to_string());
+        tags.push(TagSummary {
+            name: name.to_string(),
+            target,
+        });
+    }
+    Ok(tags)
+}
+
+pub fn create_tag(path: impl AsRef<Path>, name: &str, target: Option<&str>) -> anyhow::Result<()> {
+    let repo = Repository::open(path.as_ref())?;
+    let object = target
+        .map(|revision| repo.revparse_single(revision))
+        .unwrap_or_else(|| repo.head()?.peel(git2::ObjectType::Commit))?;
+    repo.tag_lightweight(name, &object, false)?;
+    Ok(())
+}
+
+pub fn delete_tag(path: impl AsRef<Path>, name: &str) -> anyhow::Result<()> {
+    let repo = Repository::open(path.as_ref())?;
+    repo.tag_delete(name)?;
+    Ok(())
+}
+
 pub fn commit_graph(path: impl AsRef<Path>, limit: usize) -> anyhow::Result<Vec<CommitSummary>> {
     let repo = Repository::open(path.as_ref())?;
     let mut walk = repo.revwalk()?;
@@ -353,6 +469,21 @@ pub fn create_branch(path: impl AsRef<Path>, name: &str, checkout: bool) -> anyh
     Ok(())
 }
 
+pub fn create_branch_at(
+    path: impl AsRef<Path>,
+    name: &str,
+    revision: &str,
+    checkout: bool,
+) -> anyhow::Result<()> {
+    let repo = Repository::open(path.as_ref())?;
+    let commit = repo.revparse_single(revision)?.peel_to_commit()?;
+    repo.branch(name, &commit, false)?;
+    if checkout {
+        checkout_branch(path, name)?;
+    }
+    Ok(())
+}
+
 pub fn rename_branch(path: impl AsRef<Path>, old_name: &str, new_name: &str) -> anyhow::Result<()> {
     let repo = Repository::open(path.as_ref())?;
     let mut branch = repo.find_branch(old_name, BranchType::Local)?;
@@ -365,6 +496,19 @@ pub fn checkout_branch(path: impl AsRef<Path>, name: &str) -> anyhow::Result<()>
     let refname = format!("refs/heads/{name}");
     repo.set_head(&refname)?;
     repo.checkout_head(Some(git2::build::CheckoutBuilder::default().safe()))?;
+    Ok(())
+}
+
+pub fn checkout_revision(path: impl AsRef<Path>, revision: &str) -> anyhow::Result<()> {
+    let repo = Repository::open(path.as_ref())?;
+    let object = repo.revparse_single(revision)?;
+    repo.checkout_tree(
+        &object,
+        Some(git2::build::CheckoutBuilder::default().safe()),
+    )?;
+    if let Ok(commit) = object.peel_to_commit() {
+        repo.set_head_detached(commit.id())?;
+    }
     Ok(())
 }
 
@@ -403,6 +547,18 @@ pub fn merge_branch(path: impl AsRef<Path>, name: &str) -> anyhow::Result<()> {
     )?;
     repo.checkout_head(Some(git2::build::CheckoutBuilder::default().safe()))?;
     Ok(())
+}
+
+pub fn revert_commit(path: impl AsRef<Path>, commit_id: &str) -> anyhow::Result<String> {
+    let repo = Repository::open(path.as_ref())?;
+    let oid = Oid::from_str(commit_id)?;
+    let commit = repo.find_commit(oid)?;
+    repo.revert(&commit, None)?;
+    if repo.index()?.has_conflicts() {
+        anyhow::bail!("revert stopped on conflicts");
+    }
+    let message = format!("Revert \"{}\"", commit.summary().unwrap_or(commit_id));
+    commit_current_index(&repo, &message)
 }
 
 pub fn diff_workdir(path: impl AsRef<Path>) -> anyhow::Result<String> {
@@ -449,6 +605,180 @@ pub fn diff_commit(path: impl AsRef<Path>, commit_id: &str) -> anyhow::Result<St
     };
     let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)?;
     diff_to_patch(&diff)
+}
+
+pub fn blame_file(path: impl AsRef<Path>, file_path: &str) -> anyhow::Result<Vec<BlameLine>> {
+    let repo = Repository::open(path.as_ref())?;
+    let blame = repo.blame_file(Path::new(file_path), None)?;
+    let mut lines = Vec::new();
+    for hunk in blame.iter() {
+        let commit_id = hunk.final_commit_id();
+        let commit = repo.find_commit(commit_id).ok();
+        lines.push(BlameLine {
+            start_line: hunk.final_start_line(),
+            line_count: hunk.lines_in_hunk(),
+            commit: commit_id.to_string(),
+            author: commit
+                .as_ref()
+                .and_then(|commit| commit.author().name().map(ToOwned::to_owned))
+                .unwrap_or_default(),
+            summary: commit
+                .as_ref()
+                .and_then(|commit| commit.summary().map(ToOwned::to_owned))
+                .unwrap_or_default(),
+        });
+    }
+    Ok(lines)
+}
+
+pub fn file_history(
+    path: impl AsRef<Path>,
+    file_path: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<CommitSummary>> {
+    let repo = Repository::open(path.as_ref())?;
+    let mut walk = repo.revwalk()?;
+    walk.push_head()?;
+    walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)?;
+    let mut commits = Vec::new();
+    for oid in walk {
+        let oid = oid?;
+        let commit = repo.find_commit(oid)?;
+        let tree = commit.tree()?;
+        let parent_tree = if commit.parent_count() > 0 {
+            Some(commit.parent(0)?.tree()?)
+        } else {
+            None
+        };
+        let mut options = DiffOptions::new();
+        options.pathspec(file_path);
+        let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut options))?;
+        if diff.deltas().len() > 0 {
+            commits.push(CommitSummary {
+                id: oid.to_string(),
+                summary: commit.summary().unwrap_or("").to_string(),
+                author: commit.author().name().unwrap_or("").to_string(),
+                time: commit.time().seconds(),
+                parents: commit.parent_ids().map(|id| id.to_string()).collect(),
+            });
+        }
+        if commits.len() >= limit {
+            break;
+        }
+    }
+    Ok(commits)
+}
+
+pub fn tree_at_revision(
+    path: impl AsRef<Path>,
+    revision: &str,
+) -> anyhow::Result<Vec<TreeEntrySummary>> {
+    let repo = Repository::open(path.as_ref())?;
+    let tree = repo.revparse_single(revision)?.peel_to_tree()?;
+    let mut entries = Vec::new();
+    tree.walk(TreeWalkMode::PreOrder, |root, entry| {
+        let Some(name) = entry.name() else {
+            return TreeWalkResult::Ok;
+        };
+        let full_path = format!("{root}{name}");
+        let kind = entry
+            .kind()
+            .map(|kind| format!("{kind:?}").to_lowercase())
+            .unwrap_or_else(|| "unknown".to_string());
+        let size = if entry.kind() == Some(git2::ObjectType::Blob) {
+            repo.find_blob(entry.id()).ok().map(|blob| blob.size())
+        } else {
+            None
+        };
+        entries.push(TreeEntrySummary {
+            path: full_path,
+            kind,
+            id: entry.id().to_string(),
+            size,
+        });
+        TreeWalkResult::Ok
+    })?;
+    Ok(entries)
+}
+
+pub fn blob_at_revision(
+    path: impl AsRef<Path>,
+    revision: &str,
+    file_path: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let repo = Repository::open(path.as_ref())?;
+    let object = repo.revparse_single(revision)?;
+    let commit = object.peel_to_commit()?;
+    let tree = commit.tree()?;
+    let entry = tree.get_path(Path::new(file_path))?;
+    let blob = repo.find_blob(entry.id())?;
+    Ok(blob.content().to_vec())
+}
+
+pub fn reflog(path: impl AsRef<Path>, limit: usize) -> anyhow::Result<Vec<ReflogEntrySummary>> {
+    let repo = Repository::open(path.as_ref())?;
+    let log = repo.reflog("HEAD")?;
+    let mut entries = Vec::new();
+    for (index, entry) in log.iter().rev().take(limit).enumerate() {
+        let committer = entry.committer();
+        entries.push(ReflogEntrySummary {
+            index,
+            old_id: entry.id_old().to_string(),
+            new_id: entry.id_new().to_string(),
+            message: entry.message().unwrap_or("").to_string(),
+            committer: committer.name().unwrap_or("").to_string(),
+            time: committer.when().seconds(),
+        });
+    }
+    Ok(entries)
+}
+
+pub fn reset_to_revision(path: impl AsRef<Path>, revision: &str, hard: bool) -> anyhow::Result<()> {
+    let repo = Repository::open(path.as_ref())?;
+    let object = repo.revparse_single(revision)?;
+    repo.reset(
+        &object,
+        if hard {
+            ResetType::Hard
+        } else {
+            ResetType::Mixed
+        },
+        None,
+    )?;
+    Ok(())
+}
+
+pub fn submodules(path: impl AsRef<Path>) -> anyhow::Result<Vec<SubmoduleSummary>> {
+    let repo = Repository::open(path.as_ref())?;
+    let mut modules = Vec::new();
+    for module in repo.submodules()? {
+        modules.push(SubmoduleSummary {
+            name: module.name().unwrap_or("").to_string(),
+            path: module.path().to_string_lossy().to_string(),
+            url: module.url().map(ToOwned::to_owned),
+            head: module.head_id().map(|id| id.to_string()),
+        });
+    }
+    Ok(modules)
+}
+
+pub fn lfs_summary(path: impl AsRef<Path>) -> anyhow::Result<LfsSummary> {
+    let repo = Repository::open(path.as_ref())?;
+    let root = repo
+        .workdir()
+        .ok_or_else(|| anyhow::anyhow!("bare repository has no working tree"))?;
+    let attrs = root.join(".gitattributes");
+    let content = fs::read_to_string(attrs).unwrap_or_default();
+    let tracked_patterns = content
+        .lines()
+        .filter(|line| line.contains("filter=lfs"))
+        .map(|line| line.split_whitespace().next().unwrap_or("").to_string())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    Ok(LfsSummary {
+        configured: !tracked_patterns.is_empty(),
+        tracked_patterns,
+    })
 }
 
 pub fn cherry_pick(path: impl AsRef<Path>, commit_ids: &[String]) -> anyhow::Result<()> {

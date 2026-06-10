@@ -1,7 +1,8 @@
 use crate::AppState;
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
@@ -26,14 +27,34 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/repositories/:id/git/pull", post(pull))
         .route("/repositories/:id/git/push", post(push))
         .route(
+            "/repositories/:id/git/remotes",
+            get(remotes).post(add_remote),
+        )
+        .route("/repositories/:id/git/remotes/delete", post(delete_remote))
+        .route(
             "/repositories/:id/git/branches",
             get(branches).post(create_branch),
         )
         .route("/repositories/:id/git/checkout", post(checkout_branch))
+        .route(
+            "/repositories/:id/git/checkout/revision",
+            post(checkout_revision),
+        )
         .route("/repositories/:id/git/branches/rename", post(rename_branch))
         .route("/repositories/:id/git/branches/merge", post(merge_branch))
         .route("/repositories/:id/git/branches/delete", post(delete_branch))
+        .route("/repositories/:id/git/tags", get(tags).post(create_tag))
+        .route("/repositories/:id/git/tags/delete", post(delete_tag))
+        .route("/repositories/:id/git/revert", post(revert_commit))
         .route("/repositories/:id/git/graph", get(commit_graph))
+        .route("/repositories/:id/git/blame", get(blame))
+        .route("/repositories/:id/git/history/file", get(file_history))
+        .route("/repositories/:id/git/tree", get(tree_at_revision))
+        .route("/repositories/:id/git/blob", get(blob_at_revision))
+        .route("/repositories/:id/git/reflog", get(reflog))
+        .route("/repositories/:id/git/reset", post(reset_to_revision))
+        .route("/repositories/:id/git/submodules", get(submodules))
+        .route("/repositories/:id/git/lfs", get(lfs_summary))
         .route("/repositories/:id/git/rebase/plan", get(rebase_plan))
         .route(
             "/repositories/:id/git/rebase/interactive",
@@ -84,6 +105,7 @@ struct CommitRequest {
 struct RemoteRequest {
     remote: Option<String>,
     branch: Option<String>,
+    url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,6 +113,24 @@ struct BranchRequest {
     name: String,
     new_name: Option<String>,
     checkout: Option<bool>,
+    revision: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RevisionRequest {
+    revision: String,
+    hard: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TagRequest {
+    name: String,
+    target: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitIdRequest {
+    commit: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,6 +316,42 @@ async fn push(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn remotes(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<zync_git_core::RemoteSummary>>, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    zync_git_core::remotes(repository.path)
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn add_remote(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<RemoteRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let name = request.remote.as_deref().unwrap_or("origin");
+    let url = request
+        .url
+        .as_deref()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "url is required".to_string()))?;
+    zync_git_core::add_remote(repository.path, name, url).map_err(internal_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_remote(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<RemoteRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let name = request.remote.as_deref().unwrap_or("origin");
+    zync_git_core::delete_remote(repository.path, name).map_err(internal_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn branches(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -292,12 +368,22 @@ async fn create_branch(
     Json(request): Json<BranchRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::create_branch(
-        repository.path,
-        &request.name,
-        request.checkout.unwrap_or(false),
-    )
-    .map_err(internal_error)?;
+    if let Some(revision) = request.revision.as_deref() {
+        zync_git_core::create_branch_at(
+            repository.path,
+            &request.name,
+            revision,
+            request.checkout.unwrap_or(false),
+        )
+        .map_err(internal_error)?;
+    } else {
+        zync_git_core::create_branch(
+            repository.path,
+            &request.name,
+            request.checkout.unwrap_or(false),
+        )
+        .map_err(internal_error)?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -308,6 +394,16 @@ async fn checkout_branch(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     zync_git_core::checkout_branch(repository.path, &request.name).map_err(internal_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn checkout_revision(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<RevisionRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    zync_git_core::checkout_revision(repository.path, &request.revision).map_err(internal_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -345,6 +441,48 @@ async fn merge_branch(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn tags(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<zync_git_core::TagSummary>>, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    zync_git_core::tags(repository.path)
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn create_tag(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<TagRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    zync_git_core::create_tag(repository.path, &request.name, request.target.as_deref())
+        .map_err(internal_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_tag(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<TagRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    zync_git_core::delete_tag(repository.path, &request.name).map_err(internal_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn revert_commit(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<CommitIdRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let commit =
+        zync_git_core::revert_commit(repository.path, &request.commit).map_err(internal_error)?;
+    Ok(Json(serde_json::json!({ "commit": commit })))
+}
+
 async fn commit_graph(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -373,6 +511,121 @@ async fn rebase_plan(
         .unwrap_or(20)
         .min(200);
     zync_git_core::commit_graph(repository.path, limit)
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn blame(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<zync_git_core::BlameLine>>, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let path = query
+        .get("path")
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "path is required".to_string()))?;
+    zync_git_core::blame_file(repository.path, path)
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn file_history(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<zync_git_core::CommitSummary>>, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let path = query
+        .get("path")
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "path is required".to_string()))?;
+    let limit = query
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(100)
+        .min(1000);
+    zync_git_core::file_history(repository.path, path, limit)
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn tree_at_revision(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<zync_git_core::TreeEntrySummary>>, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let revision = query.get("revision").map(String::as_str).unwrap_or("HEAD");
+    zync_git_core::tree_at_revision(repository.path, revision)
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn blob_at_revision(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let path = query
+        .get("path")
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "path is required".to_string()))?;
+    let revision = query.get("revision").map(String::as_str).unwrap_or("HEAD");
+    let bytes =
+        zync_git_core::blob_at_revision(repository.path, revision, path).map_err(internal_error)?;
+    let headers = [(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(content_type_for_path(path)),
+    )];
+    Ok((headers, bytes))
+}
+
+async fn reflog(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<zync_git_core::ReflogEntrySummary>>, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let limit = query
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(100)
+        .min(1000);
+    zync_git_core::reflog(repository.path, limit)
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn reset_to_revision(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<RevisionRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    zync_git_core::reset_to_revision(
+        repository.path,
+        &request.revision,
+        request.hard.unwrap_or(false),
+    )
+    .map_err(internal_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn submodules(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<zync_git_core::SubmoduleSummary>>, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    zync_git_core::submodules(repository.path)
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn lfs_summary(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<zync_git_core::LfsSummary>, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    zync_git_core::lfs_summary(repository.path)
         .map(Json)
         .map_err(internal_error)
 }
@@ -525,4 +778,23 @@ fn repository(
 
 fn internal_error(error: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+}
+
+fn content_type_for_path(path: &str) -> &'static str {
+    match path
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "apng" => "image/apng",
+        "avif" => "image/avif",
+        "gif" => "image/gif",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        _ => "application/octet-stream",
+    }
 }

@@ -31,6 +31,14 @@ pub fn app() -> Element {
     let mut rebase_base = use_signal(String::new);
     let mut rebase_steps = use_signal(Vec::<api::RebaseStepRequest>::new);
     let mut graph_limit = use_signal(|| 500usize);
+    let mut tool_revision = use_signal(|| "HEAD".to_string());
+    let mut tool_branch = use_signal(String::new);
+    let mut tool_tag = use_signal(String::new);
+    let mut tool_file = use_signal(String::new);
+    let mut tool_remote_name = use_signal(|| "origin".to_string());
+    let mut tool_remote_url = use_signal(String::new);
+    let mut tool_flow_name = use_signal(String::new);
+    let tool_output = use_signal(String::new);
     let mut notice = use_signal(|| "Ready".to_string());
 
     {
@@ -458,6 +466,17 @@ pub fn app() -> Element {
 
                     DiffViewer {
                         diff: diff.read().clone(),
+                        image_path: selected_file.read().clone(),
+                        image_before_url: workspace
+                            .read()
+                            .as_ref()
+                            .map(|current| api.read().blob_url(&current.repository.id, "HEAD", &selected_file.read()))
+                            .unwrap_or_default(),
+                        image_after_url: workspace
+                            .read()
+                            .as_ref()
+                            .map(|current| api.read().asset_url(&current.workspace.id, &selected_file.read()))
+                            .unwrap_or_default(),
                         on_stage_patch: move |patch: String| {
                             let Some(current) = workspace.read().as_ref().cloned() else {
                                 notice.set("Open a repository before staging a patch".to_string());
@@ -808,6 +827,52 @@ pub fn app() -> Element {
                             run_history_action(api.read().clone(), current, HistoryAction::Resolve(path, side), workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
                         }
                     }
+                    RepositoryToolsPanel {
+                        selected_file: selected_file.read().clone(),
+                        revision: tool_revision.read().clone(),
+                        branch_name: tool_branch.read().clone(),
+                        tag_name: tool_tag.read().clone(),
+                        file_path: tool_file.read().clone(),
+                        remote_name: tool_remote_name.read().clone(),
+                        remote_url: tool_remote_url.read().clone(),
+                        flow_name: tool_flow_name.read().clone(),
+                        output: tool_output.read().clone(),
+                        on_revision: move |value: String| tool_revision.set(value),
+                        on_branch_name: move |value: String| tool_branch.set(value),
+                        on_tag_name: move |value: String| tool_tag.set(value),
+                        on_file_path: move |value: String| tool_file.set(value),
+                        on_remote_name: move |value: String| tool_remote_name.set(value),
+                        on_remote_url: move |value: String| tool_remote_url.set(value),
+                        on_flow_name: move |value: String| tool_flow_name.set(value),
+                        on_action: move |action: ToolAction| {
+                            let Some(current) = workspace.read().as_ref().cloned() else {
+                                notice.set("Open a repository before using repository tools".to_string());
+                                return;
+                            };
+                            run_repository_tool(
+                                api.read().clone(),
+                                current,
+                                action,
+                                selected_file.read().clone(),
+                                tool_revision.read().clone(),
+                                tool_branch.read().clone(),
+                                tool_tag.read().clone(),
+                                tool_file.read().clone(),
+                                tool_remote_name.read().clone(),
+                                tool_remote_url.read().clone(),
+                                tool_flow_name.read().clone(),
+                                workspace,
+                                git_status,
+                                branches,
+                                commits,
+                                stashes,
+                                conflicts,
+                                diff,
+                                tool_output,
+                                notice,
+                            );
+                        }
+                    }
                 }
 
                 footer { class: "h-8 shrink-0 border-t border-zinc-800 px-4 flex items-center text-xs text-zinc-400 bg-zinc-950", "{notice}" }
@@ -855,6 +920,32 @@ enum HistoryAction {
     CherryAbort,
     Rebase(String, Vec<api::RebaseStepRequest>),
     Resolve(String, String),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ToolAction {
+    CheckoutRevision,
+    BranchFromRevision,
+    RevertCommit,
+    CreateTag,
+    DeleteTag,
+    Tags,
+    Blame,
+    FileHistory,
+    TreeAtRevision,
+    Reflog,
+    ResetMixed,
+    ResetHard,
+    Submodules,
+    Lfs,
+    Remotes,
+    AddRemote,
+    DeleteRemote,
+    GitFlowDevelop,
+    GitFlowFeature,
+    GitFlowRelease,
+    GitFlowHotfix,
+    GithubLinks,
 }
 
 fn load_repositories(
@@ -1220,6 +1311,242 @@ fn run_history_action(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_repository_tool(
+    api: api::ZyncApi,
+    current: api::WorkspaceResponse,
+    action: ToolAction,
+    selected_file: String,
+    revision: String,
+    branch_name: String,
+    tag_name: String,
+    file_path: String,
+    remote_name: String,
+    remote_url: String,
+    flow_name: String,
+    workspace: Signal<Option<api::WorkspaceResponse>>,
+    git_status: Signal<Vec<api::FileStatus>>,
+    branches: Signal<Vec<api::BranchSummary>>,
+    commits: Signal<Vec<api::CommitSummary>>,
+    stashes: Signal<Vec<api::StashSummary>>,
+    conflicts: Signal<Vec<api::ConflictSummary>>,
+    diff: Signal<String>,
+    mut output: Signal<String>,
+    mut notice: Signal<String>,
+) {
+    let repository_id = current.repository.id;
+    let workspace_id = current.workspace.id;
+    spawn(async move {
+        let revision = revision.trim().to_string();
+        let branch_name = branch_name.trim().to_string();
+        let tag_name = tag_name.trim().to_string();
+        let file_path = if file_path.trim().is_empty() {
+            selected_file
+        } else {
+            file_path.trim().to_string()
+        };
+        let remote_name = remote_name.trim().to_string();
+        let remote_url = remote_url.trim().to_string();
+        let flow_name = flow_name.trim().to_string();
+
+        let result = match action {
+            ToolAction::CheckoutRevision => api
+                .checkout_revision(&repository_id, revision.as_str())
+                .await
+                .map(|_| "Checked out revision".to_string()),
+            ToolAction::BranchFromRevision => {
+                if branch_name.is_empty() {
+                    Err("Branch name is required".to_string())
+                } else {
+                    api.create_branch_at(&repository_id, &branch_name, &revision, true)
+                        .await
+                        .map(|_| format!("Created branch {branch_name} at {revision}"))
+                }
+            }
+            ToolAction::RevertCommit => api
+                .revert_commit(&repository_id, &revision)
+                .await
+                .map(|_| format!("Reverted {revision}")),
+            ToolAction::CreateTag => {
+                if tag_name.is_empty() {
+                    Err("Tag name is required".to_string())
+                } else {
+                    api.create_tag(&repository_id, &tag_name, Some(&revision))
+                        .await
+                        .map(|_| format!("Created tag {tag_name}"))
+                }
+            }
+            ToolAction::DeleteTag => {
+                if tag_name.is_empty() {
+                    Err("Tag name is required".to_string())
+                } else {
+                    api.delete_tag(&repository_id, &tag_name)
+                        .await
+                        .map(|_| format!("Deleted tag {tag_name}"))
+                }
+            }
+            ToolAction::Tags => api.tags(&repository_id).await.and_then(pretty_json),
+            ToolAction::Blame => {
+                if file_path.is_empty() {
+                    Err("File path is required".to_string())
+                } else {
+                    api.blame(&repository_id, &file_path)
+                        .await
+                        .and_then(pretty_json)
+                }
+            }
+            ToolAction::FileHistory => {
+                if file_path.is_empty() {
+                    Err("File path is required".to_string())
+                } else {
+                    api.file_history(&repository_id, &file_path)
+                        .await
+                        .and_then(pretty_json)
+                }
+            }
+            ToolAction::TreeAtRevision => api
+                .tree_at_revision(&repository_id, &revision)
+                .await
+                .and_then(pretty_json),
+            ToolAction::Reflog => api.reflog(&repository_id).await.and_then(pretty_json),
+            ToolAction::ResetMixed => api
+                .reset_to_revision(&repository_id, &revision, false)
+                .await
+                .map(|_| format!("Reset mixed to {revision}")),
+            ToolAction::ResetHard => api
+                .reset_to_revision(&repository_id, &revision, true)
+                .await
+                .map(|_| format!("Reset hard to {revision}")),
+            ToolAction::Submodules => api.submodules(&repository_id).await.and_then(pretty_json),
+            ToolAction::Lfs => api.lfs_summary(&repository_id).await.and_then(pretty_json),
+            ToolAction::Remotes => api.remotes(&repository_id).await.and_then(pretty_json),
+            ToolAction::AddRemote => {
+                if remote_name.is_empty() || remote_url.is_empty() {
+                    Err("Remote name and URL are required".to_string())
+                } else {
+                    api.add_remote(&repository_id, &remote_name, &remote_url)
+                        .await
+                        .map(|_| format!("Added remote {remote_name}"))
+                }
+            }
+            ToolAction::DeleteRemote => {
+                if remote_name.is_empty() {
+                    Err("Remote name is required".to_string())
+                } else {
+                    api.delete_remote(&repository_id, &remote_name)
+                        .await
+                        .map(|_| format!("Deleted remote {remote_name}"))
+                }
+            }
+            ToolAction::GitFlowDevelop => api
+                .create_branch(&repository_id, "develop", true)
+                .await
+                .map(|_| "Created develop branch".to_string()),
+            ToolAction::GitFlowFeature => {
+                create_flow_branch(&api, &repository_id, "feature", &flow_name).await
+            }
+            ToolAction::GitFlowRelease => {
+                create_flow_branch(&api, &repository_id, "release", &flow_name).await
+            }
+            ToolAction::GitFlowHotfix => {
+                create_flow_branch(&api, &repository_id, "hotfix", &flow_name).await
+            }
+            ToolAction::GithubLinks => github_links(&api, &repository_id, &revision).await,
+        };
+
+        match result {
+            Ok(message) => {
+                output.set(message.clone());
+                notice.set(message);
+                load_workspace(
+                    api,
+                    repository_id,
+                    workspace_id,
+                    workspace,
+                    git_status,
+                    branches,
+                    commits,
+                    stashes,
+                    conflicts,
+                    diff,
+                    notice,
+                );
+            }
+            Err(error) => {
+                output.set(error.clone());
+                notice.set(error);
+            }
+        }
+    });
+}
+
+async fn create_flow_branch(
+    api: &api::ZyncApi,
+    repository_id: &str,
+    prefix: &str,
+    name: &str,
+) -> Result<String, String> {
+    if name.trim().is_empty() {
+        return Err("Git-flow name is required".to_string());
+    }
+    let branch = format!("{prefix}/{}", name.trim());
+    api.create_branch(repository_id, &branch, true).await?;
+    Ok(format!("Created {branch}"))
+}
+
+async fn github_links(
+    api: &api::ZyncApi,
+    repository_id: &str,
+    revision: &str,
+) -> Result<String, String> {
+    let remotes = api.remotes(repository_id).await?;
+    let mut links = Vec::new();
+    for remote in remotes {
+        let Some(url) = remote.url.or(remote.push_url) else {
+            continue;
+        };
+        let Some(repo_url) = github_repo_url(&url) else {
+            continue;
+        };
+        let target = if revision.trim().is_empty() {
+            "HEAD"
+        } else {
+            revision.trim()
+        };
+        links.push(serde_json::json!({
+            "remote": remote.name,
+            "repository": repo_url,
+            "commits": format!("{repo_url}/commits"),
+            "branches": format!("{repo_url}/branches"),
+            "compare": format!("{repo_url}/compare"),
+            "target": format!("{repo_url}/tree/{target}"),
+        }));
+    }
+    if links.is_empty() {
+        Err("No GitHub remote URL found".to_string())
+    } else {
+        pretty_json(links)
+    }
+}
+
+fn github_repo_url(remote_url: &str) -> Option<String> {
+    let trimmed = remote_url.trim().trim_end_matches(".git");
+    if let Some(path) = trimmed.strip_prefix("git@github.com:") {
+        return Some(format!("https://github.com/{path}"));
+    }
+    if let Some(path) = trimmed.strip_prefix("ssh://git@github.com/") {
+        return Some(format!("https://github.com/{path}"));
+    }
+    if trimmed.starts_with("https://github.com/") || trimmed.starts_with("http://github.com/") {
+        return Some(trimmed.replacen("http://", "https://", 1));
+    }
+    None
+}
+
+fn pretty_json<T: serde::Serialize>(value: T) -> Result<String, String> {
+    serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
+}
+
 fn move_rebase_step(
     mut steps: Vec<api::RebaseStepRequest>,
     commit: &str,
@@ -1579,10 +1906,19 @@ fn StatusRow(
 }
 
 #[component]
-fn DiffViewer(diff: String, on_stage_patch: EventHandler<String>) -> Element {
+fn DiffViewer(
+    diff: String,
+    image_path: String,
+    image_before_url: String,
+    image_after_url: String,
+    on_stage_patch: EventHandler<String>,
+) -> Element {
     let mut selected_lines = use_signal(HashSet::<String>::new);
     let hunks = diff_hunks(&diff);
+    let split_lines = split_diff_lines(&hunks);
     let stage_all_patch = diff.clone();
+    let show_image_diff =
+        is_image_path(&image_path) && !image_before_url.is_empty() && !image_after_url.is_empty();
     rsx! {
         article { class: "min-h-[320px] md:min-h-[420px] xl:min-h-0 rounded-lg border border-zinc-800 bg-zinc-900/55 flex flex-col overflow-hidden",
             header { class: "shrink-0 border-b border-zinc-800 px-3 py-2 flex items-center justify-between gap-2",
@@ -1595,6 +1931,29 @@ fn DiffViewer(diff: String, on_stage_patch: EventHandler<String>) -> Element {
                 }
             }
             div { class: "min-h-0 flex-1 overflow-auto bg-zinc-950/70 p-3 space-y-3",
+                if show_image_diff {
+                    ImageDiffPreview {
+                        path: image_path.clone(),
+                        before_url: image_before_url.clone(),
+                        after_url: image_after_url.clone(),
+                    }
+                }
+                if !split_lines.is_empty() {
+                    section { class: "rounded-md border border-zinc-800 bg-zinc-950/80 overflow-hidden",
+                        div { class: "grid grid-cols-2 border-b border-zinc-800 text-[11px] font-semibold uppercase tracking-wide text-zinc-500",
+                            span { class: "px-2 py-1.5", "Old" }
+                            span { class: "border-l border-zinc-800 px-2 py-1.5", "New" }
+                        }
+                        div { class: "max-h-72 overflow-auto font-mono text-xs leading-5",
+                            for line in split_lines {
+                                div { class: "grid grid-cols-2",
+                                    pre { class: format!("min-w-0 whitespace-pre-wrap break-words px-2 {}", line.old_class), "{line.old}" }
+                                    pre { class: format!("min-w-0 whitespace-pre-wrap break-words border-l border-zinc-800 px-2 {}", line.new_class), "{line.new}" }
+                                }
+                            }
+                        }
+                    }
+                }
                 if hunks.is_empty() {
                     pre { class: "font-mono text-xs leading-5 text-zinc-300 whitespace-pre-wrap", "{diff}" }
                 } else {
@@ -1657,6 +2016,84 @@ fn DiffViewer(diff: String, on_stage_patch: EventHandler<String>) -> Element {
             }
         }
     }
+}
+
+#[component]
+fn ImageDiffPreview(path: String, before_url: String, after_url: String) -> Element {
+    rsx! {
+        section { class: "rounded-md border border-zinc-800 bg-zinc-950/80 overflow-hidden",
+            div { class: "border-b border-zinc-800 px-2 py-1.5",
+                h4 { class: "text-xs font-semibold text-zinc-300", "Image Diff" }
+                p { class: "mt-0.5 break-all text-[11px] text-zinc-500", "{path}" }
+            }
+            div { class: "grid grid-cols-1 md:grid-cols-2",
+                div { class: "min-w-0 p-2",
+                    div { class: "mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500", "HEAD" }
+                    img { class: "max-h-80 w-full rounded border border-zinc-800 object-contain bg-zinc-900", src: "{before_url}", alt: "HEAD image" }
+                }
+                div { class: "min-w-0 border-t border-zinc-800 p-2 md:border-l md:border-t-0",
+                    div { class: "mb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-500", "Working Tree" }
+                    img { class: "max-h-80 w-full rounded border border-zinc-800 object-contain bg-zinc-900", src: "{after_url}", alt: "Working tree image" }
+                }
+            }
+        }
+    }
+}
+
+fn is_image_path(path: &str) -> bool {
+    matches!(
+        path.rsplit('.')
+            .next()
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
+        "apng" | "avif" | "gif" | "jpg" | "jpeg" | "png" | "svg" | "webp"
+    )
+}
+
+#[derive(Clone, PartialEq)]
+struct SplitDiffLine {
+    old: String,
+    new: String,
+    old_class: &'static str,
+    new_class: &'static str,
+}
+
+fn split_diff_lines(hunks: &[DiffHunk]) -> Vec<SplitDiffLine> {
+    let mut rows = Vec::new();
+    for hunk in hunks {
+        rows.push(SplitDiffLine {
+            old: hunk.title.clone(),
+            new: hunk.title.clone(),
+            old_class: "bg-cyan-500/10 text-cyan-200",
+            new_class: "bg-cyan-500/10 text-cyan-200",
+        });
+        for line in hunk.lines.iter().skip(1) {
+            if line.text.starts_with('-') && !line.text.starts_with("--- ") {
+                rows.push(SplitDiffLine {
+                    old: line.text.clone(),
+                    new: String::new(),
+                    old_class: "bg-red-500/10 text-red-200",
+                    new_class: "text-zinc-700",
+                });
+            } else if line.text.starts_with('+') && !line.text.starts_with("+++ ") {
+                rows.push(SplitDiffLine {
+                    old: String::new(),
+                    new: line.text.clone(),
+                    old_class: "text-zinc-700",
+                    new_class: "bg-emerald-500/10 text-emerald-200",
+                });
+            } else {
+                rows.push(SplitDiffLine {
+                    old: line.text.clone(),
+                    new: line.text.clone(),
+                    old_class: "text-zinc-400",
+                    new_class: "text-zinc-400",
+                });
+            }
+        }
+    }
+    rows
 }
 
 #[component]
@@ -2159,6 +2596,99 @@ fn ConflictPane(title: String, path: String, content: String) -> Element {
                 readonly: true,
                 value: "{content}"
             }
+        }
+    }
+}
+
+#[component]
+fn RepositoryToolsPanel(
+    selected_file: String,
+    revision: String,
+    branch_name: String,
+    tag_name: String,
+    file_path: String,
+    remote_name: String,
+    remote_url: String,
+    flow_name: String,
+    output: String,
+    on_revision: EventHandler<String>,
+    on_branch_name: EventHandler<String>,
+    on_tag_name: EventHandler<String>,
+    on_file_path: EventHandler<String>,
+    on_remote_name: EventHandler<String>,
+    on_remote_url: EventHandler<String>,
+    on_flow_name: EventHandler<String>,
+    on_action: EventHandler<ToolAction>,
+) -> Element {
+    rsx! {
+        article { class: "min-h-[420px] rounded-lg border border-zinc-800 bg-zinc-900/55 flex flex-col overflow-hidden md:col-span-2 xl:col-span-3",
+            h3 { class: "shrink-0 border-b border-zinc-800 px-3 py-2 text-sm font-semibold", "Repository Tools" }
+            div { class: "min-h-0 flex-1 grid grid-cols-1 xl:grid-cols-[1.2fr_1fr] gap-3 overflow-y-auto p-3",
+                div { class: "space-y-4",
+                    section { class: "space-y-2 rounded-md border border-zinc-800 bg-zinc-950/35 p-3",
+                        h4 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-500", "Revision / Tags" }
+                        div { class: "grid grid-cols-1 sm:grid-cols-3 gap-2",
+                            input { class: "rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 font-mono text-xs text-zinc-100 outline-none focus:border-cyan-500", value: "{revision}", placeholder: "revision", oninput: move |event| on_revision.call(event.value()) }
+                            input { class: "rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-cyan-500", value: "{branch_name}", placeholder: "branch from revision", oninput: move |event| on_branch_name.call(event.value()) }
+                            input { class: "rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-cyan-500", value: "{tag_name}", placeholder: "tag name", oninput: move |event| on_tag_name.call(event.value()) }
+                        }
+                        div { class: "flex flex-wrap gap-2",
+                            ToolButton { label: "Checkout Rev".to_string(), action: ToolAction::CheckoutRevision, on_action }
+                            ToolButton { label: "Branch From Rev".to_string(), action: ToolAction::BranchFromRevision, on_action }
+                            ToolButton { label: "Revert".to_string(), action: ToolAction::RevertCommit, on_action }
+                            ToolButton { label: "Create Tag".to_string(), action: ToolAction::CreateTag, on_action }
+                            ToolButton { label: "Delete Tag".to_string(), action: ToolAction::DeleteTag, on_action }
+                            ToolButton { label: "List Tags".to_string(), action: ToolAction::Tags, on_action }
+                        }
+                    }
+
+                    section { class: "space-y-2 rounded-md border border-zinc-800 bg-zinc-950/35 p-3",
+                        h4 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-500", "History / Browse" }
+                        input { class: "w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-cyan-500", value: "{file_path}", placeholder: if selected_file.is_empty() { "file path" } else { "{selected_file}" }, oninput: move |event| on_file_path.call(event.value()) }
+                        div { class: "flex flex-wrap gap-2",
+                            ToolButton { label: "Blame".to_string(), action: ToolAction::Blame, on_action }
+                            ToolButton { label: "File History".to_string(), action: ToolAction::FileHistory, on_action }
+                            ToolButton { label: "Tree at Rev".to_string(), action: ToolAction::TreeAtRevision, on_action }
+                            ToolButton { label: "Reflog".to_string(), action: ToolAction::Reflog, on_action }
+                            ToolButton { label: "Reset Mixed".to_string(), action: ToolAction::ResetMixed, on_action }
+                            ToolButton { label: "Reset Hard".to_string(), action: ToolAction::ResetHard, on_action }
+                        }
+                    }
+
+                    section { class: "space-y-2 rounded-md border border-zinc-800 bg-zinc-950/35 p-3",
+                        h4 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-500", "Remotes / Submodules / LFS / Git-flow" }
+                        div { class: "grid grid-cols-1 sm:grid-cols-3 gap-2",
+                            input { class: "rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-cyan-500", value: "{remote_name}", placeholder: "remote", oninput: move |event| on_remote_name.call(event.value()) }
+                            input { class: "rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-cyan-500 sm:col-span-2", value: "{remote_url}", placeholder: "remote url", oninput: move |event| on_remote_url.call(event.value()) }
+                        }
+                        input { class: "w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-cyan-500", value: "{flow_name}", placeholder: "git-flow name", oninput: move |event| on_flow_name.call(event.value()) }
+                        div { class: "flex flex-wrap gap-2",
+                            ToolButton { label: "List Remotes".to_string(), action: ToolAction::Remotes, on_action }
+                            ToolButton { label: "Add Remote".to_string(), action: ToolAction::AddRemote, on_action }
+                            ToolButton { label: "Delete Remote".to_string(), action: ToolAction::DeleteRemote, on_action }
+                            ToolButton { label: "GitHub Links".to_string(), action: ToolAction::GithubLinks, on_action }
+                            ToolButton { label: "Submodules".to_string(), action: ToolAction::Submodules, on_action }
+                            ToolButton { label: "LFS".to_string(), action: ToolAction::Lfs, on_action }
+                            ToolButton { label: "Develop".to_string(), action: ToolAction::GitFlowDevelop, on_action }
+                            ToolButton { label: "Feature".to_string(), action: ToolAction::GitFlowFeature, on_action }
+                            ToolButton { label: "Release".to_string(), action: ToolAction::GitFlowRelease, on_action }
+                            ToolButton { label: "Hotfix".to_string(), action: ToolAction::GitFlowHotfix, on_action }
+                        }
+                    }
+                }
+                pre { class: "min-h-[300px] overflow-auto rounded-md border border-zinc-800 bg-zinc-950/70 p-3 font-mono text-xs leading-5 text-zinc-300 whitespace-pre-wrap", "{output}" }
+            }
+        }
+    }
+}
+
+#[component]
+fn ToolButton(label: String, action: ToolAction, on_action: EventHandler<ToolAction>) -> Element {
+    rsx! {
+        button {
+            class: "rounded-md border border-zinc-700 px-2 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800",
+            onclick: move |_| on_action.call(action),
+            "{label}"
         }
     }
 }
