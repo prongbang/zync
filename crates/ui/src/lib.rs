@@ -3500,23 +3500,23 @@ fn graph_rows(commits: &[api::CommitSummary]) -> Vec<GraphRow> {
 fn lane_color(lane: usize, dot: bool) -> &'static str {
     let colors = if dot {
         [
-            "bg-cyan-400",
-            "bg-emerald-400",
+            "bg-teal-400",
             "bg-amber-400",
-            "bg-fuchsia-400",
+            "bg-violet-400",
             "bg-rose-400",
-            "bg-blue-400",
-            "bg-lime-400",
+            "bg-sky-400",
+            "bg-amber-400",
+            "bg-emerald-400",
         ]
     } else {
         [
-            "bg-cyan-700",
-            "bg-emerald-700",
+            "bg-teal-700",
             "bg-amber-700",
-            "bg-fuchsia-700",
+            "bg-violet-700",
             "bg-rose-700",
-            "bg-blue-700",
-            "bg-lime-700",
+            "bg-sky-700",
+            "bg-amber-700",
+            "bg-emerald-700",
         ]
     };
     colors[lane % colors.len()]
