@@ -36,6 +36,7 @@ pub fn app() -> Element {
     let git_status = use_signal(Vec::<api::FileStatus>::new);
     let branches = use_signal(Vec::<api::BranchSummary>::new);
     let mut commits = use_signal(Vec::<api::CommitSummary>::new);
+    let mut selected_commit = use_signal(|| None::<api::CommitSummary>);
     let stashes = use_signal(Vec::<api::StashSummary>::new);
     let conflicts = use_signal(Vec::<api::ConflictSummary>::new);
     let mut conflict_detail = use_signal(api::ConflictDetail::default);
@@ -63,7 +64,7 @@ pub fn app() -> Element {
     let mut tool_remote_url = use_signal(String::new);
     let mut tool_flow_name = use_signal(String::new);
     let tool_output = use_signal(String::new);
-    let mut sidebar_width = use_signal(|| 280u16);
+    let mut sidebar_width = use_signal(|| 320u16);
     let mut left_pane_width = use_signal(|| 260u16);
     let mut inspector_width = use_signal(|| 380u16);
     let mut history_height = use_signal(|| 320u16);
@@ -92,6 +93,14 @@ pub fn app() -> Element {
     } else {
         api.read().websocket_url(&current_workspace_id)
     };
+    let changed_count = git_status.read().len();
+    let conflict_count = conflicts.read().len();
+    let current_branch = branches
+        .read()
+        .iter()
+        .find(|branch| branch.is_head)
+        .map(|branch| branch.name.clone())
+        .unwrap_or_else(|| "no branch".to_string());
     let layout_style = format!(
         "--sidebar-width:{}px;--left-pane:{}px;--right-pane:{}px;--history-height:{}px;",
         *sidebar_width.read(),
@@ -139,13 +148,16 @@ pub fn app() -> Element {
             },
             onpointerup: move |_| active_resize.set(None),
             onpointercancel: move |_| active_resize.set(None),
-            aside { class: "workspace-sidebar w-full xl:w-[280px] xl:h-screen shrink-0 border-b xl:border-b-0 xl:border-r border-zinc-800 bg-zinc-950 flex flex-col",
-                header { class: "h-12 shrink-0 border-b border-zinc-800 px-3 flex items-center justify-between gap-3",
-                    h1 { class: "text-sm font-semibold tracking-tight", "Zync" }
-                    p { class: "min-w-0 truncate text-[11px] text-zinc-500", "API {api_base}" }
+            aside { class: "workspace-sidebar fork-sidebar w-full xl:w-[280px] xl:h-screen shrink-0 border-b xl:border-b-0 xl:border-r border-zinc-800 bg-zinc-950 flex flex-col",
+                header { class: "fork-sidebar-title h-12 shrink-0 border-b border-zinc-800 px-3 flex items-center justify-between gap-3",
+                    div { class: "min-w-0",
+                        h1 { class: "text-sm font-semibold tracking-tight", if let Some(current) = workspace.read().as_ref() { "{current.repository.name}" } else { "Zync" } }
+                        p { class: "min-w-0 truncate text-[11px] text-zinc-500", "API {api_base}" }
+                    }
+                    span { class: "text-zinc-500", "..." }
                 }
 
-                section { class: "shrink-0 border-b border-zinc-800 bg-zinc-900/40 p-2 space-y-2",
+                section { class: "fork-quick-launch shrink-0 border-b border-zinc-800 bg-zinc-900/40 p-2 space-y-2",
                     input {
                         class: "w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-cyan-500",
                         placeholder: "Repository path mounted on server",
@@ -221,6 +233,19 @@ pub fn app() -> Element {
                     }
                 }
 
+                ForkSidebarNavigation {
+                    changed_count,
+                    branches: branches.read().clone(),
+                    stashes: stashes.read().clone(),
+                    on_local_changes: move |_| notice.set("Open Working Copy in the lower pane".to_string()),
+                    on_all_commits: move |_| notice.set("Commit graph focused".to_string()),
+                    on_checkout: move |name: String| {
+                        if let Some(current) = workspace.read().as_ref().cloned() {
+                            run_branch_action(api.read().clone(), current, BranchAction::Checkout(name), workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                        }
+                    }
+                }
+
                 RepositoryList {
                     repositories: repositories.read().clone(),
                     on_open: move |repository_id: String| {
@@ -276,23 +301,38 @@ pub fn app() -> Element {
                 on_drag_start: move |_| active_resize.set(Some(ResizeDragTarget::Sidebar))
             }
 
-            section { class: "relative min-w-0 flex-1 min-h-[70vh] xl:min-h-0 flex flex-col bg-zinc-900",
-                header { class: "h-auto xl:h-12 shrink-0 border-b border-zinc-800 px-3 flex flex-col xl:flex-row xl:items-center justify-between gap-2 bg-zinc-950",
+            section { class: "fork-main-window relative min-w-0 flex-1 min-h-[70vh] xl:min-h-0 flex flex-col bg-zinc-900",
+                header { class: "workspace-header fork-top-toolbar h-auto xl:h-12 shrink-0 border-b border-zinc-800 px-3 flex flex-col xl:flex-row xl:items-center justify-between gap-2 bg-zinc-950",
+                    div { class: "fork-toolbar-left",
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref() { load_workspace(api.read().clone(), current.repository.id.clone(), current.workspace.id.clone(), workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, "Quick Launch" }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Fetch, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, "Fetch" }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Pull, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, "Pull" }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Push, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, "Push" }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_stash_action(api.read().clone(), current, StashAction::Create(stash_message.read().clone()), workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, "Stash" }
+                    }
                     if let Some(current) = workspace.read().as_ref() {
-                        div { class: "min-w-0",
+                        div { class: "fork-repo-switcher min-w-0",
                             h2 { class: "text-sm font-semibold truncate", "{current.repository.name}" }
-                            p { class: "text-xs text-zinc-500 truncate", "{current.repository.path}" }
+                            p { class: "text-xs text-zinc-500 truncate", "{current_branch}" }
                         }
-                        div { class: "hidden xl:flex flex-col items-end gap-1 text-[11px] text-zinc-500 min-w-0",
-                            span { class: "truncate max-w-[420px]", "Workspace {current.workspace.id}" }
+                        div { class: "workspace-meta hidden xl:flex flex-wrap items-center justify-end gap-1 text-[11px] text-zinc-500 min-w-0",
+                            span { class: "workspace-pill", "{current_branch}" }
+                            span { class: "workspace-pill", "{changed_count} changes" }
+                            span { class: "workspace-pill", "{conflict_count} conflicts" }
                             span { class: "truncate max-w-[420px]", "WS {websocket_url}" }
                         }
                     } else {
-                        div { class: "min-w-0",
+                        div { class: "fork-repo-switcher min-w-0",
                             h2 { class: "text-lg font-semibold", "Open a mounted Git repository" }
                             p { class: "text-xs text-zinc-500", "Mount a project into the server, add its server-side path, then open it here." }
                         }
                     }
+                    div { class: "fork-toolbar-right",
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| notice.set("New Branch is available from Repository Navigator".to_string()), "New Branch" }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| notice.set("Open in server mounted path".to_string()), "Open in" }
+                        button { class: "fork-toolbar-button", onclick: move |_| notice.set("Feedback noted".to_string()), "Feedback" }
+                    }
+                    div { class: "legacy-toolbar-actions",
                     WorkspaceToolbar {
                         disabled: current_repository_id.is_empty(),
                         on_refresh: move |_| {
@@ -316,6 +356,7 @@ pub fn app() -> Element {
                             }
                         }
                     }
+                    }
                     PaneSizeControls {
                         sidebar_width: *sidebar_width.read(),
                         left_pane_width: *left_pane_width.read(),
@@ -326,7 +367,7 @@ pub fn app() -> Element {
                         on_inspector: move |value: u16| inspector_width.set(value),
                         on_history: move |value: u16| history_height.set(value),
                         on_reset: move |_| {
-                            sidebar_width.set(280);
+                            sidebar_width.set(320);
                             left_pane_width.set(260);
                             inspector_width.set(380);
                             history_height.set(320);
@@ -334,7 +375,7 @@ pub fn app() -> Element {
                     }
                 }
 
-                div { class: "workspace-grid relative min-h-0 flex-1 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[260px_minmax(0,1fr)_380px] xl:grid-rows-[minmax(260px,0.95fr)_minmax(260px,0.75fr)_minmax(220px,0.55fr)_minmax(360px,auto)] gap-px bg-zinc-800 overflow-y-auto xl:overflow-hidden",
+                div { class: "workspace-grid fork-workspace-grid relative min-h-0 flex-1 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[260px_minmax(0,1fr)_380px] xl:grid-rows-[minmax(260px,0.95fr)_minmax(260px,0.75fr)_minmax(220px,0.55fr)_minmax(360px,auto)] gap-px bg-zinc-800 overflow-y-auto xl:overflow-hidden",
                     PaneGridSplitters {
                         on_left_decrease: move |_| {
                             let next = (*left_pane_width.read()).saturating_sub(20).max(220);
@@ -767,6 +808,12 @@ pub fn app() -> Element {
                                 notice.set("Open a repository before viewing commit diff".to_string());
                                 return;
                             };
+                            let selected = commits
+                                .read()
+                                .iter()
+                                .find(|commit| commit.id == commit_id)
+                                .cloned();
+                            selected_commit.set(selected);
                             let api_client = api.read().clone();
                             spawn(async move {
                                 match api_client.diff_commit(&current.repository.id, &commit_id).await {
@@ -792,6 +839,43 @@ pub fn app() -> Element {
                                         commits.set(items);
                                         notice.set(format!("Loaded {next_limit} graph commits"));
                                     }
+                                    Err(error) => notice.set(error),
+                                }
+                            });
+                        }
+                    }
+                    ForkCommitDetailPanel {
+                        selected: selected_commit.read().clone().or_else(|| commits.read().first().cloned()),
+                        files: git_status.read().clone(),
+                        diff: diff.read().clone(),
+                        selected_file: selected_file.read().clone(),
+                        on_stage: move |path: String| {
+                            run_file_action_from_workspace(
+                                api.read().clone(),
+                                workspace.read().as_ref().cloned(),
+                                vec![path],
+                                FileAction::Stage,
+                                workspace,
+                                git_status,
+                                branches,
+                                commits,
+                                stashes,
+                                conflicts,
+                                diff,
+                                notice,
+                            );
+                        },
+                        on_diff: move |path: String| {
+                            let Some(current) = workspace.read().as_ref().cloned() else {
+                                notice.set("Open a repository before viewing diff".to_string());
+                                return;
+                            };
+                            selected_file.set(path.clone());
+                            let api_client = api.read().clone();
+                            let repository_id = current.repository.id;
+                            spawn(async move {
+                                match api_client.diff_workdir_file(&repository_id, &path).await {
+                                    Ok(patch) => diff.set(patch),
                                     Err(error) => notice.set(error),
                                 }
                             });
@@ -1861,6 +1945,110 @@ fn start_live_events(
 }
 
 #[component]
+fn ForkSidebarNavigation(
+    changed_count: usize,
+    branches: Vec<api::BranchSummary>,
+    stashes: Vec<api::StashSummary>,
+    on_local_changes: EventHandler<()>,
+    on_all_commits: EventHandler<()>,
+    on_checkout: EventHandler<String>,
+) -> Element {
+    let locals = branches
+        .iter()
+        .filter(|branch| branch.kind == "local")
+        .cloned()
+        .collect::<Vec<_>>();
+    let remotes = branches
+        .iter()
+        .filter(|branch| branch.kind != "local")
+        .cloned()
+        .collect::<Vec<_>>();
+
+    rsx! {
+        section { class: "fork-nav-tree min-h-0 flex-1 overflow-y-auto",
+            div { class: "fork-sidebar-primary",
+                button { class: "fork-sidebar-row fork-sidebar-row-strong", onclick: move |_| on_local_changes.call(()),
+                    span { class: "fork-row-icon", "+" }
+                    span { "Local Changes ({changed_count})" }
+                }
+                button { class: "fork-sidebar-row fork-sidebar-row-strong", onclick: move |_| on_all_commits.call(()),
+                    span { class: "fork-row-icon", "#" }
+                    span { "All Commits" }
+                }
+            }
+            div { class: "fork-sidebar-search",
+                span { class: "fork-search-icon", "⌕" }
+                input { class: "fork-filter-input", placeholder: "Filter" }
+            }
+            ForkSidebarSection {
+                title: "Branches".to_string(),
+                rows: locals,
+                on_checkout
+            }
+            ForkRemoteSection {
+                title: "Remotes".to_string(),
+                rows: remotes,
+                on_checkout
+            }
+            section { class: "fork-sidebar-section",
+                div { class: "fork-section-title", "Stashes" }
+                for stash in stashes {
+                    div { class: "fork-sidebar-row",
+                        span { class: "fork-row-icon", "$" }
+                        span { class: "min-w-0 truncate", "#{stash.index} {stash.name}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ForkSidebarSection(
+    title: String,
+    rows: Vec<api::BranchSummary>,
+    on_checkout: EventHandler<String>,
+) -> Element {
+    rsx! {
+        section { class: "fork-sidebar-section",
+            div { class: "fork-section-title", "{title}" }
+            for branch in rows {
+                button {
+                    class: if branch.is_head { "fork-sidebar-row fork-sidebar-row-active" } else { "fork-sidebar-row" },
+                    onclick: move |_| on_checkout.call(branch.name.clone()),
+                    span { class: "fork-row-icon", if branch.is_head { "✓" } else { "⑂" } }
+                    span { class: "min-w-0 truncate", "{branch.name}" }
+                    if branch.is_head {
+                        span { class: "fork-row-badge", "main" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ForkRemoteSection(
+    title: String,
+    rows: Vec<api::BranchSummary>,
+    on_checkout: EventHandler<String>,
+) -> Element {
+    rsx! {
+        section { class: "fork-sidebar-section",
+            div { class: "fork-section-title", "{title}" }
+            for branch in rows {
+                button {
+                    class: "fork-sidebar-row",
+                    onclick: move |_| on_checkout.call(branch.name.clone()),
+                    span { class: "fork-row-icon", "⌁" }
+                    span { class: "min-w-0 truncate", "{branch.name}" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
 fn RepositoryList(
     repositories: Vec<api::RepositoryRecord>,
     on_open: EventHandler<String>,
@@ -1898,7 +2086,7 @@ fn FileExplorer(
     let delete_selected = selected.clone();
     let has_selection = !selected.is_empty();
     rsx! {
-        article { class: "min-h-[260px] md:min-h-[320px] xl:min-h-0 xl:col-start-1 xl:row-start-2 xl:row-span-2 bg-zinc-950 flex flex-col overflow-hidden",
+        article { class: "file-explorer-panel min-h-[260px] md:min-h-[320px] xl:min-h-0 xl:col-start-1 xl:row-start-2 xl:row-span-2 bg-zinc-950 flex flex-col overflow-hidden",
             header { class: "shrink-0 border-b border-zinc-800 px-2 py-2 space-y-2",
                 h3 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-400", "Files" }
                 input {
@@ -2119,7 +2307,7 @@ fn EditorPanel(
     on_save: EventHandler<()>,
 ) -> Element {
     rsx! {
-        article { class: "min-h-[420px] md:min-h-[520px] xl:min-h-0 xl:col-start-3 xl:row-start-3 bg-zinc-950 flex flex-col overflow-hidden",
+        article { class: "editor-panel min-h-[420px] md:min-h-[520px] xl:min-h-0 xl:col-start-3 xl:row-start-3 bg-zinc-950 flex flex-col overflow-hidden",
             header { class: "shrink-0 border-b border-zinc-800 px-3 py-2 flex items-center justify-between gap-3",
                 h3 { class: "min-w-0 truncate text-xs font-semibold uppercase tracking-wide text-zinc-400", if path.is_empty() { "File Preview" } else { "{path}" } }
                 button { class: "rounded bg-cyan-500 px-2 py-1 text-xs font-medium text-zinc-950 hover:bg-cyan-400", onclick: move |_| on_save.call(()), "Save" }
@@ -2156,8 +2344,8 @@ fn GitStatusPanel(
         .collect::<Vec<_>>();
 
     rsx! {
-        article { class: "min-h-[320px] md:min-h-[420px] xl:min-h-0 xl:col-start-3 xl:row-start-1 bg-zinc-950 flex flex-col overflow-hidden",
-            h3 { class: "h-9 shrink-0 border-b border-zinc-800 px-3 flex items-center text-xs font-semibold uppercase tracking-wide text-zinc-400", "Changes" }
+        article { class: "working-copy-panel min-h-[320px] md:min-h-[420px] xl:min-h-0 xl:col-start-3 xl:row-start-1 bg-zinc-950 flex flex-col overflow-hidden",
+            h3 { class: "h-9 shrink-0 border-b border-zinc-800 px-3 flex items-center text-xs font-semibold uppercase tracking-wide text-zinc-400", "Working Copy" }
             div { class: "min-h-0 flex-1 overflow-y-auto p-2 space-y-3",
             StatusGroup {
                 title: "Staged".to_string(),
@@ -2261,9 +2449,9 @@ fn DiffViewer(
     let show_image_diff =
         is_image_path(&image_path) && !image_before_url.is_empty() && !image_after_url.is_empty();
     rsx! {
-        article { class: "min-h-[320px] md:min-h-[420px] xl:min-h-0 xl:col-start-2 xl:row-start-2 xl:row-span-2 bg-zinc-950 flex flex-col overflow-hidden",
+        article { class: "diff-viewer-panel min-h-[320px] md:min-h-[420px] xl:min-h-0 xl:col-start-2 xl:row-start-2 xl:row-span-2 bg-zinc-950 flex flex-col overflow-hidden",
             header { class: "shrink-0 border-b border-zinc-800 px-3 py-2 flex items-center justify-between gap-2",
-                h3 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-400", "Diff / Partial Staging" }
+                h3 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-400", "Side-by-side Diff / Partial Staging" }
                 button {
                     class: "rounded-md border border-cyan-700/60 px-2 py-1 text-[11px] text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-40",
                     disabled: !diff_is_patch(&stage_all_patch),
@@ -2392,6 +2580,34 @@ fn is_image_path(path: &str) -> bool {
     )
 }
 
+fn status_label(file: &api::FileStatus) -> &'static str {
+    if file.conflicted {
+        "!"
+    } else if file.untracked {
+        "?"
+    } else if file.staged {
+        "+"
+    } else if file.unstaged {
+        "~"
+    } else {
+        "•"
+    }
+}
+
+fn status_class(file: &api::FileStatus) -> &'static str {
+    if file.conflicted {
+        "fork-status fork-status-conflict"
+    } else if file.untracked {
+        "fork-status fork-status-untracked"
+    } else if file.staged {
+        "fork-status fork-status-added"
+    } else if file.unstaged {
+        "fork-status fork-status-modified"
+    } else {
+        "fork-status"
+    }
+}
+
 #[derive(Clone, PartialEq)]
 struct SplitDiffLine {
     old: String,
@@ -2469,8 +2685,8 @@ fn CommitPanel(
     on_commit: EventHandler<()>,
 ) -> Element {
     rsx! {
-        article { class: "min-h-[260px] xl:min-h-0 xl:col-start-3 xl:row-start-2 bg-zinc-950 flex flex-col overflow-hidden",
-            h3 { class: "h-9 shrink-0 border-b border-zinc-800 px-3 flex items-center text-xs font-semibold uppercase tracking-wide text-zinc-400", "Commit" }
+        article { class: "commit-panel min-h-[260px] xl:min-h-0 xl:col-start-3 xl:row-start-2 bg-zinc-950 flex flex-col overflow-hidden",
+            h3 { class: "h-9 shrink-0 border-b border-zinc-800 px-3 flex items-center text-xs font-semibold uppercase tracking-wide text-zinc-400", "Commit Panel" }
             textarea {
                 class: "min-h-0 flex-1 resize-none bg-zinc-950/70 p-3 text-sm text-zinc-100 outline-none placeholder:text-zinc-600",
                 value: "{message}",
@@ -2511,9 +2727,9 @@ fn BranchPanel(
 ) -> Element {
     let mut open_menu = use_signal(|| None::<String>);
     rsx! {
-        article { class: "min-h-[240px] xl:min-h-0 xl:col-start-1 xl:row-start-1 bg-zinc-950 flex flex-col overflow-hidden",
+        article { class: "branch-panel min-h-[240px] xl:min-h-0 xl:col-start-1 xl:row-start-1 bg-zinc-950 flex flex-col overflow-hidden",
             header { class: "shrink-0 border-b border-zinc-800 px-2 py-2 space-y-2",
-                h3 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-400", "Branches" }
+                h3 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-400", "Repository Navigator" }
                 div { class: "flex gap-2",
                     input {
                         class: "min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-cyan-500",
@@ -2652,9 +2868,9 @@ fn CommitGraph(
 ) -> Element {
     let rows = graph_rows(&commits);
     rsx! {
-        article { class: "min-h-[240px] xl:min-h-0 xl:col-start-2 xl:row-start-1 bg-zinc-950 flex flex-col overflow-hidden",
+        article { class: "commit-graph-panel min-h-[240px] xl:min-h-0 xl:col-start-2 xl:row-start-1 bg-zinc-950 flex flex-col overflow-hidden",
             header { class: "h-9 shrink-0 border-b border-zinc-800 px-3 flex items-center justify-between gap-2",
-                h3 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-400", "History" }
+                h3 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-400", "Commit Graph" }
                 button { class: "rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800", onclick: move |_| on_load_more.call(()), "Load more" }
             }
             div { class: "grid grid-cols-[128px_76px_minmax(0,1fr)_150px] border-b border-zinc-800 bg-zinc-900/60 px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-zinc-500",
@@ -2704,6 +2920,88 @@ fn GraphLaneStrip(row: GraphRow) -> Element {
 }
 
 #[component]
+fn ForkCommitDetailPanel(
+    selected: Option<api::CommitSummary>,
+    files: Vec<api::FileStatus>,
+    diff: String,
+    selected_file: String,
+    on_stage: EventHandler<String>,
+    on_diff: EventHandler<String>,
+) -> Element {
+    let additions = diff
+        .lines()
+        .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+        .count();
+    let deletions = diff
+        .lines()
+        .filter(|line| line.starts_with('-') && !line.starts_with("---"))
+        .count();
+    rsx! {
+        article { class: "fork-detail-panel bg-zinc-950 flex flex-col overflow-hidden",
+            div { class: "fork-detail-tabs",
+                button { class: "fork-detail-tab fork-detail-tab-active", "Commit" }
+                button { class: "fork-detail-tab", "Changes" }
+                button { class: "fork-detail-tab", "File Tree" }
+            }
+            div { class: "fork-detail-body",
+                if let Some(commit) = selected {
+                    section { class: "fork-commit-summary",
+                        div { class: "fork-person-card",
+                            div { class: "fork-avatar", "{commit.author.chars().next().unwrap_or('Z')}" }
+                            div { class: "min-w-0",
+                                div { class: "fork-label", "AUTHOR" }
+                                div { class: "fork-person-name", "{commit.author}" }
+                                div { class: "fork-muted", "Commit time {commit.time}" }
+                            }
+                        }
+                        div { class: "fork-sha-card",
+                            div { class: "fork-label", "SHA" }
+                            code { class: "fork-sha", "{commit.id}" }
+                            div { class: "fork-label mt-2", "PARENTS" }
+                            div { class: "fork-parent-list",
+                                for parent in commit.parents {
+                                    code { class: "fork-parent", "{short_id(&parent)}" }
+                                }
+                            }
+                        }
+                    }
+                    section { class: "fork-message-block",
+                        h3 { " {commit.summary}" }
+                        p { class: "fork-muted", "{additions} additions, {deletions} deletions in current diff" }
+                    }
+                } else {
+                    section { class: "fork-message-block",
+                        h3 { "No commit selected" }
+                        p { class: "fork-muted", "Open a repository and select a row in the commit graph." }
+                    }
+                }
+                section { class: "fork-changed-files",
+                    div { class: "fork-changed-header",
+                        span { "Changed Files" }
+                        span { class: "fork-muted", "{files.len()} item(s)" }
+                    }
+                    for file in files.into_iter().take(80) {
+                        div { class: if file.path == selected_file { "fork-file-row fork-file-row-active" } else { "fork-file-row" },
+                            button { class: "fork-file-main", onclick: {
+                                let path = file.path.clone();
+                                move |_| on_diff.call(path.clone())
+                            },
+                                span { class: status_class(&file), "{status_label(&file)}" }
+                                code { "{file.path}" }
+                            }
+                            button { class: "fork-file-action", onclick: {
+                                let path = file.path.clone();
+                                move |_| on_stage.call(path.clone())
+                            }, "Stage" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
 fn HistoryToolsPanel(
     stashes: Vec<api::StashSummary>,
     commits: Vec<api::CommitSummary>,
@@ -2728,8 +3026,8 @@ fn HistoryToolsPanel(
 ) -> Element {
     let mut dragging_commit = use_signal(|| None::<String>);
     rsx! {
-        article { class: "min-h-[360px] xl:min-h-0 xl:col-start-1 xl:row-start-4 bg-zinc-950 flex flex-col overflow-hidden",
-            h3 { class: "shrink-0 border-b border-zinc-800 px-3 py-2 text-sm font-semibold", "Stash / Cherry-pick / Rebase" }
+        article { class: "history-tools-panel min-h-[360px] xl:min-h-0 xl:col-start-1 xl:row-start-4 bg-zinc-950 flex flex-col overflow-hidden",
+            h3 { class: "shrink-0 border-b border-zinc-800 px-3 py-2 text-sm font-semibold", "Workflow: Stash / Cherry-pick / Rebase" }
             div { class: "min-h-0 flex-1 overflow-y-auto p-3 space-y-4",
                 section { class: "space-y-2",
                     div { class: "flex gap-2",
@@ -2872,7 +3170,7 @@ fn ConflictEditorPanel(
         detail.theirs_content.trim_start()
     );
     rsx! {
-        article { class: "min-h-[360px] xl:min-h-0 xl:col-start-2 xl:row-start-4 bg-zinc-950 flex flex-col overflow-hidden",
+        article { class: "conflict-editor-panel min-h-[360px] xl:min-h-0 xl:col-start-2 xl:row-start-4 bg-zinc-950 flex flex-col overflow-hidden",
             header { class: "shrink-0 border-b border-zinc-800 px-3 py-2 flex items-center justify-between gap-2",
                 h3 { class: "text-sm font-semibold", "3-way Conflict Editor" }
                 span { class: "text-[11px] text-zinc-500", "{conflicts.len()} conflict(s)" }
@@ -2966,7 +3264,7 @@ fn RepositoryToolsPanel(
     on_action: EventHandler<ToolAction>,
 ) -> Element {
     rsx! {
-        article { class: "min-h-[420px] xl:min-h-0 xl:col-start-3 xl:row-start-4 bg-zinc-950 flex flex-col overflow-hidden",
+        article { class: "repository-tools-panel min-h-[420px] xl:min-h-0 xl:col-start-3 xl:row-start-4 bg-zinc-950 flex flex-col overflow-hidden",
             h3 { class: "shrink-0 border-b border-zinc-800 px-3 py-2 text-sm font-semibold", "Repository Tools" }
             div { class: "min-h-0 flex-1 grid grid-cols-1 xl:grid-cols-[1.2fr_1fr] gap-3 overflow-y-auto p-3",
                 div { class: "space-y-4",

@@ -332,12 +332,447 @@ code,
 
 @media (min-width: 1280px) {
   .app-shell .workspace-sidebar {
-    width: var(--sidebar-width, 280px);
+    width: var(--sidebar-width, 320px);
   }
 
   .app-shell .workspace-grid {
-    grid-template-columns: var(--left-pane, 260px) minmax(0, 1fr) var(--right-pane, 380px);
-    grid-template-rows: var(--history-height, 320px) minmax(260px, 1fr) minmax(220px, 0.55fr) minmax(360px, auto);
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(290px, var(--history-height, 320px)) minmax(360px, 1fr);
+  }
+
+  .app-shell .fork-workspace-grid {
+    grid-template-areas:
+      "graph"
+      "detail";
+  }
+
+  .branch-panel {
+    grid-area: branches;
+  }
+
+  .file-explorer-panel {
+    grid-area: files;
+  }
+
+  .commit-graph-panel {
+    grid-area: graph;
+  }
+
+  .fork-detail-panel {
+    grid-area: detail;
+  }
+
+  .working-copy-panel {
+    grid-area: status;
+  }
+
+  .commit-panel {
+    grid-area: commit;
+  }
+
+  .editor-panel {
+    grid-area: editor;
+  }
+
+  .diff-viewer-panel {
+    grid-area: diff;
+  }
+
+  .history-tools-panel {
+    grid-area: history;
+  }
+
+  .conflict-editor-panel {
+    grid-area: conflict;
+  }
+
+  .repository-tools-panel {
+    grid-area: tools;
+  }
+
+  .branch-panel,
+  .file-explorer-panel,
+  .working-copy-panel,
+  .commit-panel,
+  .editor-panel,
+  .diff-viewer-panel,
+  .history-tools-panel,
+  .conflict-editor-panel,
+  .repository-tools-panel {
+    display: none;
+  }
+}
+
+.workspace-header {
+  min-height: 48px;
+}
+
+.fork-main-window {
+  background: #2f2f2f;
+}
+
+.fork-sidebar {
+  background:
+    linear-gradient(180deg, rgba(38, 50, 64, 0.96), rgba(49, 57, 58, 0.96)),
+    #263340;
+  border-right-color: #111;
+}
+
+.fork-sidebar-title {
+  background: rgba(18, 20, 24, 0.28);
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.fork-quick-launch {
+  background: rgba(20, 24, 30, 0.22);
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.fork-nav-tree {
+  color: #d7d7d7;
+  padding: 0.45rem 0;
+}
+
+.fork-sidebar-primary {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 0.35rem 0.45rem 0.6rem;
+}
+
+.fork-sidebar-search {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 0.25rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 0.55rem 0.55rem;
+}
+
+.fork-search-icon {
+  color: #8d99a6;
+  text-align: center;
+}
+
+.fork-filter-input {
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 0.4rem;
+  background: rgba(20, 28, 36, 0.38);
+  color: #e8e8e8;
+  font-size: 0.82rem;
+  outline: none;
+  padding: 0.35rem 0.5rem;
+}
+
+.fork-sidebar-section {
+  padding: 0.35rem 0.35rem 0.15rem;
+}
+
+.fork-section-title {
+  color: #f4f4f5;
+  font-size: 0.88rem;
+  font-weight: 650;
+  padding: 0.38rem 0.45rem 0.18rem;
+}
+
+.fork-sidebar-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.25rem;
+  width: 100%;
+  border: 0;
+  border-radius: 0.3rem;
+  background: transparent;
+  color: #e6e6e6;
+  font-size: 0.86rem;
+  font-weight: 520;
+  line-height: 1.35;
+  padding: 0.22rem 0.45rem;
+  text-align: left;
+}
+
+.fork-sidebar-row:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.fork-sidebar-row-active {
+  color: #fff;
+  font-weight: 720;
+}
+
+.fork-sidebar-row-strong {
+  font-size: 0.92rem;
+  font-weight: 720;
+}
+
+.fork-row-icon {
+  color: #7aa7d9;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.fork-row-badge {
+  color: #9aa6b2;
+  font-size: 0.7rem;
+}
+
+.fork-top-toolbar {
+  background: #3a3a3a;
+  border-bottom-color: #191919;
+  color: #e2e2e2;
+  min-height: 56px;
+}
+
+.fork-toolbar-left,
+.fork-toolbar-right {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.fork-toolbar-button {
+  min-width: 58px;
+  border: 0;
+  border-radius: 0.35rem;
+  background: transparent;
+  color: #c7c7c7;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.34rem 0.45rem;
+}
+
+.fork-toolbar-button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.fork-toolbar-button:disabled {
+  color: #777;
+}
+
+.fork-repo-switcher {
+  min-width: min(360px, 34vw);
+  border-radius: 0.35rem;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 0.35rem 2rem;
+  text-align: center;
+}
+
+.legacy-toolbar-actions {
+  display: none;
+}
+
+.workspace-pill {
+  border: 1px solid #27272a;
+  border-radius: 999px;
+  background: rgba(24, 24, 27, 0.75);
+  color: #a1a1aa;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  padding: 0.25rem 0.45rem;
+}
+
+.fork-workspace-grid > article {
+  min-width: 0;
+}
+
+.commit-graph-panel {
+  background: #242424;
+  box-shadow: none;
+}
+
+.commit-graph-panel header {
+  background: #303030;
+  border-bottom-color: #191919;
+}
+
+.commit-graph-panel ol li {
+  min-height: 30px;
+  border-bottom-color: rgba(255, 255, 255, 0.035);
+  font-size: 0.88rem;
+}
+
+.fork-detail-panel {
+  border-top: 1px solid #171717;
+  background: #303030;
+}
+
+.fork-detail-tabs {
+  display: flex;
+  gap: 0.45rem;
+  min-height: 43px;
+  align-items: center;
+  border-bottom: 1px solid #252525;
+  background: #303030;
+  padding: 0 1.25rem;
+}
+
+.fork-detail-tab {
+  border: 0;
+  border-radius: 0.35rem;
+  background: transparent;
+  color: #a8a8a8;
+  font-size: 0.88rem;
+  font-weight: 700;
+  padding: 0.34rem 1.1rem;
+}
+
+.fork-detail-tab-active {
+  background: rgba(255, 255, 255, 0.15);
+  color: #f5f5f5;
+}
+
+.fork-detail-body {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 1.4rem 1.6rem;
+}
+
+.fork-commit-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.8fr);
+  gap: 1.5rem;
+}
+
+.fork-person-card {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  align-items: center;
+  gap: 0.9rem;
+}
+
+.fork-avatar {
+  display: grid;
+  width: 56px;
+  height: 56px;
+  place-items: center;
+  border-radius: 0.45rem;
+  background: #d9d9d9;
+  color: #232323;
+  font-size: 1.3rem;
+  font-weight: 800;
+}
+
+.fork-label {
+  color: #aaa;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.fork-person-name {
+  color: #f2f2f2;
+  font-size: 1rem;
+  font-weight: 750;
+}
+
+.fork-muted {
+  color: #a0a0a0;
+  font-size: 0.82rem;
+}
+
+.fork-sha-card {
+  min-width: 0;
+}
+
+.fork-sha,
+.fork-parent {
+  color: #6db6ff;
+  font-size: 0.82rem;
+}
+
+.fork-parent-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.fork-message-block {
+  margin-top: 1.4rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 1.1rem 0;
+}
+
+.fork-message-block h3 {
+  color: #f1f1f1;
+  font-size: 1.04rem;
+  margin: 0 0 0.65rem;
+}
+
+.fork-changed-files {
+  margin-top: 1rem;
+}
+
+.fork-changed-header,
+.fork-file-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 1rem;
+}
+
+.fork-changed-header {
+  color: #d8d8d8;
+  font-size: 0.82rem;
+  font-weight: 700;
+  margin-bottom: 0.35rem;
+}
+
+.fork-file-row {
+  min-height: 28px;
+  border-radius: 0.25rem;
+  color: #d7d7d7;
+}
+
+.fork-file-row:hover,
+.fork-file-row-active {
+  background: rgba(6, 118, 210, 0.45);
+}
+
+.fork-file-main {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0.25rem 0.35rem;
+  text-align: left;
+}
+
+.fork-file-action {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 0.25rem;
+  background: rgba(255, 255, 255, 0.06);
+  color: #d7d7d7;
+  font-size: 0.72rem;
+  padding: 0.18rem 0.45rem;
+}
+
+.fork-status {
+  display: inline-grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  border-radius: 0.25rem;
+  background: #777;
+  color: #111;
+  font-size: 0.7rem;
+  font-weight: 900;
+}
+
+.fork-status-added { background: #ffd33d; }
+.fork-status-modified { background: #58a6ff; }
+.fork-status-untracked { background: #bc8cff; }
+.fork-status-conflict { background: #ff7b72; }
+
+@media (max-width: 1279px) {
+  .fork-detail-panel {
+    min-height: 420px;
   }
 }
 
@@ -479,6 +914,7 @@ code,
   }
 
   .grid-splitter-left {
+    display: none;
     left: calc(var(--left-pane, 260px) - 7px);
     top: 0;
     bottom: 0;
@@ -488,6 +924,7 @@ code,
   }
 
   .grid-splitter-right {
+    display: none;
     left: calc(100% - var(--right-pane, 380px) - 7px);
     top: 0;
     bottom: 0;
@@ -497,8 +934,8 @@ code,
   }
 
   .grid-splitter-history {
-    left: var(--left-pane, 260px);
-    right: var(--right-pane, 380px);
+    left: 0;
+    right: 0;
     top: calc(var(--history-height, 320px) - 7px);
     height: 14px;
     cursor: row-resize;
