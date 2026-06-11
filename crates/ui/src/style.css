@@ -506,9 +506,19 @@ code,
 }
 
 .fork-row-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: #7aa7d9;
   font-variant-numeric: tabular-nums;
   text-align: center;
+}
+
+.iconify-icon {
+  display: inline-block;
+  width: 1.05rem;
+  height: 1.05rem;
+  flex: 0 0 auto;
 }
 
 .fork-row-badge {
@@ -531,7 +541,13 @@ code,
 }
 
 .fork-toolbar-button {
+  display: inline-flex;
+  min-height: 44px;
   min-width: 58px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.18rem;
   border: 0;
   border-radius: 0.35rem;
   background: transparent;
@@ -539,6 +555,18 @@ code,
   font-size: 0.78rem;
   font-weight: 600;
   padding: 0.34rem 0.45rem;
+}
+
+.fork-toolbar-button .iconify-icon {
+  width: 1.35rem;
+  height: 1.35rem;
+  stroke-width: 1.8;
+}
+
+.fork-sidebar-row .iconify-icon,
+.fork-search-icon .iconify-icon {
+  width: 1rem;
+  height: 1rem;
 }
 
 .fork-toolbar-button:hover:not(:disabled) {

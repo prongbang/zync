@@ -13,6 +13,22 @@ enum ResizeDragTarget {
     History,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum IconName {
+    Folder,
+    GitBranch,
+    Search,
+    Refresh,
+    ArrowDown,
+    ArrowUp,
+    Archive,
+    ExternalLink,
+    Smile,
+    FileDiff,
+    Check,
+    GitCommit,
+}
+
 fn clamp_pane_size(value: f64, min: u16, max: u16) -> u16 {
     value.round().clamp(f64::from(min), f64::from(max)) as u16
 }
@@ -304,11 +320,11 @@ pub fn app() -> Element {
             section { class: "fork-main-window relative min-w-0 flex-1 min-h-[70vh] xl:min-h-0 flex flex-col bg-zinc-900",
                 header { class: "workspace-header fork-top-toolbar h-auto xl:h-12 shrink-0 border-b border-zinc-800 px-3 flex flex-col xl:flex-row xl:items-center justify-between gap-2 bg-zinc-950",
                     div { class: "fork-toolbar-left",
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref() { load_workspace(api.read().clone(), current.repository.id.clone(), current.workspace.id.clone(), workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, "Quick Launch" }
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Fetch, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, "Fetch" }
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Pull, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, "Pull" }
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Push, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, "Push" }
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_stash_action(api.read().clone(), current, StashAction::Create(stash_message.read().clone()), workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, "Stash" }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref() { load_workspace(api.read().clone(), current.repository.id.clone(), current.workspace.id.clone(), workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, Icon { name: IconName::Folder } span { "Quick Launch" } }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Fetch, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, Icon { name: IconName::Refresh } span { "Fetch" } }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Pull, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, Icon { name: IconName::ArrowDown } span { "Pull" } }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Push, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, Icon { name: IconName::ArrowUp } span { "Push" } }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_stash_action(api.read().clone(), current, StashAction::Create(stash_message.read().clone()), workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, Icon { name: IconName::Archive } span { "Stash" } }
                     }
                     if let Some(current) = workspace.read().as_ref() {
                         div { class: "fork-repo-switcher min-w-0",
@@ -328,9 +344,9 @@ pub fn app() -> Element {
                         }
                     }
                     div { class: "fork-toolbar-right",
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| notice.set("New Branch is available from Repository Navigator".to_string()), "New Branch" }
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| notice.set("Open in server mounted path".to_string()), "Open in" }
-                        button { class: "fork-toolbar-button", onclick: move |_| notice.set("Feedback noted".to_string()), "Feedback" }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| notice.set("New Branch is available from Repository Navigator".to_string()), Icon { name: IconName::GitBranch } span { "New Branch" } }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| notice.set("Open in server mounted path".to_string()), Icon { name: IconName::ExternalLink } span { "Open in" } }
+                        button { class: "fork-toolbar-button", onclick: move |_| notice.set("Feedback noted".to_string()), Icon { name: IconName::Smile } span { "Feedback" } }
                     }
                     div { class: "legacy-toolbar-actions",
                     WorkspaceToolbar {
@@ -1945,6 +1961,57 @@ fn start_live_events(
 }
 
 #[component]
+fn Icon(name: IconName) -> Element {
+    let path_data = match name {
+        IconName::Folder => {
+            "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
+        }
+        IconName::GitBranch => {
+            "M6 3v12 M18 6a3 3 0 1 1-6 0a3 3 0 0 1 6 0 M9 18a3 3 0 1 1-6 0a3 3 0 0 1 6 0 M18 9a9 9 0 0 1-9 9"
+        }
+        IconName::Search => {
+            "M11 19a8 8 0 1 1 5.657-13.657A8 8 0 0 1 11 19 M21 21l-4.35-4.35"
+        }
+        IconName::Refresh => {
+            "M21 12a9 9 0 0 0-15.5-6.2L3 8 M3 3v5h5 M3 12a9 9 0 0 0 15.5 6.2L21 16 M21 21v-5h-5"
+        }
+        IconName::ArrowDown => "M12 5v14 M19 12l-7 7l-7-7",
+        IconName::ArrowUp => "M12 19V5 M5 12l7-7l7 7",
+        IconName::Archive => {
+            "M21 8v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8 M1 3h22v5H1z M10 12h4"
+        }
+        IconName::ExternalLink => {
+            "M15 3h6v6 M10 14L21 3 M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"
+        }
+        IconName::Smile => {
+            "M22 12a10 10 0 1 1-20 0a10 10 0 0 1 20 0 M8 14s1.5 2 4 2s4-2 4-2 M9 9h.01 M15 9h.01"
+        }
+        IconName::FileDiff => {
+            "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M12 13H8 M16 17H8 M10 9H8"
+        }
+        IconName::Check => "M20 6L9 17l-5-5",
+        IconName::GitCommit => {
+            "M12 3v6 M12 15v6 M8 12a4 4 0 1 1 8 0a4 4 0 0 1-8 0 M3 12h5 M16 12h5"
+        }
+    };
+
+    rsx! {
+        svg {
+            class: "iconify-icon",
+            view_box: "0 0 24 24",
+            path {
+                d: "{path_data}",
+                fill: "none",
+                stroke: "currentColor",
+                stroke_linecap: "round",
+                stroke_linejoin: "round",
+                stroke_width: "2"
+            }
+        }
+    }
+}
+
+#[component]
 fn ForkSidebarNavigation(
     changed_count: usize,
     branches: Vec<api::BranchSummary>,
@@ -1968,16 +2035,16 @@ fn ForkSidebarNavigation(
         section { class: "fork-nav-tree min-h-0 flex-1 overflow-y-auto",
             div { class: "fork-sidebar-primary",
                 button { class: "fork-sidebar-row fork-sidebar-row-strong", onclick: move |_| on_local_changes.call(()),
-                    span { class: "fork-row-icon", "+" }
+                    span { class: "fork-row-icon", Icon { name: IconName::FileDiff } }
                     span { "Local Changes ({changed_count})" }
                 }
                 button { class: "fork-sidebar-row fork-sidebar-row-strong", onclick: move |_| on_all_commits.call(()),
-                    span { class: "fork-row-icon", "#" }
+                    span { class: "fork-row-icon", Icon { name: IconName::GitCommit } }
                     span { "All Commits" }
                 }
             }
             div { class: "fork-sidebar-search",
-                span { class: "fork-search-icon", "⌕" }
+                span { class: "fork-search-icon", Icon { name: IconName::Search } }
                 input { class: "fork-filter-input", placeholder: "Filter" }
             }
             ForkSidebarSection {
@@ -1994,7 +2061,7 @@ fn ForkSidebarNavigation(
                 div { class: "fork-section-title", "Stashes" }
                 for stash in stashes {
                     div { class: "fork-sidebar-row",
-                        span { class: "fork-row-icon", "$" }
+                        span { class: "fork-row-icon", Icon { name: IconName::Archive } }
                         span { class: "min-w-0 truncate", "#{stash.index} {stash.name}" }
                     }
                 }
@@ -2016,7 +2083,7 @@ fn ForkSidebarSection(
                 button {
                     class: if branch.is_head { "fork-sidebar-row fork-sidebar-row-active" } else { "fork-sidebar-row" },
                     onclick: move |_| on_checkout.call(branch.name.clone()),
-                    span { class: "fork-row-icon", if branch.is_head { "✓" } else { "⑂" } }
+                    span { class: "fork-row-icon", if branch.is_head { Icon { name: IconName::Check } } else { Icon { name: IconName::GitBranch } } }
                     span { class: "min-w-0 truncate", "{branch.name}" }
                     if branch.is_head {
                         span { class: "fork-row-badge", "main" }
@@ -2040,7 +2107,7 @@ fn ForkRemoteSection(
                 button {
                     class: "fork-sidebar-row",
                     onclick: move |_| on_checkout.call(branch.name.clone()),
-                    span { class: "fork-row-icon", "⌁" }
+                    span { class: "fork-row-icon", Icon { name: IconName::GitBranch } }
                     span { class: "min-w-0 truncate", "{branch.name}" }
                 }
             }
