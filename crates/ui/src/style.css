@@ -797,6 +797,32 @@ code,
   padding: 0.34rem 0.45rem;
 }
 
+.fork-toolbar-symbol {
+  display: inline-grid;
+  width: 1.35rem;
+  height: 1.35rem;
+  place-items: center;
+  color: currentColor;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 1.22rem;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.fork-toolbar-symbol::before {
+  display: block;
+  line-height: 1;
+}
+
+.fork-toolbar-symbol-folder::before { content: "□"; }
+.fork-toolbar-symbol-fetch::before { content: "↻"; }
+.fork-toolbar-symbol-pull::before { content: "↓"; }
+.fork-toolbar-symbol-push::before { content: "↑"; }
+.fork-toolbar-symbol-stash::before { content: "▤"; }
+.fork-toolbar-symbol-branch::before { content: "+"; }
+.fork-toolbar-symbol-open::before { content: "↗"; }
+.fork-toolbar-symbol-feedback::before { content: "☺"; }
+
 .fork-toolbar-button .zync-icon {
   width: 1.35rem;
   height: 1.35rem;
