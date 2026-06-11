@@ -3,6 +3,7 @@ use std::collections::HashSet;
 
 pub mod api;
 
+const TAILWIND_CSS: &str = include_str!("tailwind.min.css");
 const APP_CSS: &str = include_str!("style.css");
 
 #[derive(Clone, Copy, PartialEq)]
@@ -134,6 +135,7 @@ pub fn app() -> Element {
     );
 
     rsx! {
+        style { "{TAILWIND_CSS}" }
         style { "{APP_CSS}" }
         main {
             class: "{shell_class}",

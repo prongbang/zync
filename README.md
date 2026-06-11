@@ -10,6 +10,10 @@ The current implementation is a Rust workspace with:
 
 See [PLAN.md](PLAN.md) for the full implementation roadmap.
 
+## UI Assets
+
+The Dioxus UI vendors Tailwind CSS at `crates/ui/src/tailwind.min.css` and embeds it before the app-specific `style.css`. The UI can render without waiting on an external CDN, while local Fork-like styling still overrides Tailwind where needed.
+
 ## Run
 
 ```sh
