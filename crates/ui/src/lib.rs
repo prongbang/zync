@@ -17,6 +17,7 @@ enum ResizeDragTarget {
 #[derive(Clone, Copy, PartialEq)]
 enum IconName {
     Folder,
+    FolderOpen,
     GitBranch,
     Search,
     Refresh,
@@ -28,6 +29,30 @@ enum IconName {
     FileDiff,
     Check,
     GitCommit,
+    ChevronRight,
+    ChevronDown,
+    Tag,
+    Remote,
+    More,
+}
+
+#[derive(Clone, PartialEq)]
+enum SidebarBranchCommand {
+    Checkout(String),
+    FastForward(String),
+    Push(String),
+    Pull(String),
+    CreatePullRequest(String),
+    Merge(String),
+    Rebase(String),
+    InteractiveRebase(String),
+    NewBranch(String),
+    NewTag(String),
+    Tracking(String),
+    Rename(String),
+    Delete(String),
+    Ai(String),
+    CopyName(String),
 }
 
 fn clamp_pane_size(value: f64, min: u16, max: u16) -> u16 {
@@ -86,12 +111,61 @@ pub fn app() -> Element {
     let mut inspector_width = use_signal(|| 380u16);
     let mut history_height = use_signal(|| 320u16);
     let mut active_resize = use_signal(|| None::<ResizeDragTarget>);
+    let mut auto_opened_first_repo = use_signal(|| false);
     let mut notice = use_signal(|| "Ready".to_string());
 
     {
         let api = api.read().clone();
         use_effect(move || {
             load_repositories(api.clone(), repositories, notice);
+        });
+    }
+
+    {
+        let api = api.read().clone();
+        use_effect(move || {
+            if *auto_opened_first_repo.read() || workspace.read().is_some() {
+                return;
+            }
+            let Some(repository) = repositories.read().first().cloned() else {
+                return;
+            };
+            auto_opened_first_repo.set(true);
+            let api_client = api.clone();
+            spawn(async move {
+                match api_client.open_repository(&repository.id).await {
+                    Ok(opened) => {
+                        notice.set("Workspace opened and watcher attached".to_string());
+                        start_live_events(
+                            api_client.clone(),
+                            opened.repository.id.clone(),
+                            opened.workspace.id.clone(),
+                            workspace,
+                            git_status,
+                            branches,
+                            commits,
+                            stashes,
+                            conflicts,
+                            diff,
+                            notice,
+                        );
+                        load_workspace(
+                            api_client,
+                            opened.repository.id,
+                            opened.workspace.id,
+                            workspace,
+                            git_status,
+                            branches,
+                            commits,
+                            stashes,
+                            conflicts,
+                            diff,
+                            notice,
+                        );
+                    }
+                    Err(error) => notice.set(error),
+                }
+            });
         });
     }
 
@@ -175,7 +249,12 @@ pub fn app() -> Element {
                     span { class: "text-zinc-500", "..." }
                 }
 
-                section { class: "fork-quick-launch shrink-0 border-b border-zinc-800 bg-zinc-900/40 p-2 space-y-2",
+                details { class: "fork-mount-panel shrink-0 border-b border-zinc-800 bg-zinc-900/40",
+                    summary { class: "fork-mount-summary",
+                        Icon { name: IconName::Folder }
+                        span { "Add mounted repository" }
+                    }
+                    div { class: "fork-mount-body space-y-2",
                     input {
                         class: "w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-cyan-500",
                         placeholder: "Repository path mounted on server",
@@ -249,6 +328,7 @@ pub fn app() -> Element {
                             "Refresh"
                         }
                     }
+                    }
                 }
 
                 ForkSidebarNavigation {
@@ -260,6 +340,53 @@ pub fn app() -> Element {
                     on_checkout: move |name: String| {
                         if let Some(current) = workspace.read().as_ref().cloned() {
                             run_branch_action(api.read().clone(), current, BranchAction::Checkout(name), workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                        }
+                    },
+                    on_branch_command: move |command: SidebarBranchCommand| {
+                        let branch_name = match &command {
+                            SidebarBranchCommand::Checkout(name)
+                            | SidebarBranchCommand::FastForward(name)
+                            | SidebarBranchCommand::Push(name)
+                            | SidebarBranchCommand::Pull(name)
+                            | SidebarBranchCommand::CreatePullRequest(name)
+                            | SidebarBranchCommand::Merge(name)
+                            | SidebarBranchCommand::Rebase(name)
+                            | SidebarBranchCommand::InteractiveRebase(name)
+                            | SidebarBranchCommand::NewBranch(name)
+                            | SidebarBranchCommand::NewTag(name)
+                            | SidebarBranchCommand::Tracking(name)
+                            | SidebarBranchCommand::Rename(name)
+                            | SidebarBranchCommand::Delete(name)
+                            | SidebarBranchCommand::Ai(name)
+                            | SidebarBranchCommand::CopyName(name) => name.clone(),
+                        };
+
+                        let Some(current) = workspace.read().as_ref().cloned() else {
+                            notice.set(format!("Open a repository before using {branch_name}"));
+                            return;
+                        };
+
+                        match command {
+                            SidebarBranchCommand::Checkout(name) => run_branch_action(api.read().clone(), current, BranchAction::Checkout(name), workspace, git_status, branches, commits, stashes, conflicts, diff, notice),
+                            SidebarBranchCommand::Merge(name) => run_branch_action(api.read().clone(), current, BranchAction::Merge(name), workspace, git_status, branches, commits, stashes, conflicts, diff, notice),
+                            SidebarBranchCommand::Delete(name) => run_branch_action(api.read().clone(), current, BranchAction::Delete(name), workspace, git_status, branches, commits, stashes, conflicts, diff, notice),
+                            SidebarBranchCommand::Push(name) => {
+                                notice.set(format!("Pushing current branch; selected branch: {name}"));
+                                run_remote_action(api.read().clone(), current, RemoteAction::Push, workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                            }
+                            SidebarBranchCommand::Pull(name) | SidebarBranchCommand::FastForward(name) => {
+                                notice.set(format!("Pulling current branch; selected branch: {name}"));
+                                run_remote_action(api.read().clone(), current, RemoteAction::Pull, workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                            }
+                            SidebarBranchCommand::CopyName(name) => notice.set(format!("Branch name copied target: {name}")),
+                            SidebarBranchCommand::CreatePullRequest(name) => notice.set(format!("Create Pull Request for {name} is not connected to a Git provider yet")),
+                            SidebarBranchCommand::Rebase(name) => notice.set(format!("Open Rebase workflow and use {name} as base")),
+                            SidebarBranchCommand::InteractiveRebase(name) => notice.set(format!("Open Interactive Rebase workflow for {name}")),
+                            SidebarBranchCommand::NewBranch(name) => notice.set(format!("Use New Branch with base {name}")),
+                            SidebarBranchCommand::NewTag(name) => notice.set(format!("Use New Tag with target {name}")),
+                            SidebarBranchCommand::Tracking(name) => notice.set(format!("Tracking options for {name}")),
+                            SidebarBranchCommand::Rename(name) => notice.set(format!("Open Repository Navigator to rename {name}")),
+                            SidebarBranchCommand::Ai(name) => notice.set(format!("AI actions for {name} will run after AI tools are enabled")),
                         }
                     }
                 }
@@ -1968,6 +2095,9 @@ fn Icon(name: IconName) -> Element {
         IconName::Folder => {
             "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
         }
+        IconName::FolderOpen => {
+            "M6 14l1.45-2.9A2 2 0 0 1 9.24 10H21a1 1 0 0 1 .9 1.45l-3.1 6.2A2 2 0 0 1 17 19H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4.5a2 2 0 0 1 1.6.8L12 6h7a2 2 0 0 1 2 2v2"
+        }
         IconName::GitBranch => {
             "M6 3v12 M18 6a3 3 0 1 1-6 0a3 3 0 0 1 6 0 M9 18a3 3 0 1 1-6 0a3 3 0 0 1 6 0 M18 9a9 9 0 0 1-9 9"
         }
@@ -1995,11 +2125,16 @@ fn Icon(name: IconName) -> Element {
         IconName::GitCommit => {
             "M12 3v6 M12 15v6 M8 12a4 4 0 1 1 8 0a4 4 0 0 1-8 0 M3 12h5 M16 12h5"
         }
+        IconName::ChevronRight => "M9 18l6-6l-6-6",
+        IconName::ChevronDown => "M6 9l6 6l6-6",
+        IconName::Tag => "M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8Z M7.5 7.5h.01",
+        IconName::Remote => "M18 18.5a3.5 3.5 0 1 0 0-7a3.5 3.5 0 0 0 0 7Z M6 12.5a3.5 3.5 0 1 0 0-7a3.5 3.5 0 0 0 0 7Z M15 14.5l-6-4 M9 7.5l6-3",
+        IconName::More => "M12 8h.01 M12 12h.01 M12 16h.01",
     };
 
     rsx! {
         svg {
-            class: "iconify-icon",
+            class: "zync-icon",
             view_box: "0 0 24 24",
             path {
                 d: "{path_data}",
@@ -2021,7 +2156,10 @@ fn ForkSidebarNavigation(
     on_local_changes: EventHandler<()>,
     on_all_commits: EventHandler<()>,
     on_checkout: EventHandler<String>,
+    on_branch_command: EventHandler<SidebarBranchCommand>,
 ) -> Element {
+    let mut open_menu = use_signal(|| None::<String>);
+    let has_stashes = !stashes.is_empty();
     let locals = branches
         .iter()
         .filter(|branch| branch.kind == "local")
@@ -2045,6 +2183,10 @@ fn ForkSidebarNavigation(
                     span { "All Commits" }
                 }
             }
+            div { class: "fork-sidebar-view-tabs",
+                button { class: "fork-sidebar-view-tab fork-sidebar-view-tab-active", title: "Repository tree", Icon { name: IconName::GitBranch } }
+                button { class: "fork-sidebar-view-tab", title: "Search", Icon { name: IconName::Search } }
+            }
             div { class: "fork-sidebar-search",
                 span { class: "fork-search-icon", Icon { name: IconName::Search } }
                 input { class: "fork-filter-input", placeholder: "Filter" }
@@ -2052,23 +2194,87 @@ fn ForkSidebarNavigation(
             ForkSidebarSection {
                 title: "Branches".to_string(),
                 rows: locals,
-                on_checkout
+                open_menu: open_menu.read().clone(),
+                on_open_menu: move |name: String| open_menu.set(Some(name)),
+                on_close_menu: move |_| open_menu.set(None),
+                on_checkout,
+                on_branch_command
             }
             ForkRemoteSection {
                 title: "Remotes".to_string(),
                 rows: remotes,
-                on_checkout
+                open_menu: open_menu.read().clone(),
+                on_open_menu: move |name: String| open_menu.set(Some(name)),
+                on_close_menu: move |_| open_menu.set(None),
+                on_checkout,
+                on_branch_command
             }
             section { class: "fork-sidebar-section",
-                div { class: "fork-section-title", "Stashes" }
-                for stash in stashes {
-                    div { class: "fork-sidebar-row",
-                        span { class: "fork-row-icon", Icon { name: IconName::Archive } }
-                        span { class: "min-w-0 truncate", "#{stash.index} {stash.name}" }
-                    }
+                div { class: "fork-section-title",
+                    span { class: "fork-section-caret", Icon { name: IconName::ChevronDown } }
+                    span { "Tags" }
+                }
+                div { class: "fork-sidebar-row fork-sidebar-leaf fork-sidebar-muted-row",
+                    span { class: "fork-row-icon", Icon { name: IconName::Tag } }
+                    span { class: "min-w-0 truncate", "No tags loaded" }
                 }
             }
+            section { class: "fork-sidebar-section",
+                div { class: "fork-section-title",
+                    span { class: "fork-section-caret", Icon { name: IconName::ChevronDown } }
+                    span { "Stashes" }
+                }
+                for stash in stashes.clone() {
+                    div { class: "fork-sidebar-row fork-sidebar-leaf",
+                        span { class: "fork-row-icon", Icon { name: IconName::Archive } }
+                        span { class: "min-w-0 truncate", if stash.message.is_empty() { "#{stash.index} {stash.name}" } else { "{stash.message}" } }
+                    }
+                }
+                if !has_stashes {
+                    div { class: "fork-sidebar-empty", "No stashes" }
+                }
+            }
+            section { class: "fork-sidebar-section",
+                div { class: "fork-section-title",
+                    span { class: "fork-section-caret", Icon { name: IconName::ChevronDown } }
+                    span { "Submodules" }
+                }
+                div { class: "fork-sidebar-empty", "No submodules loaded" }
+            }
         }
+    }
+}
+
+fn branch_group_rows(rows: Vec<api::BranchSummary>) -> Vec<(String, Vec<api::BranchSummary>)> {
+    let mut grouped = Vec::<(String, Vec<api::BranchSummary>)>::new();
+    for branch in rows {
+        let group_name = branch
+            .name
+            .split_once('/')
+            .map(|(group, _)| group.to_string())
+            .unwrap_or_default();
+        if group_name.is_empty() {
+            grouped.push((String::new(), vec![branch]));
+            continue;
+        }
+        if let Some((_, items)) = grouped.iter_mut().find(|(name, _)| name == &group_name) {
+            items.push(branch);
+        } else {
+            grouped.push((group_name, vec![branch]));
+        }
+    }
+    grouped
+}
+
+fn branch_leaf_label(branch: &api::BranchSummary, group: &str) -> String {
+    if group.is_empty() {
+        branch.name.clone()
+    } else {
+        branch
+            .name
+            .strip_prefix(&format!("{group}/"))
+            .unwrap_or(&branch.name)
+            .to_string()
     }
 }
 
@@ -2076,19 +2282,50 @@ fn ForkSidebarNavigation(
 fn ForkSidebarSection(
     title: String,
     rows: Vec<api::BranchSummary>,
+    open_menu: Option<String>,
+    on_open_menu: EventHandler<String>,
+    on_close_menu: EventHandler<()>,
     on_checkout: EventHandler<String>,
+    on_branch_command: EventHandler<SidebarBranchCommand>,
 ) -> Element {
+    let grouped = branch_group_rows(rows);
     rsx! {
         section { class: "fork-sidebar-section",
-            div { class: "fork-section-title", "{title}" }
-            for branch in rows {
-                button {
-                    class: if branch.is_head { "fork-sidebar-row fork-sidebar-row-active" } else { "fork-sidebar-row" },
-                    onclick: move |_| on_checkout.call(branch.name.clone()),
-                    span { class: "fork-row-icon", if branch.is_head { Icon { name: IconName::Check } } else { Icon { name: IconName::GitBranch } } }
-                    span { class: "min-w-0 truncate", "{branch.name}" }
-                    if branch.is_head {
-                        span { class: "fork-row-badge", "main" }
+            div { class: "fork-section-title",
+                span { class: "fork-section-caret", Icon { name: IconName::ChevronDown } }
+                span { "{title}" }
+            }
+            for (group, branches) in grouped {
+                if group.is_empty() {
+                    for branch in branches {
+                        ForkSidebarBranchRow {
+                            branch: branch.clone(),
+                            label: String::new(),
+                            indent: false,
+                            menu_open: open_menu.as_ref() == Some(&branch.name),
+                            on_open_menu,
+                            on_close_menu,
+                            on_checkout,
+                            on_branch_command
+                        }
+                    }
+                } else {
+                    div { class: "fork-sidebar-row fork-sidebar-group-row",
+                        span { class: "fork-section-caret", Icon { name: IconName::ChevronDown } }
+                        span { class: "fork-row-icon", Icon { name: IconName::FolderOpen } }
+                        span { class: "min-w-0 truncate", "{group}" }
+                    }
+                    for branch in branches {
+                        ForkSidebarBranchRow {
+                            branch: branch.clone(),
+                            label: branch_leaf_label(&branch, &group),
+                            indent: true,
+                            menu_open: open_menu.as_ref() == Some(&branch.name),
+                            on_open_menu,
+                            on_close_menu,
+                            on_checkout,
+                            on_branch_command
+                        }
                     }
                 }
             }
@@ -2100,18 +2337,182 @@ fn ForkSidebarSection(
 fn ForkRemoteSection(
     title: String,
     rows: Vec<api::BranchSummary>,
+    open_menu: Option<String>,
+    on_open_menu: EventHandler<String>,
+    on_close_menu: EventHandler<()>,
     on_checkout: EventHandler<String>,
+    on_branch_command: EventHandler<SidebarBranchCommand>,
 ) -> Element {
+    let grouped = branch_group_rows(rows);
     rsx! {
         section { class: "fork-sidebar-section",
-            div { class: "fork-section-title", "{title}" }
-            for branch in rows {
-                button {
-                    class: "fork-sidebar-row",
-                    onclick: move |_| on_checkout.call(branch.name.clone()),
-                    span { class: "fork-row-icon", Icon { name: IconName::GitBranch } }
-                    span { class: "min-w-0 truncate", "{branch.name}" }
+            div { class: "fork-section-title",
+                span { class: "fork-section-caret", Icon { name: IconName::ChevronDown } }
+                span { "{title}" }
+            }
+            for (remote, branches) in grouped {
+                if remote.is_empty() {
+                    for branch in branches {
+                        ForkSidebarBranchRow {
+                            branch: branch.clone(),
+                            label: String::new(),
+                            indent: false,
+                            menu_open: open_menu.as_ref() == Some(&branch.name),
+                            on_open_menu,
+                            on_close_menu,
+                            on_checkout,
+                            on_branch_command
+                        }
+                    }
+                } else {
+                    div { class: "fork-sidebar-row fork-sidebar-group-row",
+                        span { class: "fork-section-caret", Icon { name: IconName::ChevronDown } }
+                        span { class: "fork-row-icon", Icon { name: IconName::Remote } }
+                        span { class: "min-w-0 truncate", "{remote}" }
+                    }
+                    for branch in branches {
+                        ForkSidebarBranchRow {
+                            branch: branch.clone(),
+                            label: branch_leaf_label(&branch, &remote),
+                            indent: true,
+                            menu_open: open_menu.as_ref() == Some(&branch.name),
+                            on_open_menu,
+                            on_close_menu,
+                            on_checkout,
+                            on_branch_command
+                        }
+                    }
                 }
+            }
+        }
+    }
+}
+
+#[component]
+fn ForkSidebarBranchRow(
+    branch: api::BranchSummary,
+    label: String,
+    indent: bool,
+    menu_open: bool,
+    on_open_menu: EventHandler<String>,
+    on_close_menu: EventHandler<()>,
+    on_checkout: EventHandler<String>,
+    on_branch_command: EventHandler<SidebarBranchCommand>,
+) -> Element {
+    let display = if label.is_empty() {
+        branch.name.clone()
+    } else {
+        label
+    };
+    let row_class = if branch.is_head {
+        "fork-sidebar-row fork-sidebar-row-active fork-sidebar-leaf"
+    } else if indent {
+        "fork-sidebar-row fork-sidebar-leaf fork-sidebar-row-indent"
+    } else {
+        "fork-sidebar-row fork-sidebar-leaf"
+    };
+    let branch_for_context = branch.name.clone();
+    let branch_for_click = branch.name.clone();
+    let branch_for_more = branch.name.clone();
+    rsx! {
+        div { class: "fork-sidebar-row-wrap",
+            div {
+                class: "{row_class}",
+                prevent_default: "oncontextmenu",
+                oncontextmenu: move |_| {
+                    on_open_menu.call(branch_for_context.clone());
+                },
+                onclick: move |_| on_checkout.call(branch_for_click.clone()),
+                span { class: "fork-row-icon", if branch.is_head { Icon { name: IconName::Check } } else { Icon { name: IconName::GitBranch } } }
+                span { class: "min-w-0 truncate", "{display}" }
+                if branch.is_head {
+                    span { class: "fork-row-badge", "1↑" }
+                }
+                button {
+                    class: "fork-row-more",
+                    title: "Branch actions",
+                    onclick: move |event| {
+                        event.stop_propagation();
+                        on_open_menu.call(branch_for_more.clone());
+                    },
+                    Icon { name: IconName::More }
+                }
+            }
+            if menu_open {
+                ForkBranchContextMenu {
+                    branch: branch.name.clone(),
+                    is_head: branch.is_head,
+                    on_close: on_close_menu,
+                    on_command: on_branch_command
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ForkBranchContextMenu(
+    branch: String,
+    is_head: bool,
+    on_close: EventHandler<()>,
+    on_command: EventHandler<SidebarBranchCommand>,
+) -> Element {
+    rsx! {
+        div { class: "fork-context-menu",
+            ContextMenuItem { label: "Checkout...".to_string(), disabled: is_head, command: SidebarBranchCommand::Checkout(branch.clone()), on_command, on_close, active: true }
+            div { class: "fork-context-separator" }
+            ContextMenuItem { label: format!("Fast-Forward to '{branch}'"), command: SidebarBranchCommand::FastForward(branch.clone()), on_command, on_close }
+            ContextMenuItem { label: "Pull from".to_string(), command: SidebarBranchCommand::Pull(branch.clone()), on_command, on_close, chevron: true }
+            ContextMenuItem { label: "Push to".to_string(), command: SidebarBranchCommand::Push(branch.clone()), on_command, on_close, chevron: true }
+            ContextMenuItem { label: "Create Pull Request".to_string(), command: SidebarBranchCommand::CreatePullRequest(branch.clone()), on_command, on_close, chevron: true }
+            div { class: "fork-context-separator" }
+            ContextMenuItem { label: "Merge into 'main'...".to_string(), disabled: is_head, command: SidebarBranchCommand::Merge(branch.clone()), on_command, on_close }
+            ContextMenuItem { label: format!("Rebase on '{branch}'..."), disabled: is_head, command: SidebarBranchCommand::Rebase(branch.clone()), on_command, on_close }
+            ContextMenuItem { label: format!("Interactively Rebase on '{branch}'..."), disabled: is_head, command: SidebarBranchCommand::InteractiveRebase(branch.clone()), on_command, on_close }
+            div { class: "fork-context-separator" }
+            ContextMenuItem { label: "New Branch...".to_string(), command: SidebarBranchCommand::NewBranch(branch.clone()), on_command, on_close, shortcut: "⇧⌘B".to_string() }
+            ContextMenuItem { label: "New Tag...".to_string(), command: SidebarBranchCommand::NewTag(branch.clone()), on_command, on_close, shortcut: "⇧⌘T".to_string() }
+            div { class: "fork-context-separator" }
+            ContextMenuItem { label: "Tracking".to_string(), command: SidebarBranchCommand::Tracking(branch.clone()), on_command, on_close, chevron: true }
+            ContextMenuItem { label: "Rename...".to_string(), disabled: is_head, command: SidebarBranchCommand::Rename(branch.clone()), on_command, on_close }
+            ContextMenuItem { label: "Delete...".to_string(), disabled: is_head, command: SidebarBranchCommand::Delete(branch.clone()), on_command, on_close }
+            div { class: "fork-context-separator" }
+            ContextMenuItem { label: "AI".to_string(), command: SidebarBranchCommand::Ai(branch.clone()), on_command, on_close, chevron: true }
+            div { class: "fork-context-separator" }
+            ContextMenuItem { label: "Copy Branch Name".to_string(), command: SidebarBranchCommand::CopyName(branch), on_command, on_close }
+        }
+    }
+}
+
+#[component]
+fn ContextMenuItem(
+    label: String,
+    command: SidebarBranchCommand,
+    on_command: EventHandler<SidebarBranchCommand>,
+    on_close: EventHandler<()>,
+    #[props(default = false)] disabled: bool,
+    #[props(default = false)] active: bool,
+    #[props(default = false)] chevron: bool,
+    #[props(default)] shortcut: String,
+) -> Element {
+    let class_name = if active {
+        "fork-context-item fork-context-item-active"
+    } else {
+        "fork-context-item"
+    };
+    rsx! {
+        button {
+            class: "{class_name}",
+            disabled,
+            onclick: move |_| {
+                on_command.call(command.clone());
+                on_close.call(());
+            },
+            span { class: "min-w-0 truncate", "{label}" }
+            if !shortcut.is_empty() {
+                span { class: "fork-context-shortcut", "{shortcut}" }
+            } else if chevron {
+                span { class: "fork-context-chevron", Icon { name: IconName::ChevronRight } }
             }
         }
     }
