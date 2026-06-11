@@ -203,8 +203,20 @@ pub fn app() -> Element {
                     }
                 }
             }
+            PaneStepSplitter {
+                label: "Sidebar".to_string(),
+                class_name: "sidebar-step-splitter".to_string(),
+                on_decrease: move |_| {
+                    let next = (*sidebar_width.read()).saturating_sub(20).max(220);
+                    sidebar_width.set(next);
+                },
+                on_increase: move |_| {
+                    let next = ((*sidebar_width.read()).saturating_add(20)).min(420);
+                    sidebar_width.set(next);
+                }
+            }
 
-            section { class: "min-w-0 flex-1 min-h-[70vh] xl:min-h-0 flex flex-col bg-zinc-900",
+            section { class: "relative min-w-0 flex-1 min-h-[70vh] xl:min-h-0 flex flex-col bg-zinc-900",
                 header { class: "h-auto xl:h-12 shrink-0 border-b border-zinc-800 px-3 flex flex-col xl:flex-row xl:items-center justify-between gap-2 bg-zinc-950",
                     if let Some(current) = workspace.read().as_ref() {
                         div { class: "min-w-0",
@@ -262,7 +274,33 @@ pub fn app() -> Element {
                     }
                 }
 
-                div { class: "workspace-grid min-h-0 flex-1 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[260px_minmax(0,1fr)_380px] xl:grid-rows-[minmax(260px,0.95fr)_minmax(260px,0.75fr)_minmax(220px,0.55fr)_minmax(360px,auto)] gap-px bg-zinc-800 overflow-y-auto xl:overflow-hidden",
+                div { class: "workspace-grid relative min-h-0 flex-1 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[260px_minmax(0,1fr)_380px] xl:grid-rows-[minmax(260px,0.95fr)_minmax(260px,0.75fr)_minmax(220px,0.55fr)_minmax(360px,auto)] gap-px bg-zinc-800 overflow-y-auto xl:overflow-hidden",
+                    PaneGridSplitters {
+                        on_left_decrease: move |_| {
+                            let next = (*left_pane_width.read()).saturating_sub(20).max(220);
+                            left_pane_width.set(next);
+                        },
+                        on_left_increase: move |_| {
+                            let next = ((*left_pane_width.read()).saturating_add(20)).min(420);
+                            left_pane_width.set(next);
+                        },
+                        on_right_decrease: move |_| {
+                            let next = (*inspector_width.read()).saturating_sub(20).max(320);
+                            inspector_width.set(next);
+                        },
+                        on_right_increase: move |_| {
+                            let next = ((*inspector_width.read()).saturating_add(20)).min(560);
+                            inspector_width.set(next);
+                        },
+                        on_history_decrease: move |_| {
+                            let next = (*history_height.read()).saturating_sub(20).max(240);
+                            history_height.set(next);
+                        },
+                        on_history_increase: move |_| {
+                            let next = ((*history_height.read()).saturating_add(20)).min(520);
+                            history_height.set(next);
+                        }
+                    }
                     FileExplorer {
                         files: workspace.read().as_ref().map(|item| item.files.clone()).unwrap_or_default(),
                         selected: selected_file.read().clone(),
@@ -1858,6 +1896,47 @@ fn FileExplorer(
                     }
                 }
             }
+        }
+    }
+}
+
+#[component]
+fn PaneStepSplitter(
+    label: String,
+    class_name: String,
+    on_decrease: EventHandler<()>,
+    on_increase: EventHandler<()>,
+) -> Element {
+    rsx! {
+        div { class: "{class_name}",
+            button { title: "Shrink {label}", onclick: move |_| on_decrease.call(()), "-" }
+            span { "{label}" }
+            button { title: "Grow {label}", onclick: move |_| on_increase.call(()), "+" }
+        }
+    }
+}
+
+#[component]
+fn PaneGridSplitters(
+    on_left_decrease: EventHandler<()>,
+    on_left_increase: EventHandler<()>,
+    on_right_decrease: EventHandler<()>,
+    on_right_increase: EventHandler<()>,
+    on_history_decrease: EventHandler<()>,
+    on_history_increase: EventHandler<()>,
+) -> Element {
+    rsx! {
+        div { class: "grid-splitter grid-splitter-left",
+            button { title: "Narrow left pane", onclick: move |_| on_left_decrease.call(()), "-" }
+            button { title: "Widen left pane", onclick: move |_| on_left_increase.call(()), "+" }
+        }
+        div { class: "grid-splitter grid-splitter-right",
+            button { title: "Narrow inspector", onclick: move |_| on_right_decrease.call(()), "-" }
+            button { title: "Widen inspector", onclick: move |_| on_right_increase.call(()), "+" }
+        }
+        div { class: "grid-splitter grid-splitter-history",
+            button { title: "Shorter history", onclick: move |_| on_history_decrease.call(()), "-" }
+            button { title: "Taller history", onclick: move |_| on_history_increase.call(()), "+" }
         }
     }
 }
