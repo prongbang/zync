@@ -418,6 +418,11 @@ code,
   display: none;
 }
 
+.app-shell.is-resizing,
+.app-shell.is-resizing * {
+  user-select: none;
+}
+
 @media (min-width: 1280px) {
   .sidebar-step-splitter {
     display: flex;
@@ -430,7 +435,9 @@ code,
     border-right: 1px solid #27272a;
     background: #111113;
     color: #71717a;
+    cursor: col-resize;
     user-select: none;
+    touch-action: none;
   }
 
   .sidebar-step-splitter span {
@@ -468,6 +475,7 @@ code,
     gap: 0.25rem;
     background: rgba(9, 9, 11, 0.82);
     box-shadow: 0 0 0 1px #27272a;
+    touch-action: none;
   }
 
   .grid-splitter-left {
@@ -494,5 +502,19 @@ code,
     top: calc(var(--history-height, 320px) - 7px);
     height: 14px;
     cursor: row-resize;
+  }
+
+  .app-shell.is-resizing-col {
+    cursor: col-resize;
+  }
+
+  .app-shell.is-resizing-row {
+    cursor: row-resize;
+  }
+
+  .sidebar-step-splitter:hover,
+  .grid-splitter:hover {
+    background: rgba(8, 51, 68, 0.72);
+    box-shadow: 0 0 0 1px rgba(6, 182, 212, 0.5);
   }
 }

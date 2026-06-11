@@ -5,6 +5,28 @@ pub mod api;
 
 const APP_CSS: &str = include_str!("style.css");
 
+#[derive(Clone, Copy, PartialEq)]
+enum ResizeDragTarget {
+    Sidebar,
+    LeftPane,
+    Inspector,
+    History,
+}
+
+fn clamp_pane_size(value: f64, min: u16, max: u16) -> u16 {
+    value.round().clamp(f64::from(min), f64::from(max)) as u16
+}
+
+#[cfg(target_arch = "wasm32")]
+fn viewport_width() -> Option<f64> {
+    web_sys::window()?.inner_width().ok()?.as_f64()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn viewport_width() -> Option<f64> {
+    None
+}
+
 pub fn app() -> Element {
     let api = use_signal(api::ZyncApi::default);
     let api_base = api.read().base_url.clone();
@@ -45,6 +67,7 @@ pub fn app() -> Element {
     let mut left_pane_width = use_signal(|| 260u16);
     let mut inspector_width = use_signal(|| 380u16);
     let mut history_height = use_signal(|| 320u16);
+    let mut active_resize = use_signal(|| None::<ResizeDragTarget>);
     let mut notice = use_signal(|| "Ready".to_string());
 
     {
@@ -76,10 +99,46 @@ pub fn app() -> Element {
         *inspector_width.read(),
         *history_height.read()
     );
+    let shell_class = format!(
+        "app-shell min-h-screen xl:h-screen bg-zinc-950 text-zinc-100 flex flex-col xl:flex-row overflow-y-auto xl:overflow-hidden{}",
+        match *active_resize.read() {
+            Some(ResizeDragTarget::History) => " is-resizing is-resizing-row",
+            Some(_) => " is-resizing is-resizing-col",
+            None => "",
+        }
+    );
 
     rsx! {
         style { "{APP_CSS}" }
-        main { class: "app-shell min-h-screen xl:h-screen bg-zinc-950 text-zinc-100 flex flex-col xl:flex-row overflow-y-auto xl:overflow-hidden", style: "{layout_style}",
+        main {
+            class: "{shell_class}",
+            style: "{layout_style}",
+            onpointermove: move |event| {
+                let target = *active_resize.read();
+                let Some(target) = target else {
+                    return;
+                };
+                let coordinates = event.client_coordinates();
+                match target {
+                    ResizeDragTarget::Sidebar => {
+                        sidebar_width.set(clamp_pane_size(coordinates.x, 220, 420));
+                    }
+                    ResizeDragTarget::LeftPane => {
+                        let grid_left = f64::from(*sidebar_width.read()) + 14.0;
+                        left_pane_width.set(clamp_pane_size(coordinates.x - grid_left, 220, 420));
+                    }
+                    ResizeDragTarget::Inspector => {
+                        if let Some(width) = viewport_width() {
+                            inspector_width.set(clamp_pane_size(width - coordinates.x, 320, 560));
+                        }
+                    }
+                    ResizeDragTarget::History => {
+                        history_height.set(clamp_pane_size(coordinates.y - 48.0, 240, 520));
+                    }
+                }
+            },
+            onpointerup: move |_| active_resize.set(None),
+            onpointercancel: move |_| active_resize.set(None),
             aside { class: "workspace-sidebar w-full xl:w-[280px] xl:h-screen shrink-0 border-b xl:border-b-0 xl:border-r border-zinc-800 bg-zinc-950 flex flex-col",
                 header { class: "h-12 shrink-0 border-b border-zinc-800 px-3 flex items-center justify-between gap-3",
                     h1 { class: "text-sm font-semibold tracking-tight", "Zync" }
@@ -213,7 +272,8 @@ pub fn app() -> Element {
                 on_increase: move |_| {
                     let next = ((*sidebar_width.read()).saturating_add(20)).min(420);
                     sidebar_width.set(next);
-                }
+                },
+                on_drag_start: move |_| active_resize.set(Some(ResizeDragTarget::Sidebar))
             }
 
             section { class: "relative min-w-0 flex-1 min-h-[70vh] xl:min-h-0 flex flex-col bg-zinc-900",
@@ -284,6 +344,7 @@ pub fn app() -> Element {
                             let next = ((*left_pane_width.read()).saturating_add(20)).min(420);
                             left_pane_width.set(next);
                         },
+                        on_left_drag_start: move |_| active_resize.set(Some(ResizeDragTarget::LeftPane)),
                         on_right_decrease: move |_| {
                             let next = (*inspector_width.read()).saturating_sub(20).max(320);
                             inspector_width.set(next);
@@ -292,6 +353,7 @@ pub fn app() -> Element {
                             let next = ((*inspector_width.read()).saturating_add(20)).min(560);
                             inspector_width.set(next);
                         },
+                        on_right_drag_start: move |_| active_resize.set(Some(ResizeDragTarget::Inspector)),
                         on_history_decrease: move |_| {
                             let next = (*history_height.read()).saturating_sub(20).max(240);
                             history_height.set(next);
@@ -299,7 +361,8 @@ pub fn app() -> Element {
                         on_history_increase: move |_| {
                             let next = ((*history_height.read()).saturating_add(20)).min(520);
                             history_height.set(next);
-                        }
+                        },
+                        on_history_drag_start: move |_| active_resize.set(Some(ResizeDragTarget::History))
                     }
                     FileExplorer {
                         files: workspace.read().as_ref().map(|item| item.files.clone()).unwrap_or_default(),
@@ -1906,9 +1969,12 @@ fn PaneStepSplitter(
     class_name: String,
     on_decrease: EventHandler<()>,
     on_increase: EventHandler<()>,
+    on_drag_start: EventHandler<()>,
 ) -> Element {
     rsx! {
-        div { class: "{class_name}",
+        div {
+            class: "{class_name}",
+            onpointerdown: move |_| on_drag_start.call(()),
             button { title: "Shrink {label}", onclick: move |_| on_decrease.call(()), "-" }
             span { "{label}" }
             button { title: "Grow {label}", onclick: move |_| on_increase.call(()), "+" }
@@ -1920,21 +1986,30 @@ fn PaneStepSplitter(
 fn PaneGridSplitters(
     on_left_decrease: EventHandler<()>,
     on_left_increase: EventHandler<()>,
+    on_left_drag_start: EventHandler<()>,
     on_right_decrease: EventHandler<()>,
     on_right_increase: EventHandler<()>,
+    on_right_drag_start: EventHandler<()>,
     on_history_decrease: EventHandler<()>,
     on_history_increase: EventHandler<()>,
+    on_history_drag_start: EventHandler<()>,
 ) -> Element {
     rsx! {
-        div { class: "grid-splitter grid-splitter-left",
+        div {
+            class: "grid-splitter grid-splitter-left",
+            onpointerdown: move |_| on_left_drag_start.call(()),
             button { title: "Narrow left pane", onclick: move |_| on_left_decrease.call(()), "-" }
             button { title: "Widen left pane", onclick: move |_| on_left_increase.call(()), "+" }
         }
-        div { class: "grid-splitter grid-splitter-right",
+        div {
+            class: "grid-splitter grid-splitter-right",
+            onpointerdown: move |_| on_right_drag_start.call(()),
             button { title: "Narrow inspector", onclick: move |_| on_right_decrease.call(()), "-" }
             button { title: "Widen inspector", onclick: move |_| on_right_increase.call(()), "+" }
         }
-        div { class: "grid-splitter grid-splitter-history",
+        div {
+            class: "grid-splitter grid-splitter-history",
+            onpointerdown: move |_| on_history_drag_start.call(()),
             button { title: "Shorter history", onclick: move |_| on_history_decrease.call(()), "-" }
             button { title: "Taller history", onclick: move |_| on_history_increase.call(()), "+" }
         }
