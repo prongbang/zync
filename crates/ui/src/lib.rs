@@ -2086,49 +2086,24 @@ fn start_live_events(
 
 #[component]
 fn Icon(name: IconName) -> Element {
-    let path_data = match name {
-        IconName::Folder => {
-            "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
-        }
-        IconName::FolderOpen => {
-            "M6 14l1.45-2.9A2 2 0 0 1 9.24 10H21a1 1 0 0 1 .9 1.45l-3.1 6.2A2 2 0 0 1 17 19H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4.5a2 2 0 0 1 1.6.8L12 6h7a2 2 0 0 1 2 2v2"
-        }
-        IconName::GitBranch => {
-            "M6 3v12 M18 6a3 3 0 1 1-6 0a3 3 0 0 1 6 0 M9 18a3 3 0 1 1-6 0a3 3 0 0 1 6 0 M18 9a9 9 0 0 1-9 9"
-        }
-        IconName::Search => {
-            "M11 19a8 8 0 1 1 5.657-13.657A8 8 0 0 1 11 19 M21 21l-4.35-4.35"
-        }
-        IconName::Archive => {
-            "M21 8v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8 M1 3h22v5H1z M10 12h4"
-        }
-        IconName::FileDiff => {
-            "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M12 13H8 M16 17H8 M10 9H8"
-        }
-        IconName::Check => "M20 6L9 17l-5-5",
-        IconName::GitCommit => {
-            "M12 3v6 M12 15v6 M8 12a4 4 0 1 1 8 0a4 4 0 0 1-8 0 M3 12h5 M16 12h5"
-        }
-        IconName::ChevronRight => "M9 18l6-6l-6-6",
-        IconName::ChevronDown => "M6 9l6 6l6-6",
-        IconName::Tag => "M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8Z M7.5 7.5h.01",
-        IconName::Remote => "M18 18.5a3.5 3.5 0 1 0 0-7a3.5 3.5 0 0 0 0 7Z M6 12.5a3.5 3.5 0 1 0 0-7a3.5 3.5 0 0 0 0 7Z M15 14.5l-6-4 M9 7.5l6-3",
-        IconName::More => "M12 8h.01 M12 12h.01 M12 16h.01",
+    let class_name = match name {
+        IconName::Folder => "zync-icon zync-icon-folder",
+        IconName::FolderOpen => "zync-icon zync-icon-folder-open",
+        IconName::GitBranch => "zync-icon zync-icon-git-branch",
+        IconName::Search => "zync-icon zync-icon-search",
+        IconName::Archive => "zync-icon zync-icon-archive",
+        IconName::FileDiff => "zync-icon zync-icon-file-diff",
+        IconName::Check => "zync-icon zync-icon-check",
+        IconName::GitCommit => "zync-icon zync-icon-git-commit",
+        IconName::ChevronRight => "zync-icon zync-icon-chevron-right",
+        IconName::ChevronDown => "zync-icon zync-icon-chevron-down",
+        IconName::Tag => "zync-icon zync-icon-tag",
+        IconName::Remote => "zync-icon zync-icon-remote",
+        IconName::More => "zync-icon zync-icon-more",
     };
 
     rsx! {
-        svg {
-            class: "zync-icon",
-            view_box: "0 0 24 24",
-            path {
-                d: "{path_data}",
-                fill: "none",
-                stroke: "currentColor",
-                stroke_linecap: "round",
-                stroke_linejoin: "round",
-                stroke_width: "2"
-            }
-        }
+        span { class: "{class_name}", aria_hidden: "true" }
     }
 }
 
