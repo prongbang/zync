@@ -23,20 +23,58 @@ enum RepoAddMode {
 #[derive(Clone, PartialEq)]
 enum SidebarBranchCommand {
     Checkout(String),
-    FastForward(String),
-    Push(String),
-    Pull(String),
-    CreatePullRequest(String),
     Merge(String),
     Rebase(String),
     InteractiveRebase(String),
     NewBranch(String),
     NewTag(String),
-    Tracking(String),
     Rename(String),
     Delete(String),
-    Ai(String),
     CopyName(String),
+}
+
+#[derive(Clone, PartialEq)]
+enum BranchDialog {
+    Checkout { branch: String },
+    Merge { branch: String },
+    Rebase { branch: String, interactive: bool },
+    NewBranch { branch: String, target: Option<String> },
+    NewTag { branch: String, target: Option<String> },
+    Rename { branch: String },
+    Delete { branch: String },
+}
+
+impl BranchDialog {
+    fn title(&self) -> &'static str {
+        match self {
+            BranchDialog::Checkout { .. } => "Checkout Branch",
+            BranchDialog::Merge { .. } => "Merge Branch",
+            BranchDialog::Rebase {
+                interactive: true, ..
+            } => "Interactive Rebase",
+            BranchDialog::Rebase { .. } => "Rebase Branch",
+            BranchDialog::NewBranch { .. } => "New Branch",
+            BranchDialog::NewTag { .. } => "New Tag",
+            BranchDialog::Rename { .. } => "Rename Branch",
+            BranchDialog::Delete { .. } => "Delete Branch",
+        }
+    }
+
+    fn branch(&self) -> &str {
+        match self {
+            BranchDialog::Checkout { branch }
+            | BranchDialog::Merge { branch }
+            | BranchDialog::Rebase { branch, .. }
+            | BranchDialog::NewBranch { branch, .. }
+            | BranchDialog::NewTag { branch, .. }
+            | BranchDialog::Rename { branch }
+            | BranchDialog::Delete { branch } => branch,
+        }
+    }
+
+    fn is_dangerous(&self) -> bool {
+        matches!(self, BranchDialog::Delete { .. })
+    }
 }
 
 fn clamp_pane_size(value: f64, min: u16, max: u16) -> u16 {
@@ -59,12 +97,12 @@ pub fn app() -> Element {
 
     let mut repositories = use_signal(Vec::<api::RepositoryRecord>::new);
     let mut workspace = use_signal(|| None::<api::WorkspaceResponse>);
-    let git_status = use_signal(Vec::<api::FileStatus>::new);
-    let branches = use_signal(Vec::<api::BranchSummary>::new);
+    let mut git_status = use_signal(Vec::<api::FileStatus>::new);
+    let mut branches = use_signal(Vec::<api::BranchSummary>::new);
     let mut commits = use_signal(Vec::<api::CommitSummary>::new);
     let mut selected_commit = use_signal(|| None::<api::CommitSummary>);
-    let stashes = use_signal(Vec::<api::StashSummary>::new);
-    let conflicts = use_signal(Vec::<api::ConflictSummary>::new);
+    let mut stashes = use_signal(Vec::<api::StashSummary>::new);
+    let mut conflicts = use_signal(Vec::<api::ConflictSummary>::new);
     let mut conflict_detail = use_signal(api::ConflictDetail::default);
     let mut manual_conflict_content = use_signal(String::new);
     let mut diff = use_signal(String::new);
@@ -101,6 +139,12 @@ pub fn app() -> Element {
     let mut active_resize = use_signal(|| None::<ResizeDragTarget>);
     let mut auto_opened_first_repo = use_signal(|| false);
     let mut mobile_sidebar_open = use_signal(|| false);
+    let mut sidebar_open_menu = use_signal(|| None::<String>);
+    let mut branch_dialog = use_signal(|| None::<BranchDialog>);
+    let mut branch_dialog_value = use_signal(String::new);
+    let mut branch_dialog_target = use_signal(String::new);
+    let mut branch_dialog_checkout = use_signal(|| true);
+    let mut branch_dialog_rebase_steps = use_signal(Vec::<api::RebaseStepRequest>::new);
     let mut commit_section_mode = use_signal(|| CommitSectionMode::Commits);
     let mut notice = use_signal(|| "Ready".to_string());
 
@@ -171,6 +215,19 @@ pub fn app() -> Element {
         .find(|branch| branch.is_head)
         .map(|branch| branch.name.clone())
         .unwrap_or_else(|| "no branch".to_string());
+
+    {
+        use_effect(move || {
+            if *commit_section_mode.read() == CommitSectionMode::LocalChanges
+                && git_status.read().is_empty()
+            {
+                selected_commit.set(None);
+                selected_file.set(String::new());
+                diff.set(String::new());
+            }
+        });
+    }
+
     let layout_style = format!(
         "--sidebar-width:{}px;--left-pane:{}px;--right-pane:{}px;--history-height:{}px;",
         *sidebar_width.read(),
@@ -231,7 +288,10 @@ pub fn app() -> Element {
                 button {
                     class: "mobile-sidebar-scrim",
                     title: "Close navigation",
-                    onclick: move |_| mobile_sidebar_open.set(false)
+                    onclick: move |_| {
+                        mobile_sidebar_open.set(false);
+                        sidebar_open_menu.set(None);
+                    }
                 }
             }
             aside { class: "{sidebar_class}",
@@ -245,7 +305,10 @@ pub fn app() -> Element {
                         button {
                             class: "mobile-sidebar-close",
                             title: "Close navigation",
-                            onclick: move |_| mobile_sidebar_open.set(false),
+                            onclick: move |_| {
+                                mobile_sidebar_open.set(false);
+                                sidebar_open_menu.set(None);
+                            },
                             "x"
                         }
                     }
@@ -503,29 +566,28 @@ pub fn app() -> Element {
                 ForkSidebarNavigation {
                     branches: branches.read().clone(),
                     stashes: stashes.read().clone(),
+                    open_menu: sidebar_open_menu.read().clone(),
+                    on_open_menu: move |name: String| sidebar_open_menu.set(Some(name)),
+                    on_close_menu: move |_| sidebar_open_menu.set(None),
                     on_checkout: move |name: String| {
                         mobile_sidebar_open.set(false);
+                        sidebar_open_menu.set(None);
                         if let Some(current) = workspace.read().as_ref().cloned() {
                             run_branch_action(api.read().clone(), current, BranchAction::Checkout(name), workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
                         }
                     },
                     on_branch_command: move |command: SidebarBranchCommand| {
                         mobile_sidebar_open.set(false);
+                        sidebar_open_menu.set(None);
                         let branch_name = match &command {
                             SidebarBranchCommand::Checkout(name)
-                            | SidebarBranchCommand::FastForward(name)
-                            | SidebarBranchCommand::Push(name)
-                            | SidebarBranchCommand::Pull(name)
-                            | SidebarBranchCommand::CreatePullRequest(name)
                             | SidebarBranchCommand::Merge(name)
                             | SidebarBranchCommand::Rebase(name)
                             | SidebarBranchCommand::InteractiveRebase(name)
                             | SidebarBranchCommand::NewBranch(name)
                             | SidebarBranchCommand::NewTag(name)
-                            | SidebarBranchCommand::Tracking(name)
                             | SidebarBranchCommand::Rename(name)
                             | SidebarBranchCommand::Delete(name)
-                            | SidebarBranchCommand::Ai(name)
                             | SidebarBranchCommand::CopyName(name) => name.clone(),
                         };
 
@@ -535,26 +597,74 @@ pub fn app() -> Element {
                         };
 
                         match command {
-                            SidebarBranchCommand::Checkout(name) => run_branch_action(api.read().clone(), current, BranchAction::Checkout(name), workspace, git_status, branches, commits, stashes, conflicts, diff, notice),
-                            SidebarBranchCommand::Merge(name) => run_branch_action(api.read().clone(), current, BranchAction::Merge(name), workspace, git_status, branches, commits, stashes, conflicts, diff, notice),
-                            SidebarBranchCommand::Delete(name) => run_branch_action(api.read().clone(), current, BranchAction::Delete(name), workspace, git_status, branches, commits, stashes, conflicts, diff, notice),
-                            SidebarBranchCommand::Push(name) => {
-                                notice.set(format!("Pushing current branch; selected branch: {name}"));
-                                run_remote_action(api.read().clone(), current, RemoteAction::Push, workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                            SidebarBranchCommand::Checkout(name) => {
+                                branch_dialog_value.set(name.clone());
+                                branch_dialog.set(Some(BranchDialog::Checkout { branch: name }));
                             }
-                            SidebarBranchCommand::Pull(name) | SidebarBranchCommand::FastForward(name) => {
-                                notice.set(format!("Pulling current branch; selected branch: {name}"));
-                                run_remote_action(api.read().clone(), current, RemoteAction::Pull, workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                            SidebarBranchCommand::Merge(name) => {
+                                branch_dialog_value.set(name.clone());
+                                branch_dialog.set(Some(BranchDialog::Merge { branch: name }));
                             }
-                            SidebarBranchCommand::CopyName(name) => notice.set(format!("Branch name copied target: {name}")),
-                            SidebarBranchCommand::CreatePullRequest(name) => notice.set(format!("Create Pull Request for {name} is not connected to a Git provider yet")),
-                            SidebarBranchCommand::Rebase(name) => notice.set(format!("Open Rebase workflow and use {name} as base")),
-                            SidebarBranchCommand::InteractiveRebase(name) => notice.set(format!("Open Interactive Rebase workflow for {name}")),
-                            SidebarBranchCommand::NewBranch(name) => notice.set(format!("Use New Branch with base {name}")),
-                            SidebarBranchCommand::NewTag(name) => notice.set(format!("Use New Tag with target {name}")),
-                            SidebarBranchCommand::Tracking(name) => notice.set(format!("Tracking options for {name}")),
-                            SidebarBranchCommand::Rename(name) => notice.set(format!("Open Repository Navigator to rename {name}")),
-                            SidebarBranchCommand::Ai(name) => notice.set(format!("AI actions for {name} will run after AI tools are enabled")),
+                            SidebarBranchCommand::Delete(name) => {
+                                branch_dialog_value.set(name.clone());
+                                branch_dialog.set(Some(BranchDialog::Delete { branch: name }));
+                            }
+                            SidebarBranchCommand::CopyName(name) => {
+                                copy_to_clipboard(name.clone(), notice);
+                            }
+                            SidebarBranchCommand::Rebase(name) => {
+                                branch_dialog_value.set(name.clone());
+                                branch_dialog_rebase_steps.set(Vec::new());
+                                branch_dialog.set(Some(BranchDialog::Rebase {
+                                    branch: name.clone(),
+                                    interactive: false,
+                                }));
+                                load_branch_rebase_steps(
+                                    api.read().clone(),
+                                    current.repository.id,
+                                    branch_dialog_rebase_steps,
+                                    notice,
+                                );
+                            }
+                            SidebarBranchCommand::InteractiveRebase(name) => {
+                                branch_dialog_value.set(name.clone());
+                                branch_dialog_rebase_steps.set(Vec::new());
+                                branch_dialog.set(Some(BranchDialog::Rebase {
+                                    branch: name.clone(),
+                                    interactive: true,
+                                }));
+                                load_branch_rebase_steps(
+                                    api.read().clone(),
+                                    current.repository.id,
+                                    branch_dialog_rebase_steps,
+                                    notice,
+                                );
+                            }
+                            SidebarBranchCommand::NewBranch(name) => {
+                                let target = branches
+                                    .read()
+                                    .iter()
+                                    .find(|branch| branch.name == name)
+                                    .and_then(|branch| branch.target.clone());
+                                branch_dialog_value.set(format!("{name}-copy"));
+                                branch_dialog_target.set(target.clone().unwrap_or_else(|| name.clone()));
+                                branch_dialog_checkout.set(true);
+                                branch_dialog.set(Some(BranchDialog::NewBranch { branch: name, target }));
+                            }
+                            SidebarBranchCommand::NewTag(name) => {
+                                let target = branches
+                                    .read()
+                                    .iter()
+                                    .find(|branch| branch.name == name)
+                                    .and_then(|branch| branch.target.clone());
+                                branch_dialog_value.set(String::new());
+                                branch_dialog_target.set(target.clone().unwrap_or_else(|| name.clone()));
+                                branch_dialog.set(Some(BranchDialog::NewTag { branch: name, target }));
+                            }
+                            SidebarBranchCommand::Rename(name) => {
+                                branch_dialog_value.set(name.clone());
+                                branch_dialog.set(Some(BranchDialog::Rename { branch: name }));
+                            }
                         }
                     }
                 }
@@ -584,7 +694,6 @@ pub fn app() -> Element {
                             span { class: "mobile-sidebar-toggle-line" }
                             span { class: "mobile-sidebar-toggle-line" }
                         }
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref() { load_workspace(api.read().clone(), current.repository.id.clone(), current.workspace.id.clone(), workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, span { "Quick Launch" } }
                         button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Fetch, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, span { "Fetch" } }
                         button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Pull, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, span { "Pull" } }
                         button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Push, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, span { "Push" } }
@@ -932,63 +1041,23 @@ pub fn app() -> Element {
                         on_sign_off: move |checked: bool| commit_sign_off.set(checked),
                         on_push_after: move |checked: bool| commit_push_after.set(checked),
                         on_commit: move |_| {
-                            let Some(current) = workspace.read().as_ref().cloned() else {
-                                notice.set("Open a repository before committing".to_string());
-                                return;
-                            };
-                            let message = commit_message.read().trim().to_string();
-                            if message.is_empty() {
-                                notice.set("Commit message is required".to_string());
-                                return;
-                            }
-                            let api_client = api.read().clone();
-                            let repository_id = current.repository.id.clone();
-                            let workspace_id = current.workspace.id.clone();
-                            let amend = *commit_amend.read();
-                            let sign_off = *commit_sign_off.read();
-                            let push_after = *commit_push_after.read();
-                            spawn(async move {
-                                let request = api::CommitRequest {
-                                    message,
-                                    author_name: "Zync".to_string(),
-                                    author_email: "zync@local".to_string(),
-                                    amend,
-                                    sign_off,
-                                };
-                                match api_client.commit(&repository_id, &request).await {
-                                    Ok(_) => {
-                                        if push_after {
-                                            match api_client.push(&repository_id).await {
-                                                Ok(output) => {
-                                                    if output.trim().is_empty() {
-                                                        notice.set("Committed and pushed".to_string());
-                                                    } else {
-                                                        notice.set(format!("Committed and pushed: {}", output.trim()));
-                                                    }
-                                                }
-                                                Err(error) => notice.set(format!("Committed, push failed: {error}")),
-                                            }
-                                        } else {
-                                            notice.set("Committed".to_string());
-                                        }
-                                        commit_message.set(String::new());
-                                        load_workspace(
-                                            api_client,
-                                            repository_id,
-                                            workspace_id,
-                                            workspace,
-                                            git_status,
-                                            branches,
-                                            commits,
-                                            stashes,
-                                            conflicts,
-                                            diff,
-                                            notice
-                                        );
-                                    }
-                                    Err(error) => notice.set(error),
-                                }
-                            });
+                            run_commit_action(
+                                api.read().clone(),
+                                workspace.read().as_ref().cloned(),
+                                commit_message.read().trim().to_string(),
+                                *commit_amend.read(),
+                                *commit_sign_off.read(),
+                                *commit_push_after.read(),
+                                commit_message,
+                                workspace,
+                                git_status,
+                                branches,
+                                commits,
+                                stashes,
+                                conflicts,
+                                diff,
+                                notice,
+                            );
                         }
                     }
 
@@ -1048,6 +1117,11 @@ pub fn app() -> Element {
                         files: git_status.read().clone(),
                         changed_count,
                         selected_file: selected_file.read().clone(),
+                        selected_commit_id: selected_commit
+                            .read()
+                            .as_ref()
+                            .map(|commit| commit.id.clone())
+                            .unwrap_or_else(|| commits.read().first().map(|commit| commit.id.clone()).unwrap_or_default()),
                         mode: *commit_section_mode.read(),
                         on_local_changes: move |_| {
                             mobile_sidebar_open.set(false);
@@ -1080,6 +1154,38 @@ pub fn app() -> Element {
                                 diff.set(patch);
                                 notice.set(format!("Showing local diff for {path}"));
                             });
+                        },
+                        on_stage_local_file: move |path: String| {
+                            run_file_action_from_workspace(
+                                api.read().clone(),
+                                workspace.read().as_ref().cloned(),
+                                vec![path],
+                                FileAction::Stage,
+                                workspace,
+                                git_status,
+                                branches,
+                                commits,
+                                stashes,
+                                conflicts,
+                                diff,
+                                notice,
+                            );
+                        },
+                        on_unstage_local_file: move |path: String| {
+                            run_file_action_from_workspace(
+                                api.read().clone(),
+                                workspace.read().as_ref().cloned(),
+                                vec![path],
+                                FileAction::Unstage,
+                                workspace,
+                                git_status,
+                                branches,
+                                commits,
+                                stashes,
+                                conflicts,
+                                diff,
+                                notice,
+                            );
                         },
                         on_select_commit: move |commit_id: String| {
                             let Some(current) = workspace.read().as_ref().cloned() else {
@@ -1124,11 +1230,189 @@ pub fn app() -> Element {
                         }
                     }
                     ForkCommitDetailPanel {
-                        selected: selected_commit.read().clone().or_else(|| commits.read().first().cloned()),
+                        selected: if *commit_section_mode.read() == CommitSectionMode::LocalChanges {
+                            None
+                        } else {
+                            selected_commit.read().clone().or_else(|| commits.read().first().cloned())
+                        },
                         files: git_status.read().clone(),
-                        diff: diff.read().clone(),
-                        selected_file: selected_file.read().clone(),
+                        stashes: stashes.read().clone(),
+                        diff: if *commit_section_mode.read() == CommitSectionMode::LocalChanges && changed_count == 0 {
+                            String::new()
+                        } else {
+                            diff.read().clone()
+                        },
+                        selected_file: if *commit_section_mode.read() == CommitSectionMode::LocalChanges && changed_count == 0 {
+                            String::new()
+                        } else {
+                            selected_file.read().clone()
+                        },
                         commit_mode: *commit_section_mode.read(),
+                        commit_message: commit_message.read().clone(),
+                        stash_message: stash_message.read().clone(),
+                        cherry_pick_input: cherry_pick_input.read().clone(),
+                        rebase_base: rebase_base.read().clone(),
+                        rebase_steps: rebase_steps.read().clone(),
+                        tool_revision: tool_revision.read().clone(),
+                        tool_branch: tool_branch.read().clone(),
+                        tool_tag: tool_tag.read().clone(),
+                        tool_file: tool_file.read().clone(),
+                        tool_remote_name: tool_remote_name.read().clone(),
+                        tool_remote_url: tool_remote_url.read().clone(),
+                        tool_flow_name: tool_flow_name.read().clone(),
+                        on_commit_message: move |message: String| commit_message.set(message),
+                        on_commit: move |_| {
+                            run_commit_action(
+                                api.read().clone(),
+                                workspace.read().as_ref().cloned(),
+                                commit_message.read().trim().to_string(),
+                                *commit_amend.read(),
+                                *commit_sign_off.read(),
+                                *commit_push_after.read(),
+                                commit_message,
+                                workspace,
+                                git_status,
+                                branches,
+                                commits,
+                                stashes,
+                                conflicts,
+                                diff,
+                                notice,
+                            );
+                        },
+                        on_stash_message: move |message: String| stash_message.set(message),
+                        on_cherry_pick_input: move |value: String| cherry_pick_input.set(value),
+                        on_rebase_base: move |value: String| rebase_base.set(value),
+                        on_rebase_action: move |(commit, action): (String, String)| {
+                            let mut next = rebase_steps.read().clone();
+                            if let Some(step) = next.iter_mut().find(|step| step.commit == commit) {
+                                step.action = action;
+                            }
+                            rebase_steps.set(next);
+                        },
+                        on_tool_revision: move |value: String| tool_revision.set(value),
+                        on_tool_branch: move |value: String| tool_branch.set(value),
+                        on_tool_tag: move |value: String| tool_tag.set(value),
+                        on_tool_file: move |value: String| tool_file.set(value),
+                        on_tool_remote_name: move |value: String| tool_remote_name.set(value),
+                        on_tool_remote_url: move |value: String| tool_remote_url.set(value),
+                        on_tool_flow_name: move |value: String| tool_flow_name.set(value),
+                        on_remote_action: move |action: RemoteAction| {
+                            if let Some(current) = workspace.read().as_ref().cloned() {
+                                run_remote_action(api.read().clone(), current, action, workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                            } else {
+                                notice.set("Open a repository before remote action".to_string());
+                            }
+                        },
+                        on_stash_action: move |action: StashAction| {
+                            if let Some(current) = workspace.read().as_ref().cloned() {
+                                run_stash_action(api.read().clone(), current, action, workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                            } else {
+                                notice.set("Open a repository before stash action".to_string());
+                            }
+                        },
+                        on_load_rebase: move |_| {
+                            let Some(current) = workspace.read().as_ref().cloned() else {
+                                notice.set("Open a repository before loading rebase plan".to_string());
+                                return;
+                            };
+                            let api_client = api.read().clone();
+                            spawn(async move {
+                                match api_client.rebase_plan(&current.repository.id, 20).await {
+                                    Ok(plan) => {
+                                        let steps = plan.into_iter().map(|commit| api::RebaseStepRequest {
+                                            commit: commit.id,
+                                            action: "pick".to_string(),
+                                        }).collect::<Vec<_>>();
+                                        rebase_steps.set(steps);
+                                        notice.set("Rebase todo loaded".to_string());
+                                    }
+                                    Err(error) => notice.set(error),
+                                }
+                            });
+                        },
+                        on_cherry_pick: move |_| {
+                            let Some(current) = workspace.read().as_ref().cloned() else {
+                                notice.set("Open a repository before cherry-pick".to_string());
+                                return;
+                            };
+                            let ids = cherry_pick_input.read().split_whitespace().map(ToOwned::to_owned).collect::<Vec<_>>();
+                            if ids.is_empty() {
+                                notice.set("Enter commit ids to cherry-pick".to_string());
+                                return;
+                            }
+                            run_history_action(api.read().clone(), current, HistoryAction::CherryPick(ids), workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                        },
+                        on_cherry_abort: move |_| {
+                            if let Some(current) = workspace.read().as_ref().cloned() {
+                                run_history_action(api.read().clone(), current, HistoryAction::CherryAbort, workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                            } else {
+                                notice.set("Open a repository before cherry-pick abort".to_string());
+                            }
+                        },
+                        on_run_rebase: move |_| {
+                            let Some(current) = workspace.read().as_ref().cloned() else {
+                                notice.set("Open a repository before rebase".to_string());
+                                return;
+                            };
+                            let base = rebase_base.read().trim().to_string();
+                            if base.is_empty() {
+                                notice.set("Base commit is required for rebase".to_string());
+                                return;
+                            }
+                            run_history_action(api.read().clone(), current, HistoryAction::Rebase(base, rebase_steps.read().clone()), workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                        },
+                        on_tool_action: move |action: ToolAction| {
+                            let Some(current) = workspace.read().as_ref().cloned() else {
+                                notice.set("Open a repository before using Git tools".to_string());
+                                return;
+                            };
+                            run_repository_tool(
+                                api.read().clone(),
+                                current,
+                                action,
+                                selected_file.read().clone(),
+                                tool_revision.read().clone(),
+                                tool_branch.read().clone(),
+                                tool_tag.read().clone(),
+                                tool_file.read().clone(),
+                                tool_remote_name.read().clone(),
+                                tool_remote_url.read().clone(),
+                                tool_flow_name.read().clone(),
+                                workspace,
+                                git_status,
+                                branches,
+                                commits,
+                                stashes,
+                                conflicts,
+                                diff,
+                                notice,
+                            );
+                        },
+                        on_delete_repository: move |_| {
+                            let Some(current) = workspace.read().as_ref().cloned() else {
+                                notice.set("Open a repository before removing it".to_string());
+                                return;
+                            };
+                            let api_client = api.read().clone();
+                            let repository_id = current.repository.id.clone();
+                            spawn(async move {
+                                match api_client.delete_repository(&repository_id).await {
+                                    Ok(()) => {
+                                        workspace.set(None);
+                                        git_status.set(Vec::new());
+                                        branches.set(Vec::new());
+                                        commits.set(Vec::new());
+                                        stashes.set(Vec::new());
+                                        conflicts.set(Vec::new());
+                                        diff.set(String::new());
+                                        notice.set("Repository removed from Zync".to_string());
+                                        load_repositories(api_client, repositories, notice);
+                                    }
+                                    Err(error) => notice.set(error),
+                                }
+                            });
+                        },
                         on_stage: move |path: String| {
                             run_file_action_from_workspace(
                                 api.read().clone(),
@@ -1146,6 +1430,12 @@ pub fn app() -> Element {
                             );
                         },
                         on_diff: move |path: String| {
+                            if git_status.read().is_empty() {
+                                selected_file.set(String::new());
+                                diff.set(String::new());
+                                notice.set("No local changes to inspect".to_string());
+                                return;
+                            }
                             let Some(current) = workspace.read().as_ref().cloned() else {
                                 notice.set("Open a repository before viewing diff".to_string());
                                 return;
@@ -1373,6 +1663,63 @@ pub fn app() -> Element {
                     }
                 }
 
+                if let Some(dialog) = branch_dialog.read().clone() {
+                    BranchActionDialog {
+                        dialog,
+                        value: branch_dialog_value.read().clone(),
+                        target: branch_dialog_target.read().clone(),
+                        checkout: *branch_dialog_checkout.read(),
+                        rebase_steps: branch_dialog_rebase_steps.read().clone(),
+                        on_value: move |value: String| branch_dialog_value.set(value),
+                        on_target: move |value: String| branch_dialog_target.set(value),
+                        on_checkout: move |value: bool| branch_dialog_checkout.set(value),
+                        on_rebase_action: move |(commit, action): (String, String)| {
+                            let mut next = branch_dialog_rebase_steps.read().clone();
+                            if let Some(step) = next.iter_mut().find(|step| step.commit == commit) {
+                                step.action = action;
+                            }
+                            branch_dialog_rebase_steps.set(next);
+                        },
+                        on_reload_rebase: move |_| {
+                            let Some(current) = workspace.read().as_ref().cloned() else {
+                                notice.set("Open a repository before loading rebase todo".to_string());
+                                return;
+                            };
+                            branch_dialog_rebase_steps.set(Vec::new());
+                            load_branch_rebase_steps(
+                                api.read().clone(),
+                                current.repository.id,
+                                branch_dialog_rebase_steps,
+                                notice,
+                            );
+                        },
+                        on_cancel: move |_| branch_dialog.set(None),
+                        on_submit: move |_| {
+                            let Some(dialog) = branch_dialog.read().clone() else {
+                                return;
+                            };
+                            let Some(current) = workspace.read().as_ref().cloned() else {
+                                notice.set("Open a repository before running branch action".to_string());
+                                return;
+                            };
+                            let value = branch_dialog_value.read().trim().to_string();
+                            let target = branch_dialog_target.read().trim().to_string();
+                            let checkout = *branch_dialog_checkout.read();
+                            let steps = branch_dialog_rebase_steps.read().clone();
+                            branch_dialog.set(None);
+                            match dialog {
+                                BranchDialog::Checkout { branch } => run_branch_action(api.read().clone(), current, BranchAction::Checkout(branch), workspace, git_status, branches, commits, stashes, conflicts, diff, notice),
+                                BranchDialog::Merge { branch } => run_branch_action(api.read().clone(), current, BranchAction::Merge(branch), workspace, git_status, branches, commits, stashes, conflicts, diff, notice),
+                                BranchDialog::Delete { branch } => run_branch_action(api.read().clone(), current, BranchAction::Delete(branch), workspace, git_status, branches, commits, stashes, conflicts, diff, notice),
+                                BranchDialog::Rename { branch } => run_branch_action(api.read().clone(), current, BranchAction::Rename(branch, value), workspace, git_status, branches, commits, stashes, conflicts, diff, notice),
+                                BranchDialog::NewBranch { branch: _, target: _ } => run_branch_action(api.read().clone(), current, BranchAction::CreateAt(value, target, checkout), workspace, git_status, branches, commits, stashes, conflicts, diff, notice),
+                                BranchDialog::NewTag { branch: _, target: _ } => run_tag_action(api.read().clone(), current, TagAction::Create(value, target), workspace, git_status, branches, commits, stashes, conflicts, diff, notice),
+                                BranchDialog::Rebase { branch, .. } => run_history_action(api.read().clone(), current, HistoryAction::Rebase(branch, steps), workspace, git_status, branches, commits, stashes, conflicts, diff, notice),
+                            }
+                        }
+                    }
+                }
+
                 footer { class: "h-7 shrink-0 border-t border-zinc-800 px-3 flex items-center text-xs text-zinc-400 bg-zinc-950", "{notice}" }
             }
         }
@@ -1394,10 +1741,15 @@ enum FileTreeAction {
 
 enum BranchAction {
     Create(String),
+    CreateAt(String, String, bool),
     Checkout(String),
     Merge(String),
     Delete(String),
     Rename(String, String),
+}
+
+enum TagAction {
+    Create(String, String),
 }
 
 enum RemoteAction {
@@ -1632,6 +1984,78 @@ fn run_file_tree_action(
     });
 }
 
+fn run_commit_action(
+    api: api::ZyncApi,
+    current: Option<api::WorkspaceResponse>,
+    message: String,
+    amend: bool,
+    sign_off: bool,
+    push_after: bool,
+    mut commit_message: Signal<String>,
+    workspace: Signal<Option<api::WorkspaceResponse>>,
+    git_status: Signal<Vec<api::FileStatus>>,
+    branches: Signal<Vec<api::BranchSummary>>,
+    commits: Signal<Vec<api::CommitSummary>>,
+    stashes: Signal<Vec<api::StashSummary>>,
+    conflicts: Signal<Vec<api::ConflictSummary>>,
+    diff: Signal<String>,
+    mut notice: Signal<String>,
+) {
+    let Some(current) = current else {
+        notice.set("Open a repository before committing".to_string());
+        return;
+    };
+    let message = message.trim().to_string();
+    if message.is_empty() {
+        notice.set("Commit message is required".to_string());
+        return;
+    }
+    let repository_id = current.repository.id.clone();
+    let workspace_id = current.workspace.id.clone();
+    spawn(async move {
+        let request = api::CommitRequest {
+            message,
+            author_name: "Zync".to_string(),
+            author_email: "zync@local".to_string(),
+            amend,
+            sign_off,
+        };
+        match api.commit(&repository_id, &request).await {
+            Ok(_) => {
+                if push_after {
+                    match api.push(&repository_id).await {
+                        Ok(output) => {
+                            if output.trim().is_empty() {
+                                notice.set("Committed and pushed".to_string());
+                            } else {
+                                notice.set(format!("Committed and pushed: {}", output.trim()));
+                            }
+                        }
+                        Err(error) => notice.set(format!("Committed, push failed: {error}")),
+                    }
+                } else {
+                    notice.set("Committed".to_string());
+                }
+                commit_message.set(String::new());
+                load_workspace(
+                    api,
+                    repository_id,
+                    workspace_id,
+                    workspace,
+                    git_status,
+                    branches,
+                    commits,
+                    stashes,
+                    conflicts,
+                    diff,
+                    notice,
+                );
+            }
+            Err(error) => notice.set(error),
+        }
+    });
+}
+
 fn run_branch_action(
     api: api::ZyncApi,
     current: api::WorkspaceResponse,
@@ -1650,11 +2074,25 @@ fn run_branch_action(
     spawn(async move {
         let result = match action {
             BranchAction::Create(name) => api.create_branch(&repository_id, &name, true).await,
+            BranchAction::CreateAt(name, revision, checkout) => {
+                if name.trim().is_empty() {
+                    Err("Branch name is required".to_string())
+                } else if revision.trim().is_empty() {
+                    api.create_branch(&repository_id, &name, checkout).await
+                } else {
+                    api.create_branch_at(&repository_id, &name, &revision, checkout)
+                        .await
+                }
+            }
             BranchAction::Checkout(name) => api.checkout_branch(&repository_id, &name).await,
             BranchAction::Merge(name) => api.merge_branch(&repository_id, &name).await,
             BranchAction::Delete(name) => api.delete_branch(&repository_id, &name).await,
             BranchAction::Rename(name, new_name) => {
-                api.rename_branch(&repository_id, &name, &new_name).await
+                if new_name.trim().is_empty() {
+                    Err("New branch name is required".to_string())
+                } else {
+                    api.rename_branch(&repository_id, &name, &new_name).await
+                }
             }
         };
         match result {
@@ -1677,6 +2115,102 @@ fn run_branch_action(
             Err(error) => notice.set(error),
         }
     });
+}
+
+fn run_tag_action(
+    api: api::ZyncApi,
+    current: api::WorkspaceResponse,
+    action: TagAction,
+    workspace: Signal<Option<api::WorkspaceResponse>>,
+    git_status: Signal<Vec<api::FileStatus>>,
+    branches: Signal<Vec<api::BranchSummary>>,
+    commits: Signal<Vec<api::CommitSummary>>,
+    stashes: Signal<Vec<api::StashSummary>>,
+    conflicts: Signal<Vec<api::ConflictSummary>>,
+    diff: Signal<String>,
+    mut notice: Signal<String>,
+) {
+    let repository_id = current.repository.id;
+    let workspace_id = current.workspace.id;
+    spawn(async move {
+        let result = match action {
+            TagAction::Create(name, target) => {
+                if name.trim().is_empty() {
+                    Err("Tag name is required".to_string())
+                } else {
+                    let target = target.trim();
+                    api.create_tag(
+                        &repository_id,
+                        &name,
+                        if target.is_empty() { None } else { Some(target) },
+                    )
+                    .await
+                }
+            }
+        };
+        match result {
+            Ok(()) => {
+                notice.set("Tag action complete".to_string());
+                load_workspace(
+                    api,
+                    repository_id,
+                    workspace_id,
+                    workspace,
+                    git_status,
+                    branches,
+                    commits,
+                    stashes,
+                    conflicts,
+                    diff,
+                    notice,
+                );
+            }
+            Err(error) => notice.set(error),
+        }
+    });
+}
+
+fn load_branch_rebase_steps(
+    api: api::ZyncApi,
+    repository_id: String,
+    mut steps: Signal<Vec<api::RebaseStepRequest>>,
+    mut notice: Signal<String>,
+) {
+    spawn(async move {
+        match api.rebase_plan(&repository_id, 12).await {
+            Ok(plan) => {
+                steps.set(
+                    plan.into_iter()
+                        .map(|commit| api::RebaseStepRequest {
+                            commit: commit.id,
+                            action: "pick".to_string(),
+                        })
+                        .collect(),
+                );
+                notice.set("Rebase todo loaded".to_string());
+            }
+            Err(error) => notice.set(error),
+        }
+    });
+}
+
+fn copy_to_clipboard(value: String, mut notice: Signal<String>) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        spawn(async move {
+            let Some(window) = web_sys::window() else {
+                notice.set(format!("Branch name: {value}"));
+                return;
+            };
+            let clipboard = window.navigator().clipboard();
+            match wasm_bindgen_futures::JsFuture::from(clipboard.write_text(&value)).await {
+                Ok(_) => notice.set(format!("Branch name copied: {value}")),
+                Err(_) => notice.set(format!("Branch name: {value}")),
+            }
+        });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    notice.set(format!("Branch name copied: {value}"));
 }
 
 fn run_remote_action(
@@ -2223,10 +2757,12 @@ fn start_live_events(
 fn ForkSidebarNavigation(
     branches: Vec<api::BranchSummary>,
     stashes: Vec<api::StashSummary>,
+    open_menu: Option<String>,
+    on_open_menu: EventHandler<String>,
+    on_close_menu: EventHandler<()>,
     on_checkout: EventHandler<String>,
     on_branch_command: EventHandler<SidebarBranchCommand>,
 ) -> Element {
-    let mut open_menu = use_signal(|| None::<String>);
     let has_stashes = !stashes.is_empty();
     let locals = branches
         .iter()
@@ -2247,18 +2783,18 @@ fn ForkSidebarNavigation(
             ForkSidebarSection {
                 title: "Branches".to_string(),
                 rows: locals,
-                open_menu: open_menu.read().clone(),
-                on_open_menu: move |name: String| open_menu.set(Some(name)),
-                on_close_menu: move |_| open_menu.set(None),
+                open_menu: open_menu.clone(),
+                on_open_menu,
+                on_close_menu,
                 on_checkout,
                 on_branch_command
             }
             ForkRemoteSection {
                 title: "Remotes".to_string(),
                 rows: remotes,
-                open_menu: open_menu.read().clone(),
-                on_open_menu: move |name: String| open_menu.set(Some(name)),
-                on_close_menu: move |_| open_menu.set(None),
+                open_menu,
+                on_open_menu,
+                on_close_menu,
                 on_checkout,
                 on_branch_command
             }
@@ -2498,14 +3034,42 @@ fn ForkBranchContextMenu(
     on_close: EventHandler<()>,
     on_command: EventHandler<SidebarBranchCommand>,
 ) -> Element {
+    let mut drag_start_y = use_signal(|| None::<f64>);
+    let mut drag_offset = use_signal(|| 0.0_f64);
+    let sheet_style = format!("--sheet-drag-y: {}px;", (*drag_offset.read()).min(180.0));
+
     rsx! {
-        div { class: "fork-context-menu",
-            ContextMenuItem { label: "Checkout...".to_string(), disabled: is_head, command: SidebarBranchCommand::Checkout(branch.clone()), on_command, on_close, active: true }
-            div { class: "fork-context-separator" }
-            ContextMenuItem { label: format!("Fast-Forward to '{branch}'"), command: SidebarBranchCommand::FastForward(branch.clone()), on_command, on_close }
-            ContextMenuItem { label: "Pull from".to_string(), command: SidebarBranchCommand::Pull(branch.clone()), on_command, on_close, chevron: true }
-            ContextMenuItem { label: "Push to".to_string(), command: SidebarBranchCommand::Push(branch.clone()), on_command, on_close, chevron: true }
-            ContextMenuItem { label: "Create Pull Request".to_string(), command: SidebarBranchCommand::CreatePullRequest(branch.clone()), on_command, on_close, chevron: true }
+        button {
+            class: "fork-context-scrim",
+            title: "Close menu",
+            onclick: move |_| on_close.call(())
+        }
+        div {
+            class: "fork-context-menu",
+            style: "{sheet_style}",
+            onpointerdown: move |event| {
+                drag_start_y.set(Some(event.client_coordinates().y));
+                drag_offset.set(0.0);
+            },
+            onpointermove: move |event| {
+                let Some(start_y) = *drag_start_y.read() else {
+                    return;
+                };
+                let delta = event.client_coordinates().y - start_y;
+                drag_offset.set(delta.max(0.0));
+            },
+            onpointerup: move |_| {
+                if *drag_offset.read() > 86.0 {
+                    on_close.call(());
+                }
+                drag_start_y.set(None);
+                drag_offset.set(0.0);
+            },
+            onpointercancel: move |_| {
+                drag_start_y.set(None);
+                drag_offset.set(0.0);
+            },
+            ContextMenuItem { label: "Checkout...".to_string(), disabled: is_head, command: SidebarBranchCommand::Checkout(branch.clone()), on_command, on_close }
             div { class: "fork-context-separator" }
             ContextMenuItem { label: "Merge into 'main'...".to_string(), disabled: is_head, command: SidebarBranchCommand::Merge(branch.clone()), on_command, on_close }
             ContextMenuItem { label: format!("Rebase on '{branch}'..."), disabled: is_head, command: SidebarBranchCommand::Rebase(branch.clone()), on_command, on_close }
@@ -2514,13 +3078,196 @@ fn ForkBranchContextMenu(
             ContextMenuItem { label: "New Branch...".to_string(), command: SidebarBranchCommand::NewBranch(branch.clone()), on_command, on_close, shortcut: "⇧⌘B".to_string() }
             ContextMenuItem { label: "New Tag...".to_string(), command: SidebarBranchCommand::NewTag(branch.clone()), on_command, on_close, shortcut: "⇧⌘T".to_string() }
             div { class: "fork-context-separator" }
-            ContextMenuItem { label: "Tracking".to_string(), command: SidebarBranchCommand::Tracking(branch.clone()), on_command, on_close, chevron: true }
             ContextMenuItem { label: "Rename...".to_string(), disabled: is_head, command: SidebarBranchCommand::Rename(branch.clone()), on_command, on_close }
             ContextMenuItem { label: "Delete...".to_string(), disabled: is_head, command: SidebarBranchCommand::Delete(branch.clone()), on_command, on_close }
             div { class: "fork-context-separator" }
-            ContextMenuItem { label: "AI".to_string(), command: SidebarBranchCommand::Ai(branch.clone()), on_command, on_close, chevron: true }
-            div { class: "fork-context-separator" }
             ContextMenuItem { label: "Copy Branch Name".to_string(), command: SidebarBranchCommand::CopyName(branch), on_command, on_close }
+        }
+    }
+}
+
+#[component]
+fn BranchActionDialog(
+    dialog: BranchDialog,
+    value: String,
+    target: String,
+    checkout: bool,
+    rebase_steps: Vec<api::RebaseStepRequest>,
+    on_value: EventHandler<String>,
+    on_target: EventHandler<String>,
+    on_checkout: EventHandler<bool>,
+    on_rebase_action: EventHandler<(String, String)>,
+    on_reload_rebase: EventHandler<()>,
+    on_cancel: EventHandler<()>,
+    on_submit: EventHandler<()>,
+) -> Element {
+    let branch = dialog.branch().to_string();
+    let title = dialog.title();
+    let submit_label = match &dialog {
+        BranchDialog::Checkout { .. } => "Checkout",
+        BranchDialog::Merge { .. } => "Merge",
+        BranchDialog::Rebase {
+            interactive: true, ..
+        } => "Run Interactive Rebase",
+        BranchDialog::Rebase { .. } => "Run Rebase",
+        BranchDialog::NewBranch { .. } => "Create Branch",
+        BranchDialog::NewTag { .. } => "Create Tag",
+        BranchDialog::Rename { .. } => "Rename",
+        BranchDialog::Delete { .. } => "Delete",
+    };
+    let submit_class = if dialog.is_dangerous() {
+        "branch-dialog-primary branch-dialog-danger"
+    } else {
+        "branch-dialog-primary"
+    };
+
+    rsx! {
+        div { class: "branch-dialog-layer",
+            button {
+                class: "branch-dialog-scrim",
+                title: "Close dialog",
+                onclick: move |_| on_cancel.call(())
+            }
+            section { class: "branch-dialog",
+                header { class: "branch-dialog-header",
+                    div { class: "min-w-0",
+                        h3 { "{title}" }
+                        p { class: "truncate", "{branch}" }
+                    }
+                    button {
+                        class: "branch-dialog-close",
+                        title: "Close",
+                        onclick: move |_| on_cancel.call(()),
+                        "x"
+                    }
+                }
+
+                div { class: "branch-dialog-body",
+                    match dialog.clone() {
+                        BranchDialog::Checkout { .. } => rsx! {
+                            p { "Switch working copy to this branch." }
+                            code { class: "branch-dialog-code", "{branch}" }
+                        },
+                        BranchDialog::Merge { .. } => rsx! {
+                            p { "Merge this branch into the current branch." }
+                            code { class: "branch-dialog-code", "{branch}" }
+                        },
+                        BranchDialog::Delete { .. } => rsx! {
+                            p { "Delete this local branch. This cannot be undone from Zync." }
+                            code { class: "branch-dialog-code", "{branch}" }
+                        },
+                        BranchDialog::Rename { .. } => rsx! {
+                            label { class: "branch-dialog-field",
+                                span { "New branch name" }
+                                input {
+                                    value: "{value}",
+                                    oninput: move |event| on_value.call(event.value())
+                                }
+                            }
+                        },
+                        BranchDialog::NewBranch { target: base_target, .. } => rsx! {
+                            label { class: "branch-dialog-field",
+                                span { "Branch name" }
+                                input {
+                                    placeholder: "feature/name",
+                                    value: "{value}",
+                                    oninput: move |event| on_value.call(event.value())
+                                }
+                            }
+                            label { class: "branch-dialog-field",
+                                span { "Start point" }
+                                input {
+                                    placeholder: base_target.unwrap_or_else(|| branch.clone()),
+                                    value: "{target}",
+                                    oninput: move |event| on_target.call(event.value())
+                                }
+                            }
+                            label { class: "branch-dialog-check",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: checkout,
+                                    onchange: move |event| on_checkout.call(event.checked())
+                                }
+                                span { "Checkout after create" }
+                            }
+                        },
+                        BranchDialog::NewTag { target: tag_target, .. } => rsx! {
+                            label { class: "branch-dialog-field",
+                                span { "Tag name" }
+                                input {
+                                    placeholder: "v1.0.0",
+                                    value: "{value}",
+                                    oninput: move |event| on_value.call(event.value())
+                                }
+                            }
+                            label { class: "branch-dialog-field",
+                                span { "Target" }
+                                input {
+                                    placeholder: tag_target.unwrap_or_else(|| branch.clone()),
+                                    value: "{target}",
+                                    oninput: move |event| on_target.call(event.value())
+                                }
+                            }
+                        },
+                        BranchDialog::Rebase { interactive, .. } => rsx! {
+                            p {
+                                if interactive {
+                                    "Edit the todo then rebase the current branch on this branch."
+                                } else {
+                                    "Rebase the current branch on this branch using the loaded todo."
+                                }
+                            }
+                            div { class: "branch-dialog-rebase-head",
+                                code { "{branch}" }
+                                button {
+                                    class: "branch-dialog-secondary",
+                                    onclick: move |_| on_reload_rebase.call(()),
+                                    "Reload todo"
+                                }
+                            }
+                            div { class: "branch-dialog-rebase-list",
+                                if rebase_steps.is_empty() {
+                                    p { class: "branch-dialog-muted", "No todo loaded yet." }
+                                }
+                                for step in rebase_steps.clone() {
+                                    div { class: "branch-dialog-rebase-row",
+                                        code { "{short_id(&step.commit)}" }
+                                        if interactive {
+                                            div { class: "branch-dialog-action-pills",
+                                                for action in ["pick", "squash", "fixup", "drop", "edit"] {
+                                                    button {
+                                                        class: if step.action == action { "branch-dialog-pill branch-dialog-pill-active" } else { "branch-dialog-pill" },
+                                                        onclick: {
+                                                            let commit = step.commit.clone();
+                                                            move |_| on_rebase_action.call((commit.clone(), action.to_string()))
+                                                        },
+                                                        "{action}"
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            span { class: "branch-dialog-muted", "{step.action}" }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                    }
+                }
+
+                footer { class: "branch-dialog-footer",
+                    button {
+                        class: "branch-dialog-secondary",
+                        onclick: move |_| on_cancel.call(()),
+                        "Cancel"
+                    }
+                    button {
+                        class: "{submit_class}",
+                        onclick: move |_| on_submit.call(()),
+                        "{submit_label}"
+                    }
+                }
+            }
         }
     }
 }
@@ -3407,10 +4154,13 @@ fn CommitGraph(
     files: Vec<api::FileStatus>,
     changed_count: usize,
     selected_file: String,
+    selected_commit_id: String,
     mode: CommitSectionMode,
     on_local_changes: EventHandler<()>,
     on_all_commits: EventHandler<()>,
     on_select_local_file: EventHandler<String>,
+    on_stage_local_file: EventHandler<String>,
+    on_unstage_local_file: EventHandler<String>,
     on_select_commit: EventHandler<String>,
     on_load_more: EventHandler<()>,
 ) -> Element {
@@ -3442,22 +4192,48 @@ fn CommitGraph(
                         div { class: "local-changes-header",
                             span { "Status" }
                             span { "File" }
+                            span { "Action" }
                         }
                         for file in files {
-                            button {
+                            div {
                                 class: if file.path == selected_file { "local-change-row local-change-row-active" } else { "local-change-row" },
-                                onclick: {
-                                    let path = file.path.clone();
-                                    move |_| on_select_local_file.call(path.clone())
-                                },
-                                span { class: status_class(&file), "{status_label(&file)}" }
-                                code { class: "min-w-0 truncate", "{file.path}" }
+                                button {
+                                    class: "local-change-main",
+                                    onclick: {
+                                        let path = file.path.clone();
+                                        move |_| on_select_local_file.call(path.clone())
+                                    },
+                                    span { class: status_class(&file), "{status_label(&file)}" }
+                                    code { class: "min-w-0 truncate", "{file.path}" }
+                                }
+                                div { class: "local-change-actions",
+                                    if file.unstaged || file.untracked || file.conflicted {
+                                        button {
+                                            class: "local-change-action",
+                                            onclick: {
+                                                let path = file.path.clone();
+                                                move |_| on_stage_local_file.call(path.clone())
+                                            },
+                                            "Stage"
+                                        }
+                                    }
+                                    if file.staged {
+                                        button {
+                                            class: "local-change-action",
+                                            onclick: {
+                                                let path = file.path.clone();
+                                                move |_| on_unstage_local_file.call(path.clone())
+                                            },
+                                            "Unstage"
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             } else {
-                div { class: "grid grid-cols-[128px_76px_minmax(0,1fr)_150px] border-b border-zinc-800 bg-zinc-900/60 px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-zinc-500",
+                div { class: "commit-list-header",
                     span { "Graph" }
                     span { "Commit" }
                     span { "Message" }
@@ -3466,15 +4242,15 @@ fn CommitGraph(
                 ol { class: "min-h-0 flex-1 overflow-y-auto",
                     for row in rows {
                         li {
-                            class: "grid grid-cols-[128px_76px_minmax(0,1fr)_150px] gap-2 border-b border-zinc-900 px-2 py-1.5 text-xs hover:bg-cyan-500/10",
+                            class: if row.commit.id == selected_commit_id { "commit-list-row commit-list-row-active" } else { "commit-list-row" },
                             onclick: {
                                 let commit_id = row.commit.id.clone();
                                 move |_| on_select_commit.call(commit_id.clone())
                             },
                             GraphLaneStrip { row: row.clone() }
-                            code { class: "self-center text-cyan-300", "{short_id(&row.commit.id)}" }
-                            span { class: "min-w-0 truncate self-center text-zinc-200", "{row.commit.summary}" }
-                            span { class: "min-w-0 truncate self-center text-zinc-500", "{row.commit.author}" }
+                            code { class: "commit-list-sha", "{short_id(&row.commit.id)}" }
+                            span { class: "commit-list-message", "{row.commit.summary}" }
+                            span { class: "commit-list-author", "{row.commit.author}" }
                         }
                     }
                 }
@@ -3500,17 +4276,17 @@ fn commit_section_tab_class(active: CommitSectionMode, tab: CommitSectionMode) -
 #[component]
 fn GraphLaneStrip(row: GraphRow) -> Element {
     rsx! {
-        div { class: "relative grid h-full min-h-10 grid-flow-col auto-cols-[16px] items-stretch justify-start",
+        div { class: "graph-lane-strip",
             for lane in 0..row.lane_count {
-                div { class: "relative h-full w-4",
+                div { class: "graph-lane",
                     if row.active_lanes.contains(&lane) {
-                        div { class: format!("absolute left-1/2 top-0 h-full w-px -translate-x-1/2 {}", lane_color(lane, false)) }
+                        div { class: "graph-lane-line", style: lane_line_style(lane) }
                     }
                     if row.merge_lanes.contains(&lane) {
-                        div { class: "absolute left-1/2 top-1/2 h-px w-4 bg-zinc-600" }
+                        div { class: "graph-lane-merge", style: lane_line_style(lane) }
                     }
                     if lane == row.lane {
-                        span { class: format!("absolute left-1/2 top-1/2 z-10 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full ring-4 ring-zinc-950 {}", lane_color(lane, true)) }
+                        span { class: "graph-lane-dot", style: lane_dot_style(lane) }
                     }
                 }
             }
@@ -3522,9 +4298,43 @@ fn GraphLaneStrip(row: GraphRow) -> Element {
 fn ForkCommitDetailPanel(
     selected: Option<api::CommitSummary>,
     files: Vec<api::FileStatus>,
+    stashes: Vec<api::StashSummary>,
     diff: String,
     selected_file: String,
     commit_mode: CommitSectionMode,
+    commit_message: String,
+    stash_message: String,
+    cherry_pick_input: String,
+    rebase_base: String,
+    rebase_steps: Vec<api::RebaseStepRequest>,
+    tool_revision: String,
+    tool_branch: String,
+    tool_tag: String,
+    tool_file: String,
+    tool_remote_name: String,
+    tool_remote_url: String,
+    tool_flow_name: String,
+    on_commit_message: EventHandler<String>,
+    on_commit: EventHandler<()>,
+    on_stash_message: EventHandler<String>,
+    on_cherry_pick_input: EventHandler<String>,
+    on_rebase_base: EventHandler<String>,
+    on_rebase_action: EventHandler<(String, String)>,
+    on_tool_revision: EventHandler<String>,
+    on_tool_branch: EventHandler<String>,
+    on_tool_tag: EventHandler<String>,
+    on_tool_file: EventHandler<String>,
+    on_tool_remote_name: EventHandler<String>,
+    on_tool_remote_url: EventHandler<String>,
+    on_tool_flow_name: EventHandler<String>,
+    on_remote_action: EventHandler<RemoteAction>,
+    on_stash_action: EventHandler<StashAction>,
+    on_load_rebase: EventHandler<()>,
+    on_cherry_pick: EventHandler<()>,
+    on_cherry_abort: EventHandler<()>,
+    on_run_rebase: EventHandler<()>,
+    on_tool_action: EventHandler<ToolAction>,
+    on_delete_repository: EventHandler<()>,
     on_stage: EventHandler<String>,
     on_diff: EventHandler<String>,
 ) -> Element {
@@ -3563,6 +4373,24 @@ fn ForkCommitDetailPanel(
                     class: detail_tab_class(selected_tab, ForkDetailTab::FileTree),
                     onclick: move |_| active_tab.set(ForkDetailTab::FileTree),
                     "File Tree"
+                }
+                button {
+                    class: detail_tab_class(selected_tab, ForkDetailTab::GitTools),
+                    onclick: move |_| active_tab.set(ForkDetailTab::GitTools),
+                    "Git Tools"
+                }
+                div { class: "fork-detail-commit-box",
+                    input {
+                        class: "fork-detail-commit-input",
+                        value: "{commit_message}",
+                        placeholder: "Commit message",
+                        oninput: move |event| on_commit_message.call(event.value())
+                    }
+                    button {
+                        class: "fork-detail-commit-button",
+                        onclick: move |_| on_commit.call(()),
+                        "Commit"
+                    }
                 }
             }
             if selected_tab == ForkDetailTab::Commit {
@@ -3616,6 +4444,41 @@ fn ForkCommitDetailPanel(
                     on_stage,
                     on_diff
                 }
+            } else if selected_tab == ForkDetailTab::GitTools {
+                BasicGitToolsPanel {
+                    stashes,
+                    selected_file,
+                    stash_message,
+                    cherry_pick_input,
+                    rebase_base,
+                    rebase_steps,
+                    tool_revision,
+                    tool_branch,
+                    tool_tag,
+                    tool_file,
+                    tool_remote_name,
+                    tool_remote_url,
+                    tool_flow_name,
+                    on_stash_message,
+                    on_cherry_pick_input,
+                    on_rebase_base,
+                    on_rebase_action,
+                    on_tool_revision,
+                    on_tool_branch,
+                    on_tool_tag,
+                    on_tool_file,
+                    on_tool_remote_name,
+                    on_tool_remote_url,
+                    on_tool_flow_name,
+                    on_remote_action,
+                    on_stash_action,
+                    on_load_rebase,
+                    on_cherry_pick,
+                    on_cherry_abort,
+                    on_run_rebase,
+                    on_tool_action,
+                    on_delete_repository
+                }
             } else {
                 div { class: "fork-detail-body fork-file-tree-tab",
                     div { class: "fork-file-tree-header",
@@ -3656,6 +4519,7 @@ enum ForkDetailTab {
     Commit,
     Changes,
     FileTree,
+    GitTools,
 }
 
 fn detail_tab_class(active: ForkDetailTab, tab: ForkDetailTab) -> &'static str {
@@ -3663,6 +4527,167 @@ fn detail_tab_class(active: ForkDetailTab, tab: ForkDetailTab) -> &'static str {
         "fork-detail-tab fork-detail-tab-active"
     } else {
         "fork-detail-tab"
+    }
+}
+
+#[component]
+fn BasicGitToolsPanel(
+    stashes: Vec<api::StashSummary>,
+    selected_file: String,
+    stash_message: String,
+    cherry_pick_input: String,
+    rebase_base: String,
+    rebase_steps: Vec<api::RebaseStepRequest>,
+    tool_revision: String,
+    tool_branch: String,
+    tool_tag: String,
+    tool_file: String,
+    tool_remote_name: String,
+    tool_remote_url: String,
+    tool_flow_name: String,
+    on_stash_message: EventHandler<String>,
+    on_cherry_pick_input: EventHandler<String>,
+    on_rebase_base: EventHandler<String>,
+    on_rebase_action: EventHandler<(String, String)>,
+    on_tool_revision: EventHandler<String>,
+    on_tool_branch: EventHandler<String>,
+    on_tool_tag: EventHandler<String>,
+    on_tool_file: EventHandler<String>,
+    on_tool_remote_name: EventHandler<String>,
+    on_tool_remote_url: EventHandler<String>,
+    on_tool_flow_name: EventHandler<String>,
+    on_remote_action: EventHandler<RemoteAction>,
+    on_stash_action: EventHandler<StashAction>,
+    on_load_rebase: EventHandler<()>,
+    on_cherry_pick: EventHandler<()>,
+    on_cherry_abort: EventHandler<()>,
+    on_run_rebase: EventHandler<()>,
+    on_tool_action: EventHandler<ToolAction>,
+    on_delete_repository: EventHandler<()>,
+) -> Element {
+    rsx! {
+        div { class: "fork-detail-body basic-git-tools",
+            section { class: "basic-tool-section basic-tool-section-compact",
+                h3 { "Remote" }
+                div { class: "basic-tool-actions",
+                    button { class: "basic-tool-button", onclick: move |_| on_remote_action.call(RemoteAction::Fetch), "Fetch" }
+                    button { class: "basic-tool-button", onclick: move |_| on_remote_action.call(RemoteAction::Pull), "Pull" }
+                    button { class: "basic-tool-button", onclick: move |_| on_remote_action.call(RemoteAction::Push), "Push" }
+                }
+            }
+
+            section { class: "basic-tool-section",
+                h3 { "Revision / Tags" }
+                div { class: "basic-tool-grid basic-tool-grid-3",
+                    input { class: "basic-tool-input", value: "{tool_revision}", placeholder: "revision / commit id", oninput: move |event| on_tool_revision.call(event.value()) }
+                    input { class: "basic-tool-input", value: "{tool_branch}", placeholder: "new branch name", oninput: move |event| on_tool_branch.call(event.value()) }
+                    input { class: "basic-tool-input", value: "{tool_tag}", placeholder: "tag name", oninput: move |event| on_tool_tag.call(event.value()) }
+                }
+                div { class: "basic-tool-actions",
+                    ToolButton { label: "Checkout Revision".to_string(), action: ToolAction::CheckoutRevision, on_action: on_tool_action }
+                    ToolButton { label: "Branch from Revision".to_string(), action: ToolAction::BranchFromRevision, on_action: on_tool_action }
+                    ToolButton { label: "Revert".to_string(), action: ToolAction::RevertCommit, on_action: on_tool_action }
+                    ToolButton { label: "Create Tag".to_string(), action: ToolAction::CreateTag, on_action: on_tool_action }
+                    ToolButton { label: "Delete Tag".to_string(), action: ToolAction::DeleteTag, on_action: on_tool_action }
+                    ToolButton { label: "List Tags".to_string(), action: ToolAction::Tags, on_action: on_tool_action }
+                }
+            }
+
+            section { class: "basic-tool-section",
+                h3 { "Cherry-pick / Rebase" }
+                div { class: "basic-tool-grid basic-tool-grid-2",
+                    input { class: "basic-tool-input", value: "{cherry_pick_input}", placeholder: "commit ids to cherry-pick", oninput: move |event| on_cherry_pick_input.call(event.value()) }
+                    input { class: "basic-tool-input", value: "{rebase_base}", placeholder: "rebase base", oninput: move |event| on_rebase_base.call(event.value()) }
+                }
+                div { class: "basic-tool-actions",
+                    button { class: "basic-tool-button", onclick: move |_| on_cherry_pick.call(()), "Cherry-pick" }
+                    button { class: "basic-tool-button", onclick: move |_| on_cherry_abort.call(()), "Abort Cherry-pick" }
+                    button { class: "basic-tool-button", onclick: move |_| on_load_rebase.call(()), "Load Rebase Todo" }
+                    button { class: "basic-tool-button", onclick: move |_| on_run_rebase.call(()), "Run Rebase" }
+                    ToolButton { label: "Rebase Continue".to_string(), action: ToolAction::RebaseContinue, on_action: on_tool_action }
+                    ToolButton { label: "Rebase Abort".to_string(), action: ToolAction::RebaseAbort, on_action: on_tool_action }
+                    ToolButton { label: "Rebase Skip".to_string(), action: ToolAction::RebaseSkip, on_action: on_tool_action }
+                }
+                if !rebase_steps.is_empty() {
+                    div { class: "basic-rebase-list",
+                        for step in rebase_steps.clone() {
+                            div { class: "basic-rebase-row",
+                                code { "{short_id(&step.commit)}" }
+                                div { class: "branch-dialog-action-pills",
+                                    for action in ["pick", "squash", "fixup", "drop", "edit"] {
+                                        button {
+                                            class: if step.action == action { "branch-dialog-pill branch-dialog-pill-active" } else { "branch-dialog-pill" },
+                                            onclick: {
+                                                let commit = step.commit.clone();
+                                                move |_| on_rebase_action.call((commit.clone(), action.to_string()))
+                                            },
+                                            "{action}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            section { class: "basic-tool-section",
+                h3 { "Stashes" }
+                div { class: "basic-tool-grid basic-tool-grid-action",
+                    input { class: "basic-tool-input", value: "{stash_message}", placeholder: "stash message", oninput: move |event| on_stash_message.call(event.value()) }
+                    button {
+                        class: "basic-tool-button",
+                        onclick: {
+                            let message = stash_message.clone();
+                            move |_| on_stash_action.call(StashAction::Create(message.clone()))
+                        },
+                        "Create Stash"
+                    }
+                }
+                div { class: "basic-stash-list",
+                    if stashes.is_empty() {
+                        p { class: "fork-muted", "No stashes" }
+                    }
+                    for stash in stashes {
+                        div { class: "basic-stash-row",
+                            div { class: "min-w-0",
+                                strong { "#{stash.index} {stash.name}" }
+                                p { class: "truncate", "{stash.message}" }
+                            }
+                            div { class: "basic-tool-actions basic-tool-actions-tight",
+                                button { class: "basic-tool-button", onclick: move |_| on_stash_action.call(StashAction::Apply(stash.index)), "Apply" }
+                                button { class: "basic-tool-button", onclick: move |_| on_stash_action.call(StashAction::Pop(stash.index)), "Pop" }
+                                button { class: "basic-tool-button basic-tool-danger", onclick: move |_| on_stash_action.call(StashAction::Drop(stash.index)), "Drop" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            section { class: "basic-tool-section",
+                h3 { "Files / Remotes / Submodules" }
+                div { class: "basic-tool-grid basic-tool-grid-3",
+                    input { class: "basic-tool-input", value: "{tool_file}", placeholder: if selected_file.is_empty() { "file path" } else { "{selected_file}" }, oninput: move |event| on_tool_file.call(event.value()) }
+                    input { class: "basic-tool-input", value: "{tool_remote_name}", placeholder: "remote", oninput: move |event| on_tool_remote_name.call(event.value()) }
+                    input { class: "basic-tool-input", value: "{tool_remote_url}", placeholder: "remote url", oninput: move |event| on_tool_remote_url.call(event.value()) }
+                }
+                input { class: "basic-tool-input", value: "{tool_flow_name}", placeholder: "remote branch / upstream branch / LFS pattern", oninput: move |event| on_tool_flow_name.call(event.value()) }
+                div { class: "basic-tool-actions",
+                    ToolButton { label: "Blame".to_string(), action: ToolAction::Blame, on_action: on_tool_action }
+                    ToolButton { label: "File History".to_string(), action: ToolAction::FileHistory, on_action: on_tool_action }
+                    ToolButton { label: "List Remotes".to_string(), action: ToolAction::Remotes, on_action: on_tool_action }
+                    ToolButton { label: "Add Remote".to_string(), action: ToolAction::AddRemote, on_action: on_tool_action }
+                    ToolButton { label: "Delete Remote".to_string(), action: ToolAction::DeleteRemote, on_action: on_tool_action }
+                    ToolButton { label: "Delete Remote Branch".to_string(), action: ToolAction::DeleteRemoteBranch, on_action: on_tool_action }
+                    ToolButton { label: "Set Upstream".to_string(), action: ToolAction::SetUpstream, on_action: on_tool_action }
+                    ToolButton { label: "Submodules".to_string(), action: ToolAction::Submodules, on_action: on_tool_action }
+                    ToolButton { label: "Submodule Init".to_string(), action: ToolAction::SubmoduleInit, on_action: on_tool_action }
+                    ToolButton { label: "Submodule Update".to_string(), action: ToolAction::SubmoduleUpdate, on_action: on_tool_action }
+                    ToolButton { label: "Submodule Sync".to_string(), action: ToolAction::SubmoduleSync, on_action: on_tool_action }
+                    button { class: "basic-tool-button basic-tool-danger", onclick: move |_| on_delete_repository.call(()), "Remove Repo from Zync" }
+                }
+            }
+        }
     }
 }
 
@@ -4309,28 +5334,29 @@ fn graph_rows(commits: &[api::CommitSummary]) -> Vec<GraphRow> {
     rows
 }
 
-fn lane_color(lane: usize, dot: bool) -> &'static str {
-    let colors = if dot {
-        [
-            "bg-teal-400",
-            "bg-amber-400",
-            "bg-violet-400",
-            "bg-rose-400",
-            "bg-sky-400",
-            "bg-amber-400",
-            "bg-emerald-400",
-        ]
-    } else {
-        [
-            "bg-teal-700",
-            "bg-amber-700",
-            "bg-violet-700",
-            "bg-rose-700",
-            "bg-sky-700",
-            "bg-amber-700",
-            "bg-emerald-700",
-        ]
-    };
+fn lane_dot_style(lane: usize) -> &'static str {
+    let colors = [
+        "background:#2dd4bf;",
+        "background:#f59e0b;",
+        "background:#a78bfa;",
+        "background:#fb7185;",
+        "background:#38bdf8;",
+        "background:#34d399;",
+        "background:#f472b6;",
+    ];
+    colors[lane % colors.len()]
+}
+
+fn lane_line_style(lane: usize) -> &'static str {
+    let colors = [
+        "background:#0f766e;",
+        "background:#b45309;",
+        "background:#7c3aed;",
+        "background:#be123c;",
+        "background:#0284c7;",
+        "background:#059669;",
+        "background:#be185d;",
+    ];
     colors[lane % colors.len()]
 }
 

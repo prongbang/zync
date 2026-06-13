@@ -345,6 +345,10 @@ impl ZyncApi {
         post_json(&self.url("/repositories"), request).await
     }
 
+    pub async fn delete_repository(&self, id: &str) -> Result<(), String> {
+        delete_empty(&self.url(&format!("/repositories/{id}"))).await
+    }
+
     pub async fn directories(&self, path: Option<&str>) -> Result<DirectoryList, String> {
         let path = path.unwrap_or("").trim();
         if path.is_empty() {
