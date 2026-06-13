@@ -1,15 +1,16 @@
 use crate::{websocket::WorkspaceEvent, AppState};
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{delete, get, post, put},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Arc};
+use std::{env, fs, path::PathBuf, sync::Arc};
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/directories", get(list_directories))
         .route(
             "/repositories",
             get(list_repositories).post(create_repository),
@@ -32,10 +33,77 @@ struct FavoriteRequest {
     favorite: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct DirectoryQuery {
+    path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DirectoryEntry {
+    name: String,
+    path: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DirectoryList {
+    current_path: String,
+    parent_path: Option<String>,
+    directories: Vec<DirectoryEntry>,
+}
+
 #[derive(Debug, Serialize)]
 struct RepositoryWithWorkspace {
     repository: crate::db::RepositoryRecord,
     workspace: crate::db::WorkspaceRecord,
+}
+
+async fn list_directories(
+    Query(query): Query<DirectoryQuery>,
+) -> Result<Json<DirectoryList>, (StatusCode, String)> {
+    let requested = query
+        .path
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
+    let current = requested
+        .canonicalize()
+        .map_err(anyhow::Error::from)
+        .map_err(internal_error)?;
+    if !current.is_dir() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "path is not a directory".to_string(),
+        ));
+    }
+
+    let mut directories = Vec::new();
+    for entry in fs::read_dir(&current)
+        .map_err(anyhow::Error::from)
+        .map_err(internal_error)?
+    {
+        let entry = entry.map_err(anyhow::Error::from).map_err(internal_error)?;
+        let file_type = entry
+            .file_type()
+            .map_err(anyhow::Error::from)
+            .map_err(internal_error)?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        directories.push(DirectoryEntry {
+            name: entry.file_name().to_string_lossy().to_string(),
+            path: path.to_string_lossy().to_string(),
+        });
+    }
+    directories.sort_by_key(|entry| entry.name.to_lowercase());
+
+    Ok(Json(DirectoryList {
+        current_path: current.to_string_lossy().to_string(),
+        parent_path: current
+            .parent()
+            .map(|path| path.to_string_lossy().to_string()),
+        directories,
+    }))
 }
 
 async fn list_repositories(
@@ -71,10 +139,15 @@ async fn create_repository(
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "Repository".to_string())
     });
-    let repository = state
-        .db
-        .create_repository(&name, &path, request.remote_url.as_deref())
-        .map_err(internal_error)?;
+    let repository =
+        if let Some(existing) = state.db.repository_by_path(&path).map_err(internal_error)? {
+            existing
+        } else {
+            state
+                .db
+                .create_repository(&name, &path, request.remote_url.as_deref())
+                .map_err(internal_error)?
+        };
     let workspace = state
         .db
         .workspace_for_repository(&repository.id, &repository.name)

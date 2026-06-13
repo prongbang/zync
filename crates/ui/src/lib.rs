@@ -15,20 +15,9 @@ enum ResizeDragTarget {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum IconName {
+enum RepoAddMode {
     Folder,
-    FolderOpen,
-    GitBranch,
-    Search,
-    Archive,
-    FileDiff,
-    Check,
-    GitCommit,
-    ChevronRight,
-    ChevronDown,
-    Tag,
-    Remote,
-    More,
+    GitUrl,
 }
 
 #[derive(Clone, PartialEq)]
@@ -81,7 +70,12 @@ pub fn app() -> Element {
     let mut diff = use_signal(String::new);
     let mut selected_file = use_signal(String::new);
     let mut editor_content = use_signal(String::new);
+    let mut repo_add_mode = use_signal(|| RepoAddMode::Folder);
     let mut repo_path = use_signal(String::new);
+    let mut repo_browser_open = use_signal(|| false);
+    let mut repo_browser = use_signal(api::DirectoryList::default);
+    let mut repo_remote_url = use_signal(String::new);
+    let mut repo_clone_to = use_signal(String::new);
     let mut repo_name = use_signal(String::new);
     let mut commit_message = use_signal(String::new);
     let mut commit_amend = use_signal(|| false);
@@ -100,13 +94,14 @@ pub fn app() -> Element {
     let mut tool_remote_name = use_signal(|| "origin".to_string());
     let mut tool_remote_url = use_signal(String::new);
     let mut tool_flow_name = use_signal(String::new);
-    let tool_output = use_signal(String::new);
     let mut sidebar_width = use_signal(|| 320u16);
     let mut left_pane_width = use_signal(|| 260u16);
     let mut inspector_width = use_signal(|| 380u16);
     let mut history_height = use_signal(|| 320u16);
     let mut active_resize = use_signal(|| None::<ResizeDragTarget>);
     let mut auto_opened_first_repo = use_signal(|| false);
+    let mut mobile_sidebar_open = use_signal(|| false);
+    let mut commit_section_mode = use_signal(|| CommitSectionMode::Commits);
     let mut notice = use_signal(|| "Ready".to_string());
 
     {
@@ -169,18 +164,7 @@ pub fn app() -> Element {
         .as_ref()
         .map(|item| item.repository.id.clone())
         .unwrap_or_default();
-    let current_workspace_id = workspace
-        .read()
-        .as_ref()
-        .map(|item| item.workspace.id.clone())
-        .unwrap_or_default();
-    let websocket_url = if current_workspace_id.is_empty() {
-        String::new()
-    } else {
-        api.read().websocket_url(&current_workspace_id)
-    };
     let changed_count = git_status.read().len();
-    let conflict_count = conflicts.read().len();
     let current_branch = branches
         .read()
         .iter()
@@ -200,6 +184,14 @@ pub fn app() -> Element {
             Some(ResizeDragTarget::History) => " is-resizing is-resizing-row",
             Some(_) => " is-resizing is-resizing-col",
             None => "",
+        }
+    );
+    let sidebar_class = format!(
+        "workspace-sidebar fork-sidebar{} w-full xl:w-[280px] xl:h-screen shrink-0 border-b xl:border-b-0 xl:border-r border-zinc-800 bg-zinc-950 flex flex-col",
+        if *mobile_sidebar_open.read() {
+            " fork-sidebar-open"
+        } else {
+            ""
         }
     );
 
@@ -235,30 +227,188 @@ pub fn app() -> Element {
             },
             onpointerup: move |_| active_resize.set(None),
             onpointercancel: move |_| active_resize.set(None),
-            aside { class: "workspace-sidebar fork-sidebar w-full xl:w-[280px] xl:h-screen shrink-0 border-b xl:border-b-0 xl:border-r border-zinc-800 bg-zinc-950 flex flex-col",
+            if *mobile_sidebar_open.read() {
+                button {
+                    class: "mobile-sidebar-scrim",
+                    title: "Close navigation",
+                    onclick: move |_| mobile_sidebar_open.set(false)
+                }
+            }
+            aside { class: "{sidebar_class}",
                 header { class: "fork-sidebar-title h-12 shrink-0 border-b border-zinc-800 px-3 flex items-center justify-between gap-3",
                     div { class: "min-w-0",
                         h1 { class: "text-sm font-semibold tracking-tight", if let Some(current) = workspace.read().as_ref() { "{current.repository.name}" } else { "Zync" } }
                         p { class: "min-w-0 truncate text-[11px] text-zinc-500", "API {api_base}" }
                     }
-                    span { class: "text-zinc-500", "..." }
+                    div { class: "flex items-center gap-2",
+                        span { class: "text-zinc-500", "..." }
+                        button {
+                            class: "mobile-sidebar-close",
+                            title: "Close navigation",
+                            onclick: move |_| mobile_sidebar_open.set(false),
+                            "x"
+                        }
+                    }
+                }
+
+                RepositorySelector {
+                    repositories: repositories.read().clone(),
+                    selected_repository_id: current_repository_id.clone(),
+                    current_branch: current_branch.clone(),
+                    on_open: move |repository_id: String| {
+                        let api_client = api.read().clone();
+                        spawn(async move {
+                            match api_client.open_repository(&repository_id).await {
+                                Ok(opened) => {
+                                    notice.set("Workspace opened and watcher attached".to_string());
+                                    start_live_events(
+                                        api_client.clone(),
+                                        opened.repository.id.clone(),
+                                        opened.workspace.id.clone(),
+                                        workspace,
+                                        git_status,
+                                        branches,
+                                        commits,
+                                        stashes,
+                                        conflicts,
+                                        diff,
+                                        notice
+                                    );
+                                    load_workspace(
+                                        api_client,
+                                        opened.repository.id,
+                                        opened.workspace.id,
+                                        workspace,
+                                        git_status,
+                                        branches,
+                                        commits,
+                                        stashes,
+                                        conflicts,
+                                        diff,
+                                        notice
+                                    );
+                                }
+                                Err(error) => notice.set(error),
+                            }
+                        });
+                    }
                 }
 
                 details { class: "fork-mount-panel shrink-0 border-b border-zinc-800 bg-zinc-900/40",
                     summary { class: "fork-mount-summary",
-                        Icon { name: IconName::Folder }
-                        span { "Add mounted repository" }
+                        span { "Add repository" }
                     }
                     div { class: "fork-mount-body space-y-2",
-                    input {
-                        class: "w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-cyan-500",
-                        placeholder: "Repository path mounted on server",
-                        value: "{repo_path}",
-                        oninput: move |event| repo_path.set(event.value())
+                    div { class: "fork-add-mode-tabs",
+                        button {
+                            class: if *repo_add_mode.read() == RepoAddMode::Folder { "fork-add-mode-tab fork-add-mode-tab-active" } else { "fork-add-mode-tab" },
+                            onclick: move |_| repo_add_mode.set(RepoAddMode::Folder),
+                            "Folder"
+                        }
+                        button {
+                            class: if *repo_add_mode.read() == RepoAddMode::GitUrl { "fork-add-mode-tab fork-add-mode-tab-active" } else { "fork-add-mode-tab" },
+                            onclick: move |_| repo_add_mode.set(RepoAddMode::GitUrl),
+                            "Git URL"
+                        }
+                    }
+                    if *repo_add_mode.read() == RepoAddMode::Folder {
+                        div { class: "grid grid-cols-[1fr_auto] gap-2",
+                            input {
+                                class: "w-full min-w-0 rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-cyan-500",
+                                placeholder: "Repository folder path mounted on server",
+                                value: "{repo_path}",
+                                oninput: move |event| repo_path.set(event.value())
+                            }
+                            button {
+                                class: "rounded border border-zinc-700 px-2 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800",
+                                onclick: move |_| {
+                                    let api_client = api.read().clone();
+                                    let path = repo_path.read().trim().to_string();
+                                    repo_browser_open.set(true);
+                                    spawn(async move {
+                                        match api_client.directories(if path.is_empty() { None } else { Some(path.as_str()) }).await {
+                                            Ok(list) => repo_browser.set(list),
+                                            Err(error) => notice.set(error),
+                                        }
+                                    });
+                                },
+                                "Browse"
+                            }
+                        }
+                        if *repo_browser_open.read() {
+                            div { class: "fork-folder-browser",
+                                div { class: "fork-folder-browser-head",
+                                    span { class: "min-w-0 truncate", "{repo_browser.read().current_path}" }
+                                    button {
+                                        class: "fork-folder-browser-close",
+                                        onclick: move |_| repo_browser_open.set(false),
+                                        "Close"
+                                    }
+                                }
+                                div { class: "fork-folder-browser-actions",
+                                    if let Some(parent) = repo_browser.read().parent_path.clone() {
+                                        button {
+                                            class: "fork-folder-browser-row",
+                                            onclick: move |_| {
+                                                let api_client = api.read().clone();
+                                                let parent_path = parent.clone();
+                                                spawn(async move {
+                                                    match api_client.directories(Some(&parent_path)).await {
+                                                        Ok(list) => repo_browser.set(list),
+                                                        Err(error) => notice.set(error),
+                                                    }
+                                                });
+                                            },
+                                            ".."
+                                        }
+                                    }
+                                    button {
+                                        class: "fork-folder-browser-row fork-folder-browser-select",
+                                        onclick: move |_| {
+                                            repo_path.set(repo_browser.read().current_path.clone());
+                                            repo_browser_open.set(false);
+                                        },
+                                        "Use this folder"
+                                    }
+                                }
+                                div { class: "fork-folder-browser-list",
+                                    for entry in repo_browser.read().directories.clone() {
+                                        button {
+                                            class: "fork-folder-browser-row",
+                                            title: "{entry.path}",
+                                            onclick: move |_| {
+                                                let api_client = api.read().clone();
+                                                let path = entry.path.clone();
+                                                spawn(async move {
+                                                    match api_client.directories(Some(&path)).await {
+                                                        Ok(list) => repo_browser.set(list),
+                                                        Err(error) => notice.set(error),
+                                                    }
+                                                });
+                                            },
+                                            span { class: "min-w-0 truncate", "{entry.name}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        input {
+                            class: "w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-cyan-500",
+                            placeholder: "Git URL, e.g. https://github.com/org/repo.git",
+                            value: "{repo_remote_url}",
+                            oninput: move |event| repo_remote_url.set(event.value())
+                        }
+                        input {
+                            class: "w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-cyan-500",
+                            placeholder: "Clone destination folder on server",
+                            value: "{repo_clone_to}",
+                            oninput: move |event| repo_clone_to.set(event.value())
+                        }
                     }
                     input {
                         class: "w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-cyan-500",
-                        placeholder: "Name",
+                        placeholder: "Name (optional)",
                         value: "{repo_name}",
                         oninput: move |event| repo_name.set(event.value())
                     }
@@ -267,22 +417,46 @@ pub fn app() -> Element {
                             class: "rounded bg-cyan-500 px-2 py-1.5 text-xs font-medium text-zinc-950 hover:bg-cyan-400 disabled:opacity-50",
                             onclick: move |_| {
                                 let api_client = api.read().clone();
+                                let mode = *repo_add_mode.read();
                                 let path = repo_path.read().trim().to_string();
+                                let remote_url = repo_remote_url.read().trim().to_string();
+                                let clone_to = repo_clone_to.read().trim().to_string();
                                 let name = repo_name.read().trim().to_string();
                                 spawn(async move {
-                                    if path.is_empty() {
-                                        notice.set("Repository path is required".to_string());
-                                        return;
-                                    }
-                                    let request = api::CreateRepositoryRequest {
-                                        name: if name.is_empty() { None } else { Some(name) },
-                                        path: Some(path),
-                                        remote_url: None,
-                                        clone_to: None,
+                                    let name = if name.is_empty() { None } else { Some(name) };
+                                    let request = match mode {
+                                        RepoAddMode::Folder => {
+                                            if path.is_empty() {
+                                                notice.set("Repository folder path is required".to_string());
+                                                return;
+                                            }
+                                            api::CreateRepositoryRequest {
+                                                name,
+                                                path: Some(path),
+                                                remote_url: None,
+                                                clone_to: None,
+                                            }
+                                        }
+                                        RepoAddMode::GitUrl => {
+                                            if remote_url.is_empty() || clone_to.is_empty() {
+                                                notice.set("Git URL and clone destination are required".to_string());
+                                                return;
+                                            }
+                                            api::CreateRepositoryRequest {
+                                                name,
+                                                path: None,
+                                                remote_url: Some(remote_url),
+                                                clone_to: Some(clone_to),
+                                            }
+                                        }
                                     };
                                     match api_client.create_repository(&request).await {
                                         Ok(opened) => {
                                             notice.set("Repository added and watcher started".to_string());
+                                            repo_path.set(String::new());
+                                            repo_remote_url.set(String::new());
+                                            repo_clone_to.set(String::new());
+                                            repo_name.set(String::new());
                                             repositories.write().push(opened.repository.clone());
                                             start_live_events(
                                                 api_client.clone(),
@@ -315,7 +489,7 @@ pub fn app() -> Element {
                                     }
                                 });
                             },
-                            "Add mounted repo"
+                            if *repo_add_mode.read() == RepoAddMode::Folder { "Add folder repo" } else { "Clone git repo" }
                         }
                         button {
                             class: "rounded border border-zinc-700 px-2 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800",
@@ -327,17 +501,16 @@ pub fn app() -> Element {
                 }
 
                 ForkSidebarNavigation {
-                    changed_count,
                     branches: branches.read().clone(),
                     stashes: stashes.read().clone(),
-                    on_local_changes: move |_| notice.set("Open Working Copy in the lower pane".to_string()),
-                    on_all_commits: move |_| notice.set("Commit graph focused".to_string()),
                     on_checkout: move |name: String| {
+                        mobile_sidebar_open.set(false);
                         if let Some(current) = workspace.read().as_ref().cloned() {
                             run_branch_action(api.read().clone(), current, BranchAction::Checkout(name), workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
                         }
                     },
                     on_branch_command: move |command: SidebarBranchCommand| {
+                        mobile_sidebar_open.set(false);
                         let branch_name = match &command {
                             SidebarBranchCommand::Checkout(name)
                             | SidebarBranchCommand::FastForward(name)
@@ -385,47 +558,6 @@ pub fn app() -> Element {
                         }
                     }
                 }
-
-                RepositoryList {
-                    repositories: repositories.read().clone(),
-                    on_open: move |repository_id: String| {
-                        let api_client = api.read().clone();
-                        spawn(async move {
-                            match api_client.open_repository(&repository_id).await {
-                                Ok(opened) => {
-                                    notice.set("Workspace opened and watcher attached".to_string());
-                                    start_live_events(
-                                        api_client.clone(),
-                                        opened.repository.id.clone(),
-                                        opened.workspace.id.clone(),
-                                        workspace,
-                                        git_status,
-                                        branches,
-                                        commits,
-                                        stashes,
-                                        conflicts,
-                                        diff,
-                                        notice
-                                    );
-                                    load_workspace(
-                                        api_client,
-                                        opened.repository.id,
-                                        opened.workspace.id,
-                                        workspace,
-                                        git_status,
-                                        branches,
-                                        commits,
-                                        stashes,
-                                        conflicts,
-                                        diff,
-                                        notice
-                                    );
-                                }
-                                Err(error) => notice.set(error),
-                            }
-                        });
-                    }
-                }
             }
             PaneStepSplitter {
                 label: "Sidebar".to_string(),
@@ -444,33 +576,19 @@ pub fn app() -> Element {
             section { class: "fork-main-window relative min-w-0 flex-1 min-h-[70vh] xl:min-h-0 flex flex-col bg-zinc-900",
                 header { class: "workspace-header fork-top-toolbar h-auto xl:h-12 shrink-0 border-b border-zinc-800 px-3 flex flex-col xl:flex-row xl:items-center justify-between gap-2 bg-zinc-950",
                     div { class: "fork-toolbar-left",
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref() { load_workspace(api.read().clone(), current.repository.id.clone(), current.workspace.id.clone(), workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, span { class: "fork-toolbar-symbol fork-toolbar-symbol-folder" } span { "Quick Launch" } }
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Fetch, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, span { class: "fork-toolbar-symbol fork-toolbar-symbol-fetch" } span { "Fetch" } }
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Pull, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, span { class: "fork-toolbar-symbol fork-toolbar-symbol-pull" } span { "Pull" } }
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Push, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, span { class: "fork-toolbar-symbol fork-toolbar-symbol-push" } span { "Push" } }
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_stash_action(api.read().clone(), current, StashAction::Create(stash_message.read().clone()), workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, span { class: "fork-toolbar-symbol fork-toolbar-symbol-stash" } span { "Stash" } }
-                    }
-                    if let Some(current) = workspace.read().as_ref() {
-                        div { class: "fork-repo-switcher min-w-0",
-                            h2 { class: "text-sm font-semibold truncate", "{current.repository.name}" }
-                            p { class: "text-xs text-zinc-500 truncate", "{current_branch}" }
+                        button {
+                            class: "mobile-sidebar-toggle",
+                            title: "Open navigation",
+                            onclick: move |_| mobile_sidebar_open.set(true),
+                            span { class: "mobile-sidebar-toggle-line" }
+                            span { class: "mobile-sidebar-toggle-line" }
+                            span { class: "mobile-sidebar-toggle-line" }
                         }
-                        div { class: "workspace-meta hidden xl:flex flex-wrap items-center justify-end gap-1 text-[11px] text-zinc-500 min-w-0",
-                            span { class: "workspace-pill", "{current_branch}" }
-                            span { class: "workspace-pill", "{changed_count} changes" }
-                            span { class: "workspace-pill", "{conflict_count} conflicts" }
-                            span { class: "truncate max-w-[420px]", "WS {websocket_url}" }
-                        }
-                    } else {
-                        div { class: "fork-repo-switcher min-w-0",
-                            h2 { class: "text-lg font-semibold", "Open a mounted Git repository" }
-                            p { class: "text-xs text-zinc-500", "Mount a project into the server, add its server-side path, then open it here." }
-                        }
-                    }
-                    div { class: "fork-toolbar-right",
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| notice.set("New Branch is available from Repository Navigator".to_string()), span { class: "fork-toolbar-symbol fork-toolbar-symbol-branch" } span { "New Branch" } }
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| notice.set("Open in server mounted path".to_string()), span { class: "fork-toolbar-symbol fork-toolbar-symbol-open" } span { "Open in" } }
-                        button { class: "fork-toolbar-button", onclick: move |_| notice.set("Feedback noted".to_string()), span { class: "fork-toolbar-symbol fork-toolbar-symbol-feedback" } span { "Feedback" } }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref() { load_workspace(api.read().clone(), current.repository.id.clone(), current.workspace.id.clone(), workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, span { "Quick Launch" } }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Fetch, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, span { "Fetch" } }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Pull, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, span { "Pull" } }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Push, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, span { "Push" } }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_stash_action(api.read().clone(), current, StashAction::Create(stash_message.read().clone()), workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, span { "Stash" } }
                     }
                     div { class: "legacy-toolbar-actions",
                     WorkspaceToolbar {
@@ -496,22 +614,6 @@ pub fn app() -> Element {
                             }
                         }
                     }
-                    }
-                    PaneSizeControls {
-                        sidebar_width: *sidebar_width.read(),
-                        left_pane_width: *left_pane_width.read(),
-                        inspector_width: *inspector_width.read(),
-                        history_height: *history_height.read(),
-                        on_sidebar: move |value: u16| sidebar_width.set(value),
-                        on_left_pane: move |value: u16| left_pane_width.set(value),
-                        on_inspector: move |value: u16| inspector_width.set(value),
-                        on_history: move |value: u16| history_height.set(value),
-                        on_reset: move |_| {
-                            sidebar_width.set(320);
-                            left_pane_width.set(260);
-                            inspector_width.set(380);
-                            history_height.set(320);
-                        }
                     }
                 }
 
@@ -943,6 +1045,42 @@ pub fn app() -> Element {
                     }
                     CommitGraph {
                         commits: commits.read().clone(),
+                        files: git_status.read().clone(),
+                        changed_count,
+                        selected_file: selected_file.read().clone(),
+                        mode: *commit_section_mode.read(),
+                        on_local_changes: move |_| {
+                            mobile_sidebar_open.set(false);
+                            commit_section_mode.set(CommitSectionMode::LocalChanges);
+                            notice.set("Showing local changes".to_string());
+                        },
+                        on_all_commits: move |_| {
+                            mobile_sidebar_open.set(false);
+                            commit_section_mode.set(CommitSectionMode::Commits);
+                            notice.set("Commit graph focused".to_string());
+                        },
+                        on_select_local_file: move |path: String| {
+                            let Some(current) = workspace.read().as_ref().cloned() else {
+                                notice.set("Open a repository before viewing local changes".to_string());
+                                return;
+                            };
+                            selected_file.set(path.clone());
+                            let api_client = api.read().clone();
+                            let repository_id = current.repository.id;
+                            spawn(async move {
+                                let workdir = api_client.diff_workdir_file(&repository_id, &path).await.unwrap_or_default();
+                                let staged = api_client.diff_staged_file(&repository_id, &path).await.unwrap_or_default();
+                                let patch = if !workdir.trim().is_empty() {
+                                    workdir
+                                } else if !staged.trim().is_empty() {
+                                    staged
+                                } else {
+                                    format!("No diff for {path}")
+                                };
+                                diff.set(patch);
+                                notice.set(format!("Showing local diff for {path}"));
+                            });
+                        },
                         on_select_commit: move |commit_id: String| {
                             let Some(current) = workspace.read().as_ref().cloned() else {
                                 notice.set("Open a repository before viewing commit diff".to_string());
@@ -954,6 +1092,7 @@ pub fn app() -> Element {
                                 .find(|commit| commit.id == commit_id)
                                 .cloned();
                             selected_commit.set(selected);
+                            commit_section_mode.set(CommitSectionMode::Commits);
                             let api_client = api.read().clone();
                             spawn(async move {
                                 match api_client.diff_commit(&current.repository.id, &commit_id).await {
@@ -989,6 +1128,7 @@ pub fn app() -> Element {
                         files: git_status.read().clone(),
                         diff: diff.read().clone(),
                         selected_file: selected_file.read().clone(),
+                        commit_mode: *commit_section_mode.read(),
                         on_stage: move |path: String| {
                             run_file_action_from_workspace(
                                 api.read().clone(),
@@ -1196,7 +1336,6 @@ pub fn app() -> Element {
                         remote_name: tool_remote_name.read().clone(),
                         remote_url: tool_remote_url.read().clone(),
                         flow_name: tool_flow_name.read().clone(),
-                        output: tool_output.read().clone(),
                         on_revision: move |value: String| tool_revision.set(value),
                         on_branch_name: move |value: String| tool_branch.set(value),
                         on_tag_name: move |value: String| tool_tag.set(value),
@@ -1228,7 +1367,6 @@ pub fn app() -> Element {
                                 stashes,
                                 conflicts,
                                 diff,
-                                tool_output,
                                 notice,
                             );
                         }
@@ -1711,7 +1849,6 @@ fn run_repository_tool(
     stashes: Signal<Vec<api::StashSummary>>,
     conflicts: Signal<Vec<api::ConflictSummary>>,
     diff: Signal<String>,
-    mut output: Signal<String>,
     mut notice: Signal<String>,
 ) {
     let repository_id = current.repository.id;
@@ -1891,7 +2028,6 @@ fn run_repository_tool(
 
         match result {
             Ok(message) => {
-                output.set(message.clone());
                 notice.set(message);
                 load_workspace(
                     api,
@@ -1908,7 +2044,6 @@ fn run_repository_tool(
                 );
             }
             Err(error) => {
-                output.set(error.clone());
                 notice.set(error);
             }
         }
@@ -2085,35 +2220,9 @@ fn start_live_events(
 }
 
 #[component]
-fn Icon(name: IconName) -> Element {
-    let class_name = match name {
-        IconName::Folder => "zync-icon zync-icon-folder",
-        IconName::FolderOpen => "zync-icon zync-icon-folder-open",
-        IconName::GitBranch => "zync-icon zync-icon-git-branch",
-        IconName::Search => "zync-icon zync-icon-search",
-        IconName::Archive => "zync-icon zync-icon-archive",
-        IconName::FileDiff => "zync-icon zync-icon-file-diff",
-        IconName::Check => "zync-icon zync-icon-check",
-        IconName::GitCommit => "zync-icon zync-icon-git-commit",
-        IconName::ChevronRight => "zync-icon zync-icon-chevron-right",
-        IconName::ChevronDown => "zync-icon zync-icon-chevron-down",
-        IconName::Tag => "zync-icon zync-icon-tag",
-        IconName::Remote => "zync-icon zync-icon-remote",
-        IconName::More => "zync-icon zync-icon-more",
-    };
-
-    rsx! {
-        span { class: "{class_name}", aria_hidden: "true" }
-    }
-}
-
-#[component]
 fn ForkSidebarNavigation(
-    changed_count: usize,
     branches: Vec<api::BranchSummary>,
     stashes: Vec<api::StashSummary>,
-    on_local_changes: EventHandler<()>,
-    on_all_commits: EventHandler<()>,
     on_checkout: EventHandler<String>,
     on_branch_command: EventHandler<SidebarBranchCommand>,
 ) -> Element {
@@ -2132,22 +2241,7 @@ fn ForkSidebarNavigation(
 
     rsx! {
         section { class: "fork-nav-tree min-h-0 flex-1 overflow-y-auto",
-            div { class: "fork-sidebar-primary",
-                button { class: "fork-sidebar-row fork-sidebar-row-strong", onclick: move |_| on_local_changes.call(()),
-                    span { class: "fork-row-icon", Icon { name: IconName::FileDiff } }
-                    span { "Local Changes ({changed_count})" }
-                }
-                button { class: "fork-sidebar-row fork-sidebar-row-strong", onclick: move |_| on_all_commits.call(()),
-                    span { class: "fork-row-icon", Icon { name: IconName::GitCommit } }
-                    span { "All Commits" }
-                }
-            }
-            div { class: "fork-sidebar-view-tabs",
-                button { class: "fork-sidebar-view-tab fork-sidebar-view-tab-active", title: "Repository tree", Icon { name: IconName::GitBranch } }
-                button { class: "fork-sidebar-view-tab", title: "Search", Icon { name: IconName::Search } }
-            }
             div { class: "fork-sidebar-search",
-                span { class: "fork-search-icon", Icon { name: IconName::Search } }
                 input { class: "fork-filter-input", placeholder: "Filter" }
             }
             ForkSidebarSection {
@@ -2170,22 +2264,18 @@ fn ForkSidebarNavigation(
             }
             section { class: "fork-sidebar-section",
                 div { class: "fork-section-title",
-                    span { class: "fork-section-caret", Icon { name: IconName::ChevronDown } }
                     span { "Tags" }
                 }
                 div { class: "fork-sidebar-row fork-sidebar-leaf fork-sidebar-muted-row",
-                    span { class: "fork-row-icon", Icon { name: IconName::Tag } }
                     span { class: "min-w-0 truncate", "No tags loaded" }
                 }
             }
             section { class: "fork-sidebar-section",
                 div { class: "fork-section-title",
-                    span { class: "fork-section-caret", Icon { name: IconName::ChevronDown } }
                     span { "Stashes" }
                 }
                 for stash in stashes.clone() {
                     div { class: "fork-sidebar-row fork-sidebar-leaf",
-                        span { class: "fork-row-icon", Icon { name: IconName::Archive } }
                         span { class: "min-w-0 truncate", if stash.message.is_empty() { "#{stash.index} {stash.name}" } else { "{stash.message}" } }
                     }
                 }
@@ -2195,7 +2285,6 @@ fn ForkSidebarNavigation(
             }
             section { class: "fork-sidebar-section",
                 div { class: "fork-section-title",
-                    span { class: "fork-section-caret", Icon { name: IconName::ChevronDown } }
                     span { "Submodules" }
                 }
                 div { class: "fork-sidebar-empty", "No submodules loaded" }
@@ -2251,7 +2340,6 @@ fn ForkSidebarSection(
     rsx! {
         section { class: "fork-sidebar-section",
             div { class: "fork-section-title",
-                span { class: "fork-section-caret", Icon { name: IconName::ChevronDown } }
                 span { "{title}" }
             }
             for (group, branches) in grouped {
@@ -2270,8 +2358,6 @@ fn ForkSidebarSection(
                     }
                 } else {
                     div { class: "fork-sidebar-row fork-sidebar-group-row",
-                        span { class: "fork-section-caret", Icon { name: IconName::ChevronDown } }
-                        span { class: "fork-row-icon", Icon { name: IconName::FolderOpen } }
                         span { class: "min-w-0 truncate", "{group}" }
                     }
                     for branch in branches {
@@ -2306,7 +2392,6 @@ fn ForkRemoteSection(
     rsx! {
         section { class: "fork-sidebar-section",
             div { class: "fork-section-title",
-                span { class: "fork-section-caret", Icon { name: IconName::ChevronDown } }
                 span { "{title}" }
             }
             for (remote, branches) in grouped {
@@ -2325,8 +2410,6 @@ fn ForkRemoteSection(
                     }
                 } else {
                     div { class: "fork-sidebar-row fork-sidebar-group-row",
-                        span { class: "fork-section-caret", Icon { name: IconName::ChevronDown } }
-                        span { class: "fork-row-icon", Icon { name: IconName::Remote } }
                         span { class: "min-w-0 truncate", "{remote}" }
                     }
                     for branch in branches {
@@ -2382,7 +2465,6 @@ fn ForkSidebarBranchRow(
                     on_open_menu.call(branch_for_context.clone());
                 },
                 onclick: move |_| on_checkout.call(branch_for_click.clone()),
-                span { class: "fork-row-icon", if branch.is_head { Icon { name: IconName::Check } } else { Icon { name: IconName::GitBranch } } }
                 span { class: "min-w-0 truncate", "{display}" }
                 if branch.is_head {
                     span { class: "fork-row-badge", "1↑" }
@@ -2394,7 +2476,7 @@ fn ForkSidebarBranchRow(
                         event.stop_propagation();
                         on_open_menu.call(branch_for_more.clone());
                     },
-                    Icon { name: IconName::More }
+                    span { "More" }
                 }
             }
             if menu_open {
@@ -2471,28 +2553,58 @@ fn ContextMenuItem(
             if !shortcut.is_empty() {
                 span { class: "fork-context-shortcut", "{shortcut}" }
             } else if chevron {
-                span { class: "fork-context-chevron", Icon { name: IconName::ChevronRight } }
+                span { class: "fork-context-chevron", "More" }
             }
         }
     }
 }
 
 #[component]
-fn RepositoryList(
+fn RepositorySelector(
     repositories: Vec<api::RepositoryRecord>,
+    selected_repository_id: String,
+    current_branch: String,
     on_open: EventHandler<String>,
 ) -> Element {
+    let selected_repository = repositories
+        .iter()
+        .find(|repository| repository.id == selected_repository_id)
+        .cloned();
+    let selected_path = selected_repository
+        .as_ref()
+        .map(|repository| repository.path.as_str())
+        .unwrap_or("No repository selected");
+    let selected_repository_id_for_change = selected_repository_id.clone();
+
     rsx! {
-        section { class: "min-h-0 flex-1 overflow-y-auto p-2 space-y-1",
-            for repository in repositories {
-                article { class: "group rounded-lg border border-zinc-800 bg-zinc-900/40 hover:border-cyan-700/80 hover:bg-zinc-900",
-                    button {
-                        class: "w-full min-w-0 p-3 text-left",
-                        onclick: move |_| on_open.call(repository.id.clone()),
-                        div { class: "font-medium text-sm text-zinc-100 truncate group-hover:text-cyan-300", "{repository.name}" }
-                        div { class: "mt-1 text-xs text-zinc-500 truncate", "{repository.path}" }
+        section { class: "fork-repository-selector shrink-0 border-b border-zinc-800",
+            label { class: "fork-repository-label", "Repository" }
+            div { class: "fork-repository-select-wrap",
+                select {
+                    class: "fork-repository-select",
+                    value: "{selected_repository_id}",
+                    onchange: move |event| {
+                        let repository_id = event.value();
+                        if !repository_id.is_empty()
+                            && repository_id != selected_repository_id_for_change
+                        {
+                            on_open.call(repository_id);
+                        }
+                    },
+                    option { value: "", disabled: true, selected: selected_repository_id.is_empty(), "Select repository" }
+                    for repository in repositories {
+                        option {
+                            value: "{repository.id}",
+                            selected: repository.id == selected_repository_id,
+                            "{repository.name}"
+                        }
                     }
                 }
+            }
+            p { class: "fork-repository-path", "{selected_path}" }
+            p { class: "fork-repository-branch",
+                span { "Current branch" }
+                strong { "{current_branch}" }
             }
         }
     }
@@ -3292,38 +3404,96 @@ fn BranchContextMenu(
 #[component]
 fn CommitGraph(
     commits: Vec<api::CommitSummary>,
+    files: Vec<api::FileStatus>,
+    changed_count: usize,
+    selected_file: String,
+    mode: CommitSectionMode,
+    on_local_changes: EventHandler<()>,
+    on_all_commits: EventHandler<()>,
+    on_select_local_file: EventHandler<String>,
     on_select_commit: EventHandler<String>,
     on_load_more: EventHandler<()>,
 ) -> Element {
     let rows = graph_rows(&commits);
     rsx! {
         article { class: "commit-graph-panel min-h-[240px] xl:min-h-0 xl:col-start-2 xl:row-start-1 bg-zinc-950 flex flex-col overflow-hidden",
-            header { class: "h-9 shrink-0 border-b border-zinc-800 px-3 flex items-center justify-between gap-2",
-                h3 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-400", "Commit Graph" }
-                button { class: "rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800", onclick: move |_| on_load_more.call(()), "Load more" }
+            header { class: "commit-section-header shrink-0 border-b border-zinc-800 px-3 flex items-center justify-between gap-2",
+                div { class: "commit-section-tabs",
+                    button {
+                        class: commit_section_tab_class(mode, CommitSectionMode::LocalChanges),
+                        onclick: move |_| on_local_changes.call(()),
+                        "Local Changes ({changed_count})"
+                    }
+                    button {
+                        class: commit_section_tab_class(mode, CommitSectionMode::Commits),
+                        onclick: move |_| on_all_commits.call(()),
+                        "All Commits"
+                    }
+                }
+                if mode == CommitSectionMode::Commits {
+                    button { class: "rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800", onclick: move |_| on_load_more.call(()), "Load more" }
+                }
             }
-            div { class: "grid grid-cols-[128px_76px_minmax(0,1fr)_150px] border-b border-zinc-800 bg-zinc-900/60 px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-zinc-500",
-                span { "Graph" }
-                span { "Commit" }
-                span { "Message" }
-                span { "Author" }
-            }
-            ol { class: "min-h-0 flex-1 overflow-y-auto",
-                for row in rows {
-                    li {
-                        class: "grid grid-cols-[128px_76px_minmax(0,1fr)_150px] gap-2 border-b border-zinc-900 px-2 py-1.5 text-xs hover:bg-cyan-500/10",
-                        onclick: {
-                            let commit_id = row.commit.id.clone();
-                            move |_| on_select_commit.call(commit_id.clone())
-                        },
-                        GraphLaneStrip { row: row.clone() }
-                        code { class: "self-center text-cyan-300", "{short_id(&row.commit.id)}" }
-                        span { class: "min-w-0 truncate self-center text-zinc-200", "{row.commit.summary}" }
-                        span { class: "min-w-0 truncate self-center text-zinc-500", "{row.commit.author}" }
+            if mode == CommitSectionMode::LocalChanges {
+                div { class: "local-changes-list min-h-0 flex-1 overflow-y-auto",
+                    if files.is_empty() {
+                        div { class: "local-changes-empty", "No local changes" }
+                    } else {
+                        div { class: "local-changes-header",
+                            span { "Status" }
+                            span { "File" }
+                        }
+                        for file in files {
+                            button {
+                                class: if file.path == selected_file { "local-change-row local-change-row-active" } else { "local-change-row" },
+                                onclick: {
+                                    let path = file.path.clone();
+                                    move |_| on_select_local_file.call(path.clone())
+                                },
+                                span { class: status_class(&file), "{status_label(&file)}" }
+                                code { class: "min-w-0 truncate", "{file.path}" }
+                            }
+                        }
+                    }
+                }
+            } else {
+                div { class: "grid grid-cols-[128px_76px_minmax(0,1fr)_150px] border-b border-zinc-800 bg-zinc-900/60 px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-zinc-500",
+                    span { "Graph" }
+                    span { "Commit" }
+                    span { "Message" }
+                    span { "Author" }
+                }
+                ol { class: "min-h-0 flex-1 overflow-y-auto",
+                    for row in rows {
+                        li {
+                            class: "grid grid-cols-[128px_76px_minmax(0,1fr)_150px] gap-2 border-b border-zinc-900 px-2 py-1.5 text-xs hover:bg-cyan-500/10",
+                            onclick: {
+                                let commit_id = row.commit.id.clone();
+                                move |_| on_select_commit.call(commit_id.clone())
+                            },
+                            GraphLaneStrip { row: row.clone() }
+                            code { class: "self-center text-cyan-300", "{short_id(&row.commit.id)}" }
+                            span { class: "min-w-0 truncate self-center text-zinc-200", "{row.commit.summary}" }
+                            span { class: "min-w-0 truncate self-center text-zinc-500", "{row.commit.author}" }
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CommitSectionMode {
+    LocalChanges,
+    Commits,
+}
+
+fn commit_section_tab_class(active: CommitSectionMode, tab: CommitSectionMode) -> &'static str {
+    if active == tab {
+        "commit-section-tab commit-section-tab-active"
+    } else {
+        "commit-section-tab"
     }
 }
 
@@ -3354,9 +3524,18 @@ fn ForkCommitDetailPanel(
     files: Vec<api::FileStatus>,
     diff: String,
     selected_file: String,
+    commit_mode: CommitSectionMode,
     on_stage: EventHandler<String>,
     on_diff: EventHandler<String>,
 ) -> Element {
+    let mut active_tab = use_signal(|| ForkDetailTab::Commit);
+    let selected_tab = if commit_mode == CommitSectionMode::LocalChanges
+        && *active_tab.read() == ForkDetailTab::Commit
+    {
+        ForkDetailTab::Changes
+    } else {
+        *active_tab.read()
+    };
     let additions = diff
         .lines()
         .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
@@ -3368,65 +3547,340 @@ fn ForkCommitDetailPanel(
     rsx! {
         article { class: "fork-detail-panel bg-zinc-950 flex flex-col overflow-hidden",
             div { class: "fork-detail-tabs",
-                button { class: "fork-detail-tab fork-detail-tab-active", "Commit" }
-                button { class: "fork-detail-tab", "Changes" }
-                button { class: "fork-detail-tab", "File Tree" }
+                if commit_mode == CommitSectionMode::Commits {
+                    button {
+                        class: detail_tab_class(selected_tab, ForkDetailTab::Commit),
+                        onclick: move |_| active_tab.set(ForkDetailTab::Commit),
+                        "Commit"
+                    }
+                }
+                button {
+                    class: detail_tab_class(selected_tab, ForkDetailTab::Changes),
+                    onclick: move |_| active_tab.set(ForkDetailTab::Changes),
+                    "Changes"
+                }
+                button {
+                    class: detail_tab_class(selected_tab, ForkDetailTab::FileTree),
+                    onclick: move |_| active_tab.set(ForkDetailTab::FileTree),
+                    "File Tree"
+                }
             }
-            div { class: "fork-detail-body",
-                if let Some(commit) = selected {
-                    section { class: "fork-commit-summary",
-                        div { class: "fork-person-card",
-                            div { class: "fork-avatar", "{commit.author.chars().next().unwrap_or('Z')}" }
-                            div { class: "min-w-0",
-                                div { class: "fork-label", "AUTHOR" }
-                                div { class: "fork-person-name", "{commit.author}" }
-                                div { class: "fork-muted", "Commit time {commit.time}" }
+            if selected_tab == ForkDetailTab::Commit {
+                div { class: "fork-detail-body",
+                    if let Some(commit) = selected.clone() {
+                        section { class: "fork-commit-summary",
+                            div { class: "fork-person-card",
+                                div { class: "fork-avatar", "{commit.author.chars().next().unwrap_or('Z')}" }
+                                div { class: "min-w-0",
+                                    div { class: "fork-label", "AUTHOR" }
+                                    div { class: "fork-person-name", "{commit.author}" }
+                                    div { class: "fork-muted", "Commit time {commit.time}" }
+                                }
                             }
-                        }
-                        div { class: "fork-sha-card",
-                            div { class: "fork-label", "SHA" }
-                            code { class: "fork-sha", "{commit.id}" }
-                            div { class: "fork-label mt-2", "PARENTS" }
-                            div { class: "fork-parent-list",
-                                for parent in commit.parents {
-                                    code { class: "fork-parent", "{short_id(&parent)}" }
+                            div { class: "fork-sha-card",
+                                div { class: "fork-label", "SHA" }
+                                code { class: "fork-sha", "{commit.id}" }
+                                div { class: "fork-label mt-2", "PARENTS" }
+                                div { class: "fork-parent-list",
+                                    for parent in commit.parents {
+                                        code { class: "fork-parent", "{short_id(&parent)}" }
+                                    }
                                 }
                             }
                         }
+                        section { class: "fork-message-block",
+                            h3 { " {commit.summary}" }
+                            p { class: "fork-muted", "{additions} additions, {deletions} deletions in current diff" }
+                        }
+                    } else {
+                        section { class: "fork-message-block",
+                            h3 { "No commit selected" }
+                            p { class: "fork-muted", "Open a repository and select a row in the commit graph." }
+                        }
                     }
-                    section { class: "fork-message-block",
-                        h3 { " {commit.summary}" }
-                        p { class: "fork-muted", "{additions} additions, {deletions} deletions in current diff" }
-                    }
-                } else {
-                    section { class: "fork-message-block",
-                        h3 { "No commit selected" }
-                        p { class: "fork-muted", "Open a repository and select a row in the commit graph." }
+                    ForkChangedFilesList {
+                        files: files.clone(),
+                        selected_file: selected_file.clone(),
+                        on_stage,
+                        on_diff
                     }
                 }
-                section { class: "fork-changed-files",
-                    div { class: "fork-changed-header",
-                        span { "Changed Files" }
+            } else if selected_tab == ForkDetailTab::Changes {
+                ForkChangesTab {
+                    selected,
+                    files,
+                    diff,
+                    selected_file,
+                    additions,
+                    deletions,
+                    on_stage,
+                    on_diff
+                }
+            } else {
+                div { class: "fork-detail-body fork-file-tree-tab",
+                    div { class: "fork-file-tree-header",
+                        span { "Changed file tree" }
                         span { class: "fork-muted", "{files.len()} item(s)" }
                     }
-                    for file in files.into_iter().take(80) {
-                        div { class: if file.path == selected_file { "fork-file-row fork-file-row-active" } else { "fork-file-row" },
-                            button { class: "fork-file-main", onclick: {
-                                let path = file.path.clone();
-                                move |_| on_diff.call(path.clone())
-                            },
-                                span { class: status_class(&file), "{status_label(&file)}" }
-                                code { "{file.path}" }
+                    div { class: "fork-file-tree-list",
+                        for entry in changed_tree_entries(&files) {
+                            if entry.is_file {
+                                button {
+                                    class: if entry.path == selected_file { "fork-tree-entry fork-tree-entry-file fork-tree-entry-active" } else { "fork-tree-entry fork-tree-entry-file" },
+                                    style: "padding-left: {entry.depth * 18 + 10}px",
+                                    onclick: {
+                                        let path = entry.path.clone();
+                                        move |_| on_diff.call(path.clone())
+                                    },
+                                    span { class: "fork-tree-file-icon", "{entry.status}" }
+                                    span { class: "truncate", "{entry.name}" }
+                                }
+                            } else {
+                                div {
+                                    class: "fork-tree-entry fork-tree-entry-dir",
+                                    style: "padding-left: {entry.depth * 18 + 10}px",
+                                    span { class: "fork-tree-folder-icon", "" }
+                                    span { class: "truncate", "{entry.name}" }
+                                }
                             }
-                            button { class: "fork-file-action", onclick: {
-                                let path = file.path.clone();
-                                move |_| on_stage.call(path.clone())
-                            }, "Stage" }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ForkDetailTab {
+    Commit,
+    Changes,
+    FileTree,
+}
+
+fn detail_tab_class(active: ForkDetailTab, tab: ForkDetailTab) -> &'static str {
+    if active == tab {
+        "fork-detail-tab fork-detail-tab-active"
+    } else {
+        "fork-detail-tab"
+    }
+}
+
+#[component]
+fn ForkChangedFilesList(
+    files: Vec<api::FileStatus>,
+    selected_file: String,
+    on_stage: EventHandler<String>,
+    on_diff: EventHandler<String>,
+) -> Element {
+    rsx! {
+        section { class: "fork-changed-files",
+            div { class: "fork-changed-header",
+                span { "Changed Files" }
+                span { class: "fork-muted", "{files.len()} item(s)" }
+            }
+            for file in files.into_iter().take(120) {
+                div { class: if file.path == selected_file { "fork-file-row fork-file-row-active" } else { "fork-file-row" },
+                    button { class: "fork-file-main", onclick: {
+                        let path = file.path.clone();
+                        move |_| on_diff.call(path.clone())
+                    },
+                        span { class: status_class(&file), "{status_label(&file)}" }
+                        code { "{file.path}" }
+                    }
+                    button { class: "fork-file-action", onclick: {
+                        let path = file.path.clone();
+                        move |_| on_stage.call(path.clone())
+                    }, "Stage" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ForkChangesTab(
+    selected: Option<api::CommitSummary>,
+    files: Vec<api::FileStatus>,
+    diff: String,
+    selected_file: String,
+    additions: usize,
+    deletions: usize,
+    on_stage: EventHandler<String>,
+    on_diff: EventHandler<String>,
+) -> Element {
+    rsx! {
+        div { class: "fork-changes-view",
+            header { class: "fork-changes-commit-bar",
+                div { class: "fork-avatar fork-avatar-small",
+                    "{selected.as_ref().and_then(|commit| commit.author.chars().next()).unwrap_or('Z')}"
+                }
+                if let Some(commit) = selected {
+                    strong { class: "truncate", "{commit.author}" }
+                    code { "{short_id(&commit.id)}" }
+                    span { class: "fork-muted", "{commit.time}" }
+                    span { class: "fork-changes-summary", "{commit.summary}" }
+                } else {
+                    strong { "Working tree" }
+                    span { class: "fork-muted", "Select a commit or file to inspect changes." }
+                }
+            }
+            div { class: "fork-changes-grid",
+                aside { class: "fork-changes-files",
+                    div { class: "fork-changes-files-toolbar",
+                        span { class: "fork-search-dot", "" }
+                        span { class: "fork-muted", "{files.len()} files" }
+                    }
+                    div { class: "fork-changes-tree",
+                        for entry in changed_tree_entries(&files) {
+                            if entry.is_file {
+                                div {
+                                    class: if entry.path == selected_file { "fork-change-tree-row fork-change-tree-row-active" } else { "fork-change-tree-row" },
+                                    style: "padding-left: {entry.depth * 18 + 10}px",
+                                    button {
+                                        class: "fork-change-tree-main",
+                                        onclick: {
+                                            let path = entry.path.clone();
+                                            move |_| on_diff.call(path.clone())
+                                        },
+                                        span { class: status_class_from_label(&entry.status), "{entry.status}" }
+                                        span { class: "truncate", "{entry.name}" }
+                                    }
+                                    button {
+                                        class: "fork-change-tree-stage",
+                                        title: "Stage file",
+                                        onclick: {
+                                            let path = entry.path.clone();
+                                            move |_| on_stage.call(path.clone())
+                                        },
+                                        "+"
+                                    }
+                                }
+                            } else {
+                                div {
+                                    class: "fork-change-tree-row fork-change-tree-dir",
+                                    style: "padding-left: {entry.depth * 18 + 10}px",
+                                    span { class: "fork-tree-folder-icon", "" }
+                                    span { class: "truncate", "{entry.name}" }
+                                }
+                            }
+                        }
+                    }
+                }
+                section { class: "fork-changes-diff",
+                    div { class: "fork-changes-diff-toolbar",
+                        span { class: "fork-file-doc-icon", "" }
+                        code { class: "truncate", if selected_file.is_empty() { "Select a file" } else { "{selected_file}" } }
+                        span { class: "fork-muted", "+{additions} -{deletions}" }
+                    }
+                    ForkCompactDiff { diff }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ForkCompactDiff(diff: String) -> Element {
+    let hunks = diff_hunks(&diff);
+    rsx! {
+        div { class: "fork-compact-diff",
+            if diff.trim().is_empty() {
+                div { class: "fork-diff-empty", "Select a changed file to show its diff." }
+            } else if hunks.is_empty() {
+                pre { class: "fork-compact-diff-raw", "{diff}" }
+            } else {
+                for hunk in hunks {
+                    article { class: "fork-compact-hunk",
+                        div { class: "fork-compact-hunk-title", "{hunk.title}" }
+                        for line in hunk.lines {
+                            div { class: format!("fork-compact-line {}", compact_diff_class(line.text.as_str())),
+                                span { class: "fork-compact-line-marker", "{compact_diff_marker(line.text.as_str())}" }
+                                pre { "{line.text}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ChangedTreeEntry {
+    name: String,
+    path: String,
+    depth: usize,
+    is_file: bool,
+    status: String,
+}
+
+fn changed_tree_entries(files: &[api::FileStatus]) -> Vec<ChangedTreeEntry> {
+    let mut entries = Vec::<ChangedTreeEntry>::new();
+    let mut seen_dirs = HashSet::<String>::new();
+    let mut sorted = files.to_vec();
+    sorted.sort_by(|left, right| left.path.cmp(&right.path));
+
+    for file in sorted {
+        let parts = file.path.split('/').collect::<Vec<_>>();
+        let mut prefix = String::new();
+        for (index, part) in parts.iter().enumerate() {
+            let is_file = index == parts.len().saturating_sub(1);
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(part);
+            if is_file {
+                entries.push(ChangedTreeEntry {
+                    name: (*part).to_string(),
+                    path: file.path.clone(),
+                    depth: index,
+                    is_file: true,
+                    status: status_label(&file).to_string(),
+                });
+            } else if seen_dirs.insert(prefix.clone()) {
+                entries.push(ChangedTreeEntry {
+                    name: (*part).to_string(),
+                    path: prefix.clone(),
+                    depth: index,
+                    is_file: false,
+                    status: String::new(),
+                });
+            }
+        }
+    }
+
+    entries
+}
+
+fn status_class_from_label(label: &str) -> &'static str {
+    match label {
+        "A" => "fork-status fork-status-added",
+        "U" => "fork-status fork-status-untracked",
+        "!" => "fork-status fork-status-conflict",
+        _ => "fork-status fork-status-modified",
+    }
+}
+
+fn compact_diff_class(line: &str) -> &'static str {
+    if line.starts_with('+') && !line.starts_with("+++") {
+        "fork-compact-line-added"
+    } else if line.starts_with('-') && !line.starts_with("---") {
+        "fork-compact-line-removed"
+    } else if line.starts_with("@@") {
+        "fork-compact-line-hunk"
+    } else {
+        "fork-compact-line-context"
+    }
+}
+
+fn compact_diff_marker(line: &str) -> &'static str {
+    if line.starts_with('+') && !line.starts_with("+++") {
+        "+"
+    } else if line.starts_with('-') && !line.starts_with("---") {
+        "-"
+    } else {
+        ""
     }
 }
 
@@ -3682,7 +4136,6 @@ fn RepositoryToolsPanel(
     remote_name: String,
     remote_url: String,
     flow_name: String,
-    output: String,
     on_revision: EventHandler<String>,
     on_branch_name: EventHandler<String>,
     on_tag_name: EventHandler<String>,
@@ -3695,7 +4148,7 @@ fn RepositoryToolsPanel(
     rsx! {
         article { class: "repository-tools-panel min-h-[420px] xl:min-h-0 xl:col-start-3 xl:row-start-4 bg-zinc-950 flex flex-col overflow-hidden",
             h3 { class: "shrink-0 border-b border-zinc-800 px-3 py-2 text-sm font-semibold", "Repository Tools" }
-            div { class: "min-h-0 flex-1 grid grid-cols-1 xl:grid-cols-[1.2fr_1fr] gap-3 overflow-y-auto p-3",
+            div { class: "min-h-0 flex-1 overflow-y-auto p-3",
                 div { class: "space-y-4",
                     section { class: "space-y-2 rounded-md border border-zinc-800 bg-zinc-950/35 p-3",
                         h4 { class: "text-xs font-semibold uppercase tracking-wide text-zinc-500", "Revision / Tags" }
@@ -3763,7 +4216,6 @@ fn RepositoryToolsPanel(
                         }
                     }
                 }
-                pre { class: "min-h-[300px] overflow-auto rounded-md border border-zinc-800 bg-zinc-950/70 p-3 font-mono text-xs leading-5 text-zinc-300 whitespace-pre-wrap", "{output}" }
             }
         }
     }

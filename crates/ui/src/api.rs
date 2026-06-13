@@ -25,6 +25,19 @@ pub struct RepositoryWithWorkspace {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DirectoryEntry {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DirectoryList {
+    pub current_path: String,
+    pub parent_path: Option<String>,
+    pub directories: Vec<DirectoryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileNode {
     pub path: String,
     pub name: String,
@@ -330,6 +343,15 @@ impl ZyncApi {
         request: &CreateRepositoryRequest,
     ) -> Result<RepositoryWithWorkspace, String> {
         post_json(&self.url("/repositories"), request).await
+    }
+
+    pub async fn directories(&self, path: Option<&str>) -> Result<DirectoryList, String> {
+        let path = path.unwrap_or("").trim();
+        if path.is_empty() {
+            get_json(&self.url("/directories")).await
+        } else {
+            get_json(&self.url(&format!("/directories?path={}", urlencoding::encode(path)))).await
+        }
     }
 
     pub async fn open_repository(&self, id: &str) -> Result<RepositoryWithWorkspace, String> {

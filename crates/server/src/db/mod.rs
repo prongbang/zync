@@ -211,6 +211,17 @@ impl Database {
         .map_err(Into::into)
     }
 
+    pub fn repository_by_path(&self, path: &str) -> anyhow::Result<Option<RepositoryRecord>> {
+        let conn = self.conn.lock().expect("database lock");
+        conn.query_row(
+            "SELECT id, name, path, remote_url, favorite, created_at FROM repositories WHERE path = ?1",
+            params![path],
+            repository_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn workspace(&self, id: &str) -> anyhow::Result<Option<WorkspaceRecord>> {
         let conn = self.conn.lock().expect("database lock");
         conn.query_row(
