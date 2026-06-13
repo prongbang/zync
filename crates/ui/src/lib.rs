@@ -4379,19 +4379,6 @@ fn ForkCommitDetailPanel(
                     onclick: move |_| active_tab.set(ForkDetailTab::GitTools),
                     "Git Tools"
                 }
-                div { class: "fork-detail-commit-box",
-                    input {
-                        class: "fork-detail-commit-input",
-                        value: "{commit_message}",
-                        placeholder: "Commit message",
-                        oninput: move |event| on_commit_message.call(event.value())
-                    }
-                    button {
-                        class: "fork-detail-commit-button",
-                        onclick: move |_| on_commit.call(()),
-                        "Commit"
-                    }
-                }
             }
             if selected_tab == ForkDetailTab::Commit {
                 div { class: "fork-detail-body",
@@ -4507,6 +4494,21 @@ fn ForkCommitDetailPanel(
                                 }
                             }
                         }
+                    }
+                }
+            }
+            footer { class: "fork-detail-commit-footer",
+                div { class: "fork-detail-commit-box",
+                    input {
+                        class: "fork-detail-commit-input",
+                        value: "{commit_message}",
+                        placeholder: "Commit message",
+                        oninput: move |event| on_commit_message.call(event.value())
+                    }
+                    button {
+                        class: "fork-detail-commit-button",
+                        onclick: move |_| on_commit.call(()),
+                        "Commit"
                     }
                 }
             }

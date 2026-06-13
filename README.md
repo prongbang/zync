@@ -1,44 +1,73 @@
 # Zync
 
-Zync is a cross-platform Git workspace manager inspired by Fork.
+Zync is a minimal Git workspace client inspired by Fork. It is built as a Rust
+workspace with an Axum API, SQLite-backed repository registry, and a Dioxus web
+UI for day-to-day Git operations.
 
-The current implementation is a Rust workspace with:
+## Workspace
 
 - `crates/git-core`: libgit2-backed Git operations.
-- `crates/server`: Axum API, SQLite persistence, WebSocket workspace events, and collaboration state.
-- `crates/ui`: Dioxus UI scaffold for repository, explorer, status, diff, graph, branch, stash, rebase, conflict, and collaboration views.
+- `crates/server`: Axum API, repository persistence, WebSocket workspace events,
+  and Git command endpoints.
+- `crates/ui`: Dioxus web UI for repository management, local changes, commit
+  history, branch actions, and Git tools.
 
-See [PLAN.md](PLAN.md) for the full implementation roadmap.
+## Features
 
-## UI Assets
-
-The Dioxus UI vendors Tailwind CSS at `crates/ui/src/tailwind.min.css` and embeds it before the app-specific `style.css`. The UI can render without waiting on an external CDN, while local Fork-like styling still overrides Tailwind where needed.
+- Add local repositories or clone a remote repository into a local path.
+- Watch opened repositories and refresh status, diffs, files, branches, stashes,
+  conflicts, and commit graph through workspace events.
+- Review local changes, stage or unstage files, inspect changed files, and commit
+  from the footer composer.
+- Commit with amend, sign-off, and optional push-after-commit controls.
+- Fetch, pull, and push against remotes.
+- Browse commit history with a compact graph, selected-row state, changed files,
+  and commit diffs.
+- Checkout branches, merge branches, rebase branches, create branches, create
+  tags, rename branches, delete branches, and copy branch names from the branch
+  menu.
+- Checkout a branch or revision, create a branch from a revision, create and
+  delete tags, cherry-pick commits, revert commits, and run rebase controls from
+  Git Tools.
+- Manage stashes, remotes, remote branches, upstreams, and submodules.
+- Remove repositories from the Zync registry without deleting the repository from
+  disk.
 
 ## Run
 
+Start the API server:
+
 ```sh
-cargo run -p zync-server
+ZYNC_BIND=0.0.0.0:58271 cargo run -p zync-server
 ```
 
-The server listens on `127.0.0.1:58271` by default.
+Start the Dioxus UI:
 
-## Mounted Repository Flow
+```sh
+dx serve --web --package zync-ui --port 8080 --addr 0.0.0.0 --open false
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8080/
+```
+
+The UI talks to the API at `http://127.0.0.1:58271` by default. When the UI is
+served from another host, it uses the same hostname with port `58271`.
+
+## Repository Flow
 
 Zync manages repositories that the server process can see on disk.
 
-For local development:
-
-```sh
-cargo run -p zync-server
-```
-
-Then open the web UI build and add a repository path such as:
+For local development, add a repository path such as:
 
 ```text
 /Users/you/Development/my-git-project
 ```
 
-For Docker, mount host projects into `/workspaces` and add the container path in the UI:
+For Docker or remote containers, mount host projects into a path visible to the
+server and add the mounted path in the UI:
 
 ```yaml
 volumes:
@@ -51,4 +80,19 @@ Then add:
 /workspaces/my-git-project
 ```
 
-When the workspace is opened, the server attaches a watcher. File changes made on the mounted filesystem are batched through `/ws/workspace/:id`, and the browser refreshes the workspace status, diff, files, branches, and commit graph.
+When a workspace is opened, the server attaches a watcher and batches filesystem
+changes through `/ws/workspace/:id`, so the browser can refresh the workspace
+state without manual reloads.
+
+## Checks
+
+```sh
+cargo check -p zync-ui
+cargo check --target wasm32-unknown-unknown -p zync-ui
+cargo check -p zync-server
+```
+
+## Notes
+
+- `PLAN.md` is a local planning file and is intentionally ignored by Git.
+- Runtime state such as `zync.db` is local-only and should not be committed.
