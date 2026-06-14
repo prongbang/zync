@@ -34,14 +34,50 @@ enum SidebarBranchCommand {
 }
 
 #[derive(Clone, PartialEq)]
+enum SidebarStashCommand {
+    Apply(api::StashSummary),
+    Drop(usize),
+}
+
+#[derive(Clone, PartialEq)]
 enum BranchDialog {
-    Checkout { branch: String },
-    Merge { branch: String },
-    Rebase { branch: String, interactive: bool },
-    NewBranch { branch: String, target: Option<String> },
-    NewTag { branch: String, target: Option<String> },
-    Rename { branch: String },
-    Delete { branch: String },
+    Checkout {
+        branch: String,
+    },
+    Merge {
+        branch: String,
+    },
+    Rebase {
+        branch: String,
+        interactive: bool,
+    },
+    NewBranch {
+        branch: String,
+        target: Option<String>,
+    },
+    NewTag {
+        branch: String,
+        target: Option<String>,
+    },
+    Rename {
+        branch: String,
+    },
+    Delete {
+        branch: String,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ToastKind {
+    Success,
+    Error,
+}
+
+#[derive(Clone, PartialEq)]
+struct ToastMessage {
+    kind: ToastKind,
+    title: String,
+    detail: String,
 }
 
 impl BranchDialog {
@@ -140,13 +176,17 @@ pub fn app() -> Element {
     let mut auto_opened_first_repo = use_signal(|| false);
     let mut mobile_sidebar_open = use_signal(|| false);
     let mut sidebar_open_menu = use_signal(|| None::<String>);
+    let mut sidebar_stash_menu = use_signal(|| None::<usize>);
     let mut branch_dialog = use_signal(|| None::<BranchDialog>);
     let mut branch_dialog_value = use_signal(String::new);
     let mut branch_dialog_target = use_signal(String::new);
     let mut branch_dialog_checkout = use_signal(|| true);
     let mut branch_dialog_rebase_steps = use_signal(Vec::<api::RebaseStepRequest>::new);
+    let mut stash_apply_dialog = use_signal(|| None::<api::StashSummary>);
+    let mut stash_apply_delete = use_signal(|| true);
     let mut commit_section_mode = use_signal(|| CommitSectionMode::Commits);
     let mut notice = use_signal(|| "Ready".to_string());
+    let mut toast = use_signal(|| None::<ToastMessage>);
 
     {
         let api = api.read().clone();
@@ -251,6 +291,7 @@ pub fn app() -> Element {
             ""
         }
     );
+    let toast_snapshot = toast.read().clone();
 
     rsx! {
         style { "{TAILWIND_CSS}" }
@@ -291,6 +332,32 @@ pub fn app() -> Element {
                     onclick: move |_| {
                         mobile_sidebar_open.set(false);
                         sidebar_open_menu.set(None);
+                    }
+                }
+            }
+            if let Some(message) = toast_snapshot {
+                div {
+                    class: match message.kind {
+                        ToastKind::Success => "zync-toast zync-toast-success",
+                        ToastKind::Error => "zync-toast zync-toast-error",
+                    },
+                    div { class: "zync-toast-mark",
+                        match message.kind {
+                            ToastKind::Success => "OK",
+                            ToastKind::Error => "!",
+                        }
+                    }
+                    div { class: "zync-toast-copy",
+                        strong { "{message.title}" }
+                        if !message.detail.is_empty() {
+                            p { "{message.detail}" }
+                        }
+                    }
+                    button {
+                        class: "zync-toast-close",
+                        title: "Dismiss",
+                        onclick: move |_| toast.set(None),
+                        "x"
                     }
                 }
             }
@@ -567,11 +634,20 @@ pub fn app() -> Element {
                     branches: branches.read().clone(),
                     stashes: stashes.read().clone(),
                     open_menu: sidebar_open_menu.read().clone(),
+                    open_stash_menu: *sidebar_stash_menu.read(),
                     on_open_menu: move |name: String| sidebar_open_menu.set(Some(name)),
-                    on_close_menu: move |_| sidebar_open_menu.set(None),
+                    on_open_stash_menu: move |index: usize| {
+                        sidebar_open_menu.set(None);
+                        sidebar_stash_menu.set(Some(index));
+                    },
+                    on_close_menu: move |_| {
+                        sidebar_open_menu.set(None);
+                        sidebar_stash_menu.set(None);
+                    },
                     on_checkout: move |name: String| {
                         mobile_sidebar_open.set(false);
                         sidebar_open_menu.set(None);
+                        sidebar_stash_menu.set(None);
                         if let Some(current) = workspace.read().as_ref().cloned() {
                             run_branch_action(api.read().clone(), current, BranchAction::Checkout(name), workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
                         }
@@ -579,6 +655,7 @@ pub fn app() -> Element {
                     on_branch_command: move |command: SidebarBranchCommand| {
                         mobile_sidebar_open.set(false);
                         sidebar_open_menu.set(None);
+                        sidebar_stash_menu.set(None);
                         let branch_name = match &command {
                             SidebarBranchCommand::Checkout(name)
                             | SidebarBranchCommand::Merge(name)
@@ -666,6 +743,24 @@ pub fn app() -> Element {
                                 branch_dialog.set(Some(BranchDialog::Rename { branch: name }));
                             }
                         }
+                    },
+                    on_stash_command: move |command: SidebarStashCommand| {
+                        mobile_sidebar_open.set(false);
+                        sidebar_open_menu.set(None);
+                        sidebar_stash_menu.set(None);
+                        match command {
+                            SidebarStashCommand::Apply(stash) => {
+                                stash_apply_delete.set(true);
+                                stash_apply_dialog.set(Some(stash));
+                            }
+                            SidebarStashCommand::Drop(index) => {
+                                if let Some(current) = workspace.read().as_ref().cloned() {
+                                    run_stash_action(api.read().clone(), current, StashAction::Drop(index), workspace, git_status, branches, commits, stashes, conflicts, diff, notice, toast);
+                                } else {
+                                    notice.set("Open a repository before stash action".to_string());
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -694,10 +789,10 @@ pub fn app() -> Element {
                             span { class: "mobile-sidebar-toggle-line" }
                             span { class: "mobile-sidebar-toggle-line" }
                         }
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Fetch, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, span { "Fetch" } }
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Pull, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, span { "Pull" } }
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Push, workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, span { "Push" } }
-                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_stash_action(api.read().clone(), current, StashAction::Create(stash_message.read().clone()), workspace, git_status, branches, commits, stashes, conflicts, diff, notice); } }, span { "Stash" } }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Fetch, workspace, git_status, branches, commits, stashes, conflicts, diff, notice, toast); } }, span { "Fetch" } }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Pull, workspace, git_status, branches, commits, stashes, conflicts, diff, notice, toast); } }, span { "Pull" } }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_remote_action(api.read().clone(), current, RemoteAction::Push, workspace, git_status, branches, commits, stashes, conflicts, diff, notice, toast); } }, span { "Push" } }
+                        button { class: "fork-toolbar-button", disabled: current_repository_id.is_empty(), onclick: move |_| { if let Some(current) = workspace.read().as_ref().cloned() { run_stash_action(api.read().clone(), current, StashAction::Create(stash_message.read().clone()), workspace, git_status, branches, commits, stashes, conflicts, diff, notice, toast); } }, span { "Stash" } }
                     }
                     div { class: "legacy-toolbar-actions",
                     WorkspaceToolbar {
@@ -709,17 +804,17 @@ pub fn app() -> Element {
                         },
                         on_fetch: move |_| {
                             if let Some(current) = workspace.read().as_ref().cloned() {
-                                run_remote_action(api.read().clone(), current, RemoteAction::Fetch, workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                                run_remote_action(api.read().clone(), current, RemoteAction::Fetch, workspace, git_status, branches, commits, stashes, conflicts, diff, notice, toast);
                             }
                         },
                         on_pull: move |_| {
                             if let Some(current) = workspace.read().as_ref().cloned() {
-                                run_remote_action(api.read().clone(), current, RemoteAction::Pull, workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                                run_remote_action(api.read().clone(), current, RemoteAction::Pull, workspace, git_status, branches, commits, stashes, conflicts, diff, notice, toast);
                             }
                         },
                         on_push: move |_| {
                             if let Some(current) = workspace.read().as_ref().cloned() {
-                                run_remote_action(api.read().clone(), current, RemoteAction::Push, workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                                run_remote_action(api.read().clone(), current, RemoteAction::Push, workspace, git_status, branches, commits, stashes, conflicts, diff, notice, toast);
                             }
                         }
                     }
@@ -1057,6 +1152,7 @@ pub fn app() -> Element {
                                 conflicts,
                                 diff,
                                 notice,
+                                toast,
                             );
                         }
                     }
@@ -1278,6 +1374,7 @@ pub fn app() -> Element {
                                 conflicts,
                                 diff,
                                 notice,
+                                toast,
                             );
                         },
                         on_stash_message: move |message: String| stash_message.set(message),
@@ -1299,14 +1396,14 @@ pub fn app() -> Element {
                         on_tool_flow_name: move |value: String| tool_flow_name.set(value),
                         on_remote_action: move |action: RemoteAction| {
                             if let Some(current) = workspace.read().as_ref().cloned() {
-                                run_remote_action(api.read().clone(), current, action, workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                                run_remote_action(api.read().clone(), current, action, workspace, git_status, branches, commits, stashes, conflicts, diff, notice, toast);
                             } else {
                                 notice.set("Open a repository before remote action".to_string());
                             }
                         },
                         on_stash_action: move |action: StashAction| {
                             if let Some(current) = workspace.read().as_ref().cloned() {
-                                run_stash_action(api.read().clone(), current, action, workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                                run_stash_action(api.read().clone(), current, action, workspace, git_status, branches, commits, stashes, conflicts, diff, notice, toast);
                             } else {
                                 notice.set("Open a repository before stash action".to_string());
                             }
@@ -1498,22 +1595,22 @@ pub fn app() -> Element {
                         },
                         on_create_stash: move |_| {
                             if let Some(current) = workspace.read().as_ref().cloned() {
-                                run_stash_action(api.read().clone(), current, StashAction::Create(stash_message.read().clone()), workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                                run_stash_action(api.read().clone(), current, StashAction::Create(stash_message.read().clone()), workspace, git_status, branches, commits, stashes, conflicts, diff, notice, toast);
                             }
                         },
                         on_apply_stash: move |index: usize| {
                             if let Some(current) = workspace.read().as_ref().cloned() {
-                                run_stash_action(api.read().clone(), current, StashAction::Apply(index), workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                                run_stash_action(api.read().clone(), current, StashAction::Apply(index), workspace, git_status, branches, commits, stashes, conflicts, diff, notice, toast);
                             }
                         },
                         on_pop_stash: move |index: usize| {
                             if let Some(current) = workspace.read().as_ref().cloned() {
-                                run_stash_action(api.read().clone(), current, StashAction::Pop(index), workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                                run_stash_action(api.read().clone(), current, StashAction::Pop(index), workspace, git_status, branches, commits, stashes, conflicts, diff, notice, toast);
                             }
                         },
                         on_drop_stash: move |index: usize| {
                             if let Some(current) = workspace.read().as_ref().cloned() {
-                                run_stash_action(api.read().clone(), current, StashAction::Drop(index), workspace, git_status, branches, commits, stashes, conflicts, diff, notice);
+                                run_stash_action(api.read().clone(), current, StashAction::Drop(index), workspace, git_status, branches, commits, stashes, conflicts, diff, notice, toast);
                             }
                         },
                         on_cherry_pick: move |_| {
@@ -1716,6 +1813,32 @@ pub fn app() -> Element {
                                 BranchDialog::NewTag { branch: _, target: _ } => run_tag_action(api.read().clone(), current, TagAction::Create(value, target), workspace, git_status, branches, commits, stashes, conflicts, diff, notice),
                                 BranchDialog::Rebase { branch, .. } => run_history_action(api.read().clone(), current, HistoryAction::Rebase(branch, steps), workspace, git_status, branches, commits, stashes, conflicts, diff, notice),
                             }
+                        }
+                    }
+                }
+
+                if let Some(stash) = stash_apply_dialog.read().clone() {
+                    StashApplyDialog {
+                        stash,
+                        delete_after_apply: *stash_apply_delete.read(),
+                        on_delete_after_apply: move |checked: bool| stash_apply_delete.set(checked),
+                        on_cancel: move |_| stash_apply_dialog.set(None),
+                        on_submit: move |_| {
+                            let Some(stash) = stash_apply_dialog.read().clone() else {
+                                return;
+                            };
+                            let Some(current) = workspace.read().as_ref().cloned() else {
+                                notice.set("Open a repository before stash action".to_string());
+                                stash_apply_dialog.set(None);
+                                return;
+                            };
+                            let action = if *stash_apply_delete.read() {
+                                StashAction::Pop(stash.index)
+                            } else {
+                                StashAction::Apply(stash.index)
+                            };
+                            stash_apply_dialog.set(None);
+                            run_stash_action(api.read().clone(), current, action, workspace, git_status, branches, commits, stashes, conflicts, diff, notice, toast);
                         }
                     }
                 }
@@ -2000,6 +2123,7 @@ fn run_commit_action(
     conflicts: Signal<Vec<api::ConflictSummary>>,
     diff: Signal<String>,
     mut notice: Signal<String>,
+    toast: Signal<Option<ToastMessage>>,
 ) {
     let Some(current) = current else {
         notice.set("Open a repository before committing".to_string());
@@ -2025,16 +2149,24 @@ fn run_commit_action(
                 if push_after {
                     match api.push(&repository_id).await {
                         Ok(output) => {
-                            if output.trim().is_empty() {
-                                notice.set("Committed and pushed".to_string());
-                            } else {
-                                notice.set(format!("Committed and pushed: {}", output.trim()));
-                            }
+                            show_toast(
+                                notice,
+                                toast,
+                                ToastKind::Success,
+                                "Committed and pushed",
+                                output,
+                            );
                         }
-                        Err(error) => notice.set(format!("Committed, push failed: {error}")),
+                        Err(error) => show_toast(
+                            notice,
+                            toast,
+                            ToastKind::Error,
+                            "Committed, push failed",
+                            error,
+                        ),
                     }
                 } else {
-                    notice.set("Committed".to_string());
+                    show_toast(notice, toast, ToastKind::Success, "Committed", "");
                 }
                 commit_message.set(String::new());
                 load_workspace(
@@ -2142,7 +2274,11 @@ fn run_tag_action(
                     api.create_tag(
                         &repository_id,
                         &name,
-                        if target.is_empty() { None } else { Some(target) },
+                        if target.is_empty() {
+                            None
+                        } else {
+                            Some(target)
+                        },
                     )
                     .await
                 }
@@ -2213,6 +2349,28 @@ fn copy_to_clipboard(value: String, mut notice: Signal<String>) {
     notice.set(format!("Branch name copied: {value}"));
 }
 
+fn show_toast(
+    mut notice: Signal<String>,
+    mut toast: Signal<Option<ToastMessage>>,
+    kind: ToastKind,
+    title: impl Into<String>,
+    detail: impl Into<String>,
+) {
+    let title = title.into();
+    let detail = detail.into();
+    let footer_message = if detail.trim().is_empty() {
+        title.clone()
+    } else {
+        format!("{title}: {}", detail.trim())
+    };
+    notice.set(footer_message);
+    toast.set(Some(ToastMessage {
+        kind,
+        title,
+        detail: detail.trim().to_string(),
+    }));
+}
+
 fn run_remote_action(
     api: api::ZyncApi,
     current: api::WorkspaceResponse,
@@ -2225,6 +2383,7 @@ fn run_remote_action(
     conflicts: Signal<Vec<api::ConflictSummary>>,
     diff: Signal<String>,
     mut notice: Signal<String>,
+    toast: Signal<Option<ToastMessage>>,
 ) {
     let repository_id = current.repository.id;
     let workspace_id = current.workspace.id;
@@ -2242,12 +2401,13 @@ fn run_remote_action(
         };
         match result {
             Ok(output) => {
-                let detail = if output.trim().is_empty() {
-                    format!("{label} complete")
-                } else {
-                    format!("{label} complete: {}", output.trim())
-                };
-                notice.set(detail);
+                show_toast(
+                    notice,
+                    toast,
+                    ToastKind::Success,
+                    format!("{label} complete"),
+                    output,
+                );
                 load_workspace(
                     api,
                     repository_id,
@@ -2262,7 +2422,13 @@ fn run_remote_action(
                     notice,
                 );
             }
-            Err(error) => notice.set(error),
+            Err(error) => show_toast(
+                notice,
+                toast,
+                ToastKind::Error,
+                format!("{label} failed"),
+                error,
+            ),
         }
     });
 }
@@ -2278,11 +2444,18 @@ fn run_stash_action(
     stashes: Signal<Vec<api::StashSummary>>,
     conflicts: Signal<Vec<api::ConflictSummary>>,
     diff: Signal<String>,
-    mut notice: Signal<String>,
+    notice: Signal<String>,
+    toast: Signal<Option<ToastMessage>>,
 ) {
     let repository_id = current.repository.id;
     let workspace_id = current.workspace.id;
     spawn(async move {
+        let label = match &action {
+            StashAction::Create(_) => "Stash created",
+            StashAction::Apply(_) => "Stash applied",
+            StashAction::Pop(_) => "Stash popped",
+            StashAction::Drop(_) => "Stash dropped",
+        };
         let result = match action {
             StashAction::Create(message) => api.create_stash(&repository_id, &message).await,
             StashAction::Apply(index) => api.apply_stash(&repository_id, index, false).await,
@@ -2291,7 +2464,7 @@ fn run_stash_action(
         };
         match result {
             Ok(()) => {
-                notice.set("Stash action complete".to_string());
+                show_toast(notice, toast, ToastKind::Success, label, "");
                 load_workspace(
                     api,
                     repository_id,
@@ -2306,7 +2479,7 @@ fn run_stash_action(
                     notice,
                 );
             }
-            Err(error) => notice.set(error),
+            Err(error) => show_toast(notice, toast, ToastKind::Error, "Stash failed", error),
         }
     });
 }
@@ -2758,10 +2931,13 @@ fn ForkSidebarNavigation(
     branches: Vec<api::BranchSummary>,
     stashes: Vec<api::StashSummary>,
     open_menu: Option<String>,
+    open_stash_menu: Option<usize>,
     on_open_menu: EventHandler<String>,
+    on_open_stash_menu: EventHandler<usize>,
     on_close_menu: EventHandler<()>,
     on_checkout: EventHandler<String>,
     on_branch_command: EventHandler<SidebarBranchCommand>,
+    on_stash_command: EventHandler<SidebarStashCommand>,
 ) -> Element {
     let has_stashes = !stashes.is_empty();
     let locals = branches
@@ -2811,8 +2987,12 @@ fn ForkSidebarNavigation(
                     span { "Stashes" }
                 }
                 for stash in stashes.clone() {
-                    div { class: "fork-sidebar-row fork-sidebar-leaf",
-                        span { class: "min-w-0 truncate", if stash.message.is_empty() { "#{stash.index} {stash.name}" } else { "{stash.message}" } }
+                    ForkSidebarStashRow {
+                        stash: stash.clone(),
+                        menu_open: open_stash_menu == Some(stash.index),
+                        on_open_menu: on_open_stash_menu,
+                        on_close_menu,
+                        on_command: on_stash_command
                     }
                 }
                 if !has_stashes {
@@ -2859,6 +3039,14 @@ fn branch_leaf_label(branch: &api::BranchSummary, group: &str) -> String {
             .strip_prefix(&format!("{group}/"))
             .unwrap_or(&branch.name)
             .to_string()
+    }
+}
+
+fn stash_label(stash: &api::StashSummary) -> String {
+    if stash.message.trim().is_empty() {
+        format!("#{} {}", stash.index, stash.name)
+    } else {
+        format!("stash@{{{}}} {}", stash.index, stash.message.trim())
     }
 }
 
@@ -3082,6 +3270,168 @@ fn ForkBranchContextMenu(
             ContextMenuItem { label: "Delete...".to_string(), disabled: is_head, command: SidebarBranchCommand::Delete(branch.clone()), on_command, on_close }
             div { class: "fork-context-separator" }
             ContextMenuItem { label: "Copy Branch Name".to_string(), command: SidebarBranchCommand::CopyName(branch), on_command, on_close }
+        }
+    }
+}
+
+#[component]
+fn ForkSidebarStashRow(
+    stash: api::StashSummary,
+    menu_open: bool,
+    on_open_menu: EventHandler<usize>,
+    on_close_menu: EventHandler<()>,
+    on_command: EventHandler<SidebarStashCommand>,
+) -> Element {
+    let stash_for_context = stash.index;
+    let stash_for_more = stash.index;
+    let label = stash_label(&stash);
+    rsx! {
+        div { class: "fork-sidebar-row-wrap",
+            div {
+                class: "fork-sidebar-row fork-sidebar-leaf",
+                prevent_default: "oncontextmenu",
+                oncontextmenu: move |_| on_open_menu.call(stash_for_context),
+                span { class: "fork-stash-icon", "" }
+                span { class: "min-w-0 truncate", "{label}" }
+                button {
+                    class: "fork-row-more",
+                    title: "Stash actions",
+                    onclick: move |event| {
+                        event.stop_propagation();
+                        on_open_menu.call(stash_for_more);
+                    },
+                    span { "More" }
+                }
+            }
+            if menu_open {
+                ForkStashContextMenu {
+                    stash: stash.clone(),
+                    on_close: on_close_menu,
+                    on_command
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ForkStashContextMenu(
+    stash: api::StashSummary,
+    on_close: EventHandler<()>,
+    on_command: EventHandler<SidebarStashCommand>,
+) -> Element {
+    let mut drag_start_y = use_signal(|| None::<f64>);
+    let mut drag_offset = use_signal(|| 0.0_f64);
+    let sheet_style = format!("--sheet-drag-y: {}px;", (*drag_offset.read()).min(180.0));
+    rsx! {
+        button {
+            class: "fork-context-scrim",
+            title: "Close menu",
+            onclick: move |_| on_close.call(())
+        }
+        div {
+            class: "fork-context-menu",
+            style: "{sheet_style}",
+            onpointerdown: move |event| {
+                drag_start_y.set(Some(event.client_coordinates().y));
+                drag_offset.set(0.0);
+            },
+            onpointermove: move |event| {
+                let Some(start_y) = *drag_start_y.read() else {
+                    return;
+                };
+                let delta = event.client_coordinates().y - start_y;
+                drag_offset.set(delta.max(0.0));
+            },
+            onpointerup: move |_| {
+                if *drag_offset.read() > 86.0 {
+                    on_close.call(());
+                }
+                drag_start_y.set(None);
+                drag_offset.set(0.0);
+            },
+            onpointercancel: move |_| {
+                drag_start_y.set(None);
+                drag_offset.set(0.0);
+            },
+            StashContextMenuItem { label: "Apply...".to_string(), command: SidebarStashCommand::Apply(stash.clone()), on_command, on_close }
+            div { class: "fork-context-separator" }
+            StashContextMenuItem { label: "Drop Stash".to_string(), command: SidebarStashCommand::Drop(stash.index), on_command, on_close }
+        }
+    }
+}
+
+#[component]
+fn StashContextMenuItem(
+    label: String,
+    command: SidebarStashCommand,
+    on_command: EventHandler<SidebarStashCommand>,
+    on_close: EventHandler<()>,
+) -> Element {
+    rsx! {
+        button {
+            class: "fork-context-item",
+            onclick: move |_| {
+                on_command.call(command.clone());
+                on_close.call(());
+            },
+            span { class: "min-w-0 truncate", "{label}" }
+        }
+    }
+}
+
+#[component]
+fn StashApplyDialog(
+    stash: api::StashSummary,
+    delete_after_apply: bool,
+    on_delete_after_apply: EventHandler<bool>,
+    on_cancel: EventHandler<()>,
+    on_submit: EventHandler<()>,
+) -> Element {
+    let label = stash_label(&stash);
+    rsx! {
+        div { class: "branch-dialog-layer",
+            button {
+                class: "branch-dialog-scrim",
+                title: "Close dialog",
+                onclick: move |_| on_cancel.call(())
+            }
+            section { class: "branch-dialog stash-apply-dialog",
+                div { class: "stash-apply-layout",
+                    div { class: "stash-apply-icon", "" }
+                    div { class: "stash-apply-content",
+                        header { class: "stash-apply-header",
+                            h3 { "Apply Stash" }
+                            p { "Apply changes of the stash to your working directory" }
+                        }
+                        div { class: "stash-apply-row",
+                            strong { "Stash:" }
+                            code { "{label}" }
+                        }
+                        label { class: "branch-dialog-check stash-apply-check",
+                            input {
+                                r#type: "checkbox",
+                                checked: delete_after_apply,
+                                onchange: move |event| on_delete_after_apply.call(event.checked())
+                            }
+                            span { "Delete stash after applying" }
+                        }
+                        p { class: "branch-dialog-muted stash-apply-note", "Stash will not be deleted if a conflict occurs" }
+                    }
+                }
+                footer { class: "branch-dialog-footer stash-apply-footer",
+                    button {
+                        class: "branch-dialog-secondary",
+                        onclick: move |_| on_cancel.call(()),
+                        "Cancel"
+                    }
+                    button {
+                        class: "branch-dialog-primary",
+                        onclick: move |_| on_submit.call(()),
+                        "Apply"
+                    }
+                }
+            }
         }
     }
 }
