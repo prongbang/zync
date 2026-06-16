@@ -630,12 +630,43 @@ code,
   border-bottom-color: var(--theme-border);
 }
 
+.fork-repository-selector-head {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
 .fork-repository-label {
   color: var(--theme-muted);
   font-size: 0.58rem;
   font-weight: 760;
   letter-spacing: 0;
   text-transform: uppercase;
+}
+
+.fork-repository-favorite {
+  min-height: 1.45rem;
+  border: 1px solid var(--theme-border);
+  border-radius: 0.32rem;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--theme-muted-strong);
+  font-size: 0.64rem;
+  font-weight: 720;
+  padding: 0.16rem 0.45rem;
+}
+
+.fork-repository-favorite:hover:not(:disabled) {
+  border-color: rgba(247, 185, 85, 0.5);
+  background: rgba(247, 185, 85, 0.12);
+  color: #ffd88f;
+}
+
+.fork-repository-favorite-active {
+  border-color: rgba(247, 185, 85, 0.58);
+  background: rgba(247, 185, 85, 0.16);
+  color: var(--theme-amber);
 }
 
 .fork-repository-select-wrap {

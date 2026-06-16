@@ -183,6 +183,11 @@ pub struct CreateRepositoryRequest {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct FavoriteRepositoryRequest {
+    pub favorite: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct CommitRequest {
     pub message: String,
     pub author_name: String,
@@ -347,6 +352,14 @@ impl ZyncApi {
 
     pub async fn delete_repository(&self, id: &str) -> Result<(), String> {
         delete_empty(&self.url(&format!("/repositories/{id}"))).await
+    }
+
+    pub async fn set_repository_favorite(&self, id: &str, favorite: bool) -> Result<(), String> {
+        put_empty(
+            &self.url(&format!("/repositories/{id}/favorite")),
+            &FavoriteRepositoryRequest { favorite },
+        )
+        .await
     }
 
     pub async fn directories(&self, path: Option<&str>) -> Result<DirectoryList, String> {

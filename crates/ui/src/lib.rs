@@ -421,6 +421,29 @@ pub fn app() -> Element {
                                 Err(error) => notice.set(error),
                             }
                         });
+                    },
+                    on_favorite: move |(repository_id, favorite): (String, bool)| {
+                        let api_client = api.read().clone();
+                        spawn(async move {
+                            match api_client.set_repository_favorite(&repository_id, favorite).await {
+                                Ok(()) => {
+                                    let current_workspace = { workspace.read().clone() };
+                                    if let Some(mut current) = current_workspace {
+                                        if current.repository.id == repository_id {
+                                            current.repository.favorite = favorite;
+                                            workspace.set(Some(current));
+                                        }
+                                    }
+                                    notice.set(if favorite {
+                                        "Repository marked as favorite".to_string()
+                                    } else {
+                                        "Repository removed from favorites".to_string()
+                                    });
+                                    load_repositories(api_client, repositories, notice);
+                                }
+                                Err(error) => notice.set(error),
+                            }
+                        });
                     }
                 }
 
@@ -3662,6 +3685,7 @@ fn RepositorySelector(
     selected_repository_id: String,
     current_branch: String,
     on_open: EventHandler<String>,
+    on_favorite: EventHandler<(String, bool)>,
 ) -> Element {
     let selected_repository = repositories
         .iter()
@@ -3675,7 +3699,23 @@ fn RepositorySelector(
 
     rsx! {
         section { class: "fork-repository-selector shrink-0 border-b border-zinc-800",
-            label { class: "fork-repository-label", "Repository" }
+            div { class: "fork-repository-selector-head",
+                label { class: "fork-repository-label", "Repository" }
+                if let Some(repository) = selected_repository.clone() {
+                    button {
+                        class: if repository.favorite { "fork-repository-favorite fork-repository-favorite-active" } else { "fork-repository-favorite" },
+                        title: if repository.favorite { "Remove from favorites" } else { "Add to favorites" },
+                        onclick: move |_| on_favorite.call((repository.id.clone(), !repository.favorite)),
+                        if repository.favorite { "Favorite" } else { "Mark favorite" }
+                    }
+                } else {
+                    button {
+                        class: "fork-repository-favorite",
+                        disabled: true,
+                        "Mark favorite"
+                    }
+                }
+            }
             div { class: "fork-repository-select-wrap",
                 select {
                     class: "fork-repository-select",
@@ -4942,6 +4982,10 @@ fn BasicGitToolsPanel(
                     ToolButton { label: "Create Tag".to_string(), action: ToolAction::CreateTag, on_action: on_tool_action }
                     ToolButton { label: "Delete Tag".to_string(), action: ToolAction::DeleteTag, on_action: on_tool_action }
                     ToolButton { label: "List Tags".to_string(), action: ToolAction::Tags, on_action: on_tool_action }
+                    ToolButton { label: "Tree at Revision".to_string(), action: ToolAction::TreeAtRevision, on_action: on_tool_action }
+                    ToolButton { label: "Reflog".to_string(), action: ToolAction::Reflog, on_action: on_tool_action }
+                    ToolButton { label: "Reset Mixed".to_string(), action: ToolAction::ResetMixed, on_action: on_tool_action }
+                    ToolButton { label: "Reset Hard".to_string(), action: ToolAction::ResetHard, on_action: on_tool_action }
                 }
             }
 
@@ -5030,12 +5074,25 @@ fn BasicGitToolsPanel(
                     ToolButton { label: "List Remotes".to_string(), action: ToolAction::Remotes, on_action: on_tool_action }
                     ToolButton { label: "Add Remote".to_string(), action: ToolAction::AddRemote, on_action: on_tool_action }
                     ToolButton { label: "Delete Remote".to_string(), action: ToolAction::DeleteRemote, on_action: on_tool_action }
+                    ToolButton { label: "Prune Remote".to_string(), action: ToolAction::PruneRemote, on_action: on_tool_action }
                     ToolButton { label: "Delete Remote Branch".to_string(), action: ToolAction::DeleteRemoteBranch, on_action: on_tool_action }
                     ToolButton { label: "Set Upstream".to_string(), action: ToolAction::SetUpstream, on_action: on_tool_action }
+                    ToolButton { label: "Force Lease Push".to_string(), action: ToolAction::PushForceWithLease, on_action: on_tool_action }
+                    ToolButton { label: "GitHub Links".to_string(), action: ToolAction::GithubLinks, on_action: on_tool_action }
                     ToolButton { label: "Submodules".to_string(), action: ToolAction::Submodules, on_action: on_tool_action }
                     ToolButton { label: "Submodule Init".to_string(), action: ToolAction::SubmoduleInit, on_action: on_tool_action }
                     ToolButton { label: "Submodule Update".to_string(), action: ToolAction::SubmoduleUpdate, on_action: on_tool_action }
                     ToolButton { label: "Submodule Sync".to_string(), action: ToolAction::SubmoduleSync, on_action: on_tool_action }
+                    ToolButton { label: "LFS".to_string(), action: ToolAction::Lfs, on_action: on_tool_action }
+                    ToolButton { label: "LFS Install".to_string(), action: ToolAction::LfsInstall, on_action: on_tool_action }
+                    ToolButton { label: "LFS Track".to_string(), action: ToolAction::LfsTrack, on_action: on_tool_action }
+                    ToolButton { label: "LFS Untrack".to_string(), action: ToolAction::LfsUntrack, on_action: on_tool_action }
+                    ToolButton { label: "LFS Pull".to_string(), action: ToolAction::LfsPull, on_action: on_tool_action }
+                    ToolButton { label: "LFS Push".to_string(), action: ToolAction::LfsPush, on_action: on_tool_action }
+                    ToolButton { label: "Develop".to_string(), action: ToolAction::GitFlowDevelop, on_action: on_tool_action }
+                    ToolButton { label: "Feature".to_string(), action: ToolAction::GitFlowFeature, on_action: on_tool_action }
+                    ToolButton { label: "Release".to_string(), action: ToolAction::GitFlowRelease, on_action: on_tool_action }
+                    ToolButton { label: "Hotfix".to_string(), action: ToolAction::GitFlowHotfix, on_action: on_tool_action }
                     button { class: "basic-tool-button basic-tool-danger", onclick: move |_| on_delete_repository.call(()), "Remove Repo from Zync" }
                 }
             }
