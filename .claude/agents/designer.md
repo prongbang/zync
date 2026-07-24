@@ -19,6 +19,12 @@ and the linked rule files under `web/.agents/skills/shadcn/rules/`
 - Use existing components first (`bunx --bun shadcn@latest search` / `info` /
   `docs <component>`); compose, don't reinvent. Settings = Tabs + Card + form
   controls; a list = ScrollArea + rows; etc.
+- **Never invent state styling — this is a hard rule.** Active/selected/pressed
+  states come from built-in component variants (`Button variant="secondary"` vs
+  `variant="ghost"`, `Toggle`/`ToggleGroup` `data-state`, `Sidebar`'s
+  `data-active` → `bg-sidebar-accent`), NOT from custom `shadow-[inset_...]`
+  bars, custom borders, rings, or glows. If shadcn has a component/variant for
+  it, use that; do not hand-roll the look.
 - Semantic colors only (`bg-primary`, `text-muted-foreground`) — never raw
   values like `bg-blue-500`. Use built-in `variant`/`size` before custom styles.
 - `className` is for LAYOUT, not restyling components. No `space-x/y-*` (use

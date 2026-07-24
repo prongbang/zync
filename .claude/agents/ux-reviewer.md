@@ -31,6 +31,13 @@ files (grep the diff or the components under `web/apps/web/src`) for:
 - Raw `Input`/`Textarea` inside `InputGroup`; looped `Button` with manual active
   state instead of `ToggleGroup`; missing `data-invalid`/`aria-invalid`.
 
+**Invented state styling (hard finding, not optional polish)**
+- Active/selected/pressed styled by hand — custom `shadow-[inset_...]` bars,
+  custom borders, rings, or glows — where a built-in variant exists
+  (`Button variant="secondary"`/`"ghost"`, `Toggle`/`ToggleGroup` `data-state`,
+  `Sidebar` `data-active`). Flag it and require the built-in variant. Do not
+  downgrade this to "defensible" — the user rejects hand-rolled state looks.
+
 **Composition (composition.md / base-vs-radix.md)**
 - Items rendered outside their Group (`SelectItem` not in `SelectGroup`,
   `TabsTrigger` not in `TabsList`, etc.).

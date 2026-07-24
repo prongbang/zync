@@ -1,11 +1,11 @@
 import { Avatar, AvatarFallback } from "@workspace/ui/components/avatar"
+import { Button } from "@workspace/ui/components/button"
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from "@workspace/ui/components/tooltip"
-import { cn } from "@workspace/ui/lib/utils"
 
 import type { RepositoryRecord } from "@/lib/types"
 
@@ -33,30 +33,20 @@ export function RepoMinibar({
             <Tooltip key={repo.id}>
               <TooltipTrigger
                 render={
-                  <button
+                  <Button
+                    variant={active ? "secondary" : "ghost"}
+                    size="icon"
                     data-testid="repo-minibar-item"
                     data-repo-id={repo.id}
                     aria-label={repo.name}
                     aria-current={active ? "page" : undefined}
                     onClick={() => onSelect(repo.id)}
-                    className={cn(
-                      "focus-visible:ring-ring relative grid size-9 shrink-0 place-items-center rounded-md outline-none focus-visible:ring-2",
-                      active
-                        ? "bg-accent shadow-[inset_2px_0_0_var(--primary)]"
-                        : "hover:bg-accent/50",
-                    )}
+                    className="size-9 shrink-0"
                   />
                 }
               >
                 <Avatar className="size-7 rounded-md">
-                  <AvatarFallback
-                    className={cn(
-                      "rounded-md text-[11px] font-semibold",
-                      active
-                        ? "text-foreground"
-                        : "text-muted-foreground",
-                    )}
-                  >
+                  <AvatarFallback className="rounded-md text-[11px] font-semibold">
                     {monogram(repo.name)}
                   </AvatarFallback>
                 </Avatar>
