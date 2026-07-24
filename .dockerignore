@@ -1,0 +1,13 @@
+/target
+/zync.db
+/.DS_Store
+/.env
+/PLAN.md
+.git
+
+# React frontend (web/)
+web/node_modules
+web/**/node_modules
+web/**/dist
+web/**/.turbo
+web/.turbo

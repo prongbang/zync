@@ -76,58 +76,35 @@ Mobile rules:
 
 ## Visual Language
 
-The UI should feel closer to a native macOS/Windows Git client than a web dashboard, but with the dark glass teal palette from the latest reference image.
+The UI should feel closer to a native macOS/Windows Git client than a web dashboard. It uses shadcn/ui's stock **neutral dark theme** — a calm grayscale surface where the content (the commit graph, diffs, file lists) provides the only color.
 
-Theme name:
+Theme:
 
-- Glass Teal Dark.
+- shadcn/ui default **neutral** theme (baseColor `neutral`), dark mode. Not a bespoke brand palette — the app should read as a stock shadcn app.
 
-TailwindCSS source:
+Implementation:
 
-- Tailwind is vendored locally at `crates/ui/src/tailwind.min.css` for fast offline rendering.
-- App-specific theme overrides live in `crates/ui/src/style.css`.
-- Prefer Tailwind utility semantics in UI markup, then map frequently used utilities to the theme tokens in `style.css`.
+- The web app (`web/apps/web`) is React 19 + Vite + TypeScript + Tailwind v4, built on shadcn/ui components (`web/packages/ui`, `@workspace/ui`); see the shadcn skill (`web/.agents/skills/shadcn/SKILL.md`) for how components are added and styled.
+- The theme itself is shadcn's default: the `.dark` semantic tokens (`--background`, `--card`, `--primary`, `--muted`, `--accent`, `--destructive`, `--ring`, `--chart-*`) live in `web/packages/ui/src/styles/globals.css` and are all achromatic grayscale in dark mode. `web/apps/web/src/zync-theme.css` does **not** override them — it only defines the functional data-viz tokens shadcn lacks.
+- Always style with shadcn semantic tokens and Tailwind utilities (`bg-primary`, `bg-accent`, `text-muted-foreground`, `bg-card`, `border-border`, `text-destructive`, `ring-ring`, `Badge` variants). The `--zync-*` custom properties are ONLY for the two functional surfaces where distinct colors carry meaning — never as a general escape hatch or brand accent.
 
-Palette intent:
-
-- Canvas: `bg-black`, `bg-neutral-950`, and `bg-zinc-950` should read as almost black, not blue.
-- Pane surfaces: `bg-zinc-900`, `bg-slate-900`, and `bg-zinc-800/80` should read as charcoal glass.
-- Primary accent: `teal-400`, `teal-300`, and `emerald-400` for active branch, selected rows, primary actions, focus rings, graph emphasis, and sync state.
-- Secondary highlights: `amber-400` for attention and added files, `rose-400` or coral for destructive/conflict states, and `violet-400` for untracked/secondary graph lanes.
-- Text: `zinc-50` for primary labels, `zinc-300` for normal dense UI text, and `zinc-500` for muted metadata.
-
-Theme tokens:
+Functional (data-viz) tokens — the only `--zync-*` that remain, defined in `web/apps/web/src/zync-theme.css`:
 
 ```css
---theme-void: #020305;
---theme-ink: #0b0d12;
---theme-panel: #1a1b22;
---theme-panel-raised: #22232c;
---theme-card: #242530;
---theme-border: rgba(255, 255, 255, 0.08);
---theme-border-strong: rgba(255, 255, 255, 0.14);
---theme-text: #f6f7fb;
---theme-text-soft: #dfe3ee;
---theme-muted: #8b8d9a;
---theme-muted-strong: #b6bac8;
---theme-teal: #26d0bd;
---theme-teal-strong: #32f1da;
---theme-teal-soft: rgba(38, 208, 189, 0.18);
---theme-mint: #7cf6df;
---theme-amber: #f7b955;
---theme-coral: #f0746a;
---theme-violet: #a76cf5;
---theme-blue: #5aa7ff;
+/* Commit-graph lane palette (index % 7) — distinguishes git branch lanes. */
+--zync-lane-0 … --zync-lane-6;
+/* Diff highlighting — added (green), removed (red), hunk (muted neutral). */
+--zync-diff-added-bg / --zync-diff-added-fg;
+--zync-diff-removed-bg / --zync-diff-removed-fg;
+--zync-diff-hunk-bg / --zync-diff-hunk-fg;
 ```
 
 Color rules:
 
-- Do not make the app blue-dominant. Blue is allowed only as a small graph/status supporting color.
-- Teal is the main product accent and should be the first choice for active, selected, connected, focused, and primary states.
-- Amber is for attention, warning, and added-file badges.
-- Coral is for destructive actions, conflicts, deleted files, and stopped operations.
-- Violet is for untracked files, secondary graph lanes, and optional collaboration signals.
-- Keep separators subtle and one-pixel. Use glow sparingly around active controls, not around whole page sections.
+- The app is neutral grayscale. Active, selected, connected, focused, and primary states use shadcn semantic tokens (`bg-primary`/`bg-accent`/`ring`), which are neutral in the default dark theme — no colored brand accent.
+- Destructive/conflict/offline states use `text-destructive`/`bg-destructive`.
+- Color appears only in the data: commit-graph lanes (functional lane palette) and diff add/remove highlighting. Do not introduce brand color elsewhere.
+- Keep separators subtle and one-pixel. Prefer flat surfaces over glow.
 
 Typography:
 

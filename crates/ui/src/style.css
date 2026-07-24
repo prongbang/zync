@@ -1670,7 +1670,7 @@ code,
 .commit-list-header,
 .commit-list-row {
   display: grid;
-  grid-template-columns: 76px 104px minmax(0, 1fr) 132px;
+  grid-template-columns: 96px minmax(0, 1fr) 118px 76px 128px;
   align-items: center;
   column-gap: 0.65rem;
 }
@@ -1688,7 +1688,7 @@ code,
 }
 
 .commit-list-row {
-  min-height: 34px;
+  height: 34px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.055);
   color: var(--theme-text-soft);
   cursor: pointer;
@@ -1720,58 +1720,308 @@ code,
 }
 
 .commit-list-message {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
   color: var(--theme-text);
   font-weight: 620;
 }
 
 .commit-list-author {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
   color: var(--theme-muted);
 }
 
-.graph-lane-strip {
+.commit-avatar {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: var(--theme-panel);
+}
+
+.commit-author-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fork-avatar-img {
+  object-fit: cover;
+  padding: 0;
+}
+
+.commit-graph-cell {
+  height: 34px;
+  overflow: hidden;
+}
+
+.graph-lane-svg {
+  display: block;
+  height: 34px;
+}
+
+.commit-list-date {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--theme-muted);
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.commit-message-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commit-ref {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--theme-border-strong);
+  border-radius: 4px;
+  padding: 0 0.34rem;
+  font-size: 0.66rem;
+  font-weight: 700;
+  line-height: 1.35;
+  letter-spacing: 0.01em;
+  color: var(--theme-muted-strong);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.commit-ref-head {
+  border-color: rgba(38, 208, 189, 0.65);
+  background: rgba(38, 208, 189, 0.16);
+  color: var(--theme-teal-strong);
+}
+
+.commit-ref-local {
+  border-color: rgba(38, 208, 189, 0.4);
+  color: var(--theme-teal);
+}
+
+.commit-ref-remote {
+  border-color: rgba(167, 108, 245, 0.45);
+  color: var(--theme-violet);
+}
+
+.commit-ref-tag {
+  border-color: rgba(247, 185, 85, 0.45);
+  color: var(--theme-amber);
+}
+
+.commit-ref-more {
+  color: var(--theme-muted);
+}
+
+.diff-word-removed {
+  background: rgba(240, 116, 106, 0.32);
+  border-radius: 2px;
+}
+
+.diff-word-added {
+  background: rgba(52, 211, 153, 0.3);
+  border-radius: 2px;
+}
+
+.fork-ref-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.2rem;
+}
+
+.fork-row-badge-behind {
+  color: var(--theme-amber);
+}
+
+.repo-stats-overview {
   display: grid;
-  grid-auto-columns: 12px;
-  grid-auto-flow: column;
-  height: 34px;
-  justify-content: start;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 0.6rem;
 }
 
-.graph-lane {
-  position: relative;
-  height: 34px;
-  width: 12px;
+.repo-stats-card {
+  border: 1px solid var(--theme-border);
+  border-radius: 8px;
+  background: rgba(36, 37, 48, 0.72);
+  padding: 0.6rem 0.75rem;
 }
 
-.graph-lane-line {
-  position: absolute;
-  left: 50%;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  opacity: 0.88;
-  transform: translateX(-50%);
+.repo-stats-number {
+  color: var(--theme-text);
+  font-size: 1.15rem;
+  font-weight: 720;
+  font-variant-numeric: tabular-nums;
 }
 
-.graph-lane-merge {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  height: 2px;
-  width: 12px;
-  opacity: 0.78;
+.repo-stats-date {
+  color: var(--theme-text-soft);
+  font-size: 0.8rem;
 }
 
-.graph-lane-dot {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  z-index: 1;
-  height: 9px;
-  width: 9px;
-  border: 2px solid var(--theme-void);
+.repo-stats-block {
+  margin-top: 1rem;
+}
+
+.repo-stats-heading {
+  color: var(--theme-muted-strong);
+  font-size: 0.72rem;
+  font-weight: 760;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.45rem;
+  text-transform: uppercase;
+}
+
+.repo-stats-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--theme-border);
+  border-radius: 8px;
+  background: rgba(2, 3, 5, 0.55);
+}
+
+.repo-stats-author-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 160px) minmax(0, 1fr) 52px;
+  align-items: center;
+  column-gap: 0.6rem;
+  min-height: 26px;
+  font-size: 0.78rem;
+}
+
+.repo-stats-author-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--theme-text-soft);
+}
+
+.repo-stats-author-track {
+  height: 7px;
   border-radius: 999px;
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.06);
-  transform: translate(-50%, -50%);
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.repo-stats-author-bar {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--theme-teal);
+  opacity: 0.85;
+}
+
+.repo-stats-author-count {
+  color: var(--theme-muted);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.repo-tab-strip {
+  display: flex;
+  flex: none;
+  align-items: stretch;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--theme-border);
+  background: rgba(11, 13, 18, 0.92);
+  scrollbar-width: none;
+}
+
+.repo-tab {
+  flex: none;
+  padding: 0 1rem;
+  min-height: 30px;
+  border-right: 1px solid var(--theme-border);
+  color: var(--theme-muted);
+  font-size: 0.76rem;
+  font-weight: 640;
+  white-space: nowrap;
+  cursor: pointer;
+  background: transparent;
+}
+
+.repo-tab:hover {
+  color: var(--theme-text-soft);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.repo-tab-active {
+  color: var(--theme-text);
+  background: var(--theme-panel);
+  box-shadow: inset 0 -2px 0 var(--theme-teal);
+}
+
+.blame-row {
+  display: grid;
+  grid-template-columns: 44px 70px 110px minmax(0, 1fr);
+  column-gap: 0.6rem;
+  padding: 0 0.75rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.blame-row:hover {
+  background: rgba(38, 208, 189, 0.06);
+}
+
+.blame-line-no {
+  color: var(--theme-muted);
+  text-align: right;
+  user-select: none;
+}
+
+.blame-commit {
+  color: var(--theme-mint);
+}
+
+.blame-author {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--theme-muted-strong);
+}
+
+.blame-code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+  color: var(--theme-text-soft);
+}
+
+.branch-dialog-radio {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 24px;
+  color: var(--theme-text-soft);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.branch-dialog-radio input[type="radio"] {
+  accent-color: var(--theme-teal);
+}
+
+.branch-dialog-radio input[type="radio"]:disabled + span {
+  opacity: 0.45;
+}
+
+.branch-dialog-radio-danger {
+  color: var(--theme-coral);
 }
 
 .fork-detail-panel {
@@ -2625,4 +2875,294 @@ code,
 .app-shell .sidebar-step-splitter,
 .app-shell .grid-splitter {
   display: none;
+}
+
+/* ---------------------------------------------------------------------------
+ * Glass Teal Dark polish pass
+ * ------------------------------------------------------------------------ */
+
+/* Thin dark scrollbars everywhere */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.26);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Teal focus ring for keyboard navigation */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid rgba(38, 208, 189, 0.55);
+  outline-offset: 1px;
+}
+
+/* Toolbar: icon-first buttons with a subtle bevel */
+.toolbar-icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  opacity: 0.9;
+}
+
+.fork-toolbar-button {
+  gap: 0.32rem;
+  border: 1px solid transparent;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.fork-toolbar-button:hover:not(:disabled) {
+  border-color: rgba(38, 208, 189, 0.28);
+}
+
+.fork-toolbar-button:active:not(:disabled) {
+  background: rgba(38, 208, 189, 0.2);
+}
+
+/* Commit list: teal insertion bar on the selected row, calmer hover */
+.commit-list-row {
+  transition: background 100ms ease;
+}
+
+.commit-list-row-active {
+  box-shadow: inset 2px 0 0 var(--theme-teal);
+}
+
+/* Avatar placeholders read as intentional chips while images load */
+.commit-avatar {
+  border: 1px solid var(--theme-border);
+  background: var(--theme-panel-raised);
+}
+
+/* Repo tabs: smoother transition, dimmed inactive labels */
+.repo-tab {
+  transition: background 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+
+/* Status bar: live indicator dot */
+.status-bar {
+  color: var(--theme-muted-strong);
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--theme-teal);
+  box-shadow: 0 0 6px rgba(38, 208, 189, 0.75);
+}
+
+/* Dialogs: glass scrim + deeper elevation */
+.branch-dialog-scrim {
+  background: rgba(2, 3, 5, 0.55);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+
+.branch-dialog {
+  border: 1px solid var(--theme-border-strong);
+  box-shadow: 0 24px 64px var(--theme-shadow);
+}
+
+/* Detail tabs and section headers: crisper hierarchy */
+.fork-detail-tabs button {
+  transition: background 120ms ease, color 120ms ease;
+}
+
+/* Sidebar rows: subtle hover and active glow */
+.fork-sidebar-row {
+  transition: background 100ms ease, color 100ms ease;
+}
+
+.fork-sidebar-row-active {
+  box-shadow: inset 2px 0 0 var(--theme-teal);
+}
+
+/* Buttons that act as primary commands share the teal treatment */
+.branch-dialog-primary {
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+
+.branch-dialog-primary:hover {
+  box-shadow: 0 0 0 1px rgba(38, 208, 189, 0.4);
+}
+
+/* Avatars: neutral chip, slight desaturation so photos don't shout */
+.commit-avatar,
+.fork-avatar-img {
+  filter: saturate(0.85);
+}
+
+/* Commit section tabs match the teal pill language of the detail tabs */
+.commit-section-tab-active {
+  background: var(--theme-teal-soft);
+  color: var(--theme-teal-strong);
+}
+
+/* Changes tab: diff mode controls + hunk staging */
+.fork-diff-controls {
+  display: flex;
+  flex: none;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+.fork-diff-toggle {
+  min-height: 22px;
+  padding: 0 0.55rem;
+  border: 1px solid var(--theme-border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--theme-muted);
+  font-size: 0.7rem;
+  font-weight: 660;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.fork-diff-toggle:hover:not(:disabled) {
+  color: var(--theme-text-soft);
+  border-color: var(--theme-border-strong);
+}
+
+.fork-diff-toggle:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.fork-diff-toggle-active {
+  background: var(--theme-teal-soft);
+  border-color: rgba(38, 208, 189, 0.4);
+  color: var(--theme-teal-strong);
+}
+
+.fork-compact-hunk-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.fork-hunk-stage {
+  flex: none;
+  min-height: 20px;
+  padding: 0 0.5rem;
+  border: 1px solid rgba(38, 208, 189, 0.4);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--theme-teal);
+  font-size: 0.68rem;
+  font-weight: 680;
+  cursor: pointer;
+}
+
+.fork-hunk-stage:hover {
+  background: var(--theme-teal-soft);
+  color: var(--theme-teal-strong);
+}
+
+.fork-blame-wrap {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* Commit right-click context menu */
+.commit-list-row {
+  position: relative;
+}
+
+.commit-menu-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: transparent;
+  cursor: default;
+}
+
+.commit-context-menu {
+  position: absolute;
+  left: 220px;
+  top: 28px;
+  z-index: 40;
+  width: 236px;
+  overflow: hidden;
+  border: 1px solid var(--theme-border-strong);
+  border-radius: 8px;
+  background: rgba(26, 27, 34, 0.98);
+  box-shadow: 0 18px 48px var(--theme-shadow);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  padding: 0.25rem 0;
+}
+
+.commit-menu-item {
+  display: block;
+  width: 100%;
+  padding: 0.34rem 0.85rem;
+  border: 0;
+  background: transparent;
+  color: var(--theme-text-soft);
+  font-size: 0.78rem;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.commit-menu-item:hover {
+  background: var(--theme-teal-soft);
+  color: var(--theme-teal-strong);
+}
+
+.commit-menu-danger {
+  color: var(--theme-coral);
+}
+
+.commit-menu-danger:hover {
+  background: rgba(240, 116, 106, 0.14);
+  color: var(--theme-coral);
+}
+
+.commit-menu-divider {
+  height: 1px;
+  margin: 0.25rem 0;
+  background: var(--theme-border);
+}
+
+.commit-menu-section {
+  padding: 0.3rem 0.85rem 0.15rem;
+  color: var(--theme-muted);
+  font-size: 0.64rem;
+  font-weight: 760;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/* Live-sync offline indicator */
+.status-dot-offline {
+  background: var(--theme-coral);
+  box-shadow: 0 0 6px rgba(240, 116, 106, 0.75);
 }

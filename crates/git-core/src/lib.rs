@@ -5,6 +5,7 @@ use git2::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -29,12 +30,26 @@ pub struct FileStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitRef {
+    pub name: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitSummary {
     pub id: String,
     pub summary: String,
     pub author: String,
+    #[serde(default)]
+    pub author_email: String,
+    #[serde(default)]
+    pub committer: String,
+    #[serde(default)]
+    pub committer_email: String,
     pub time: i64,
     pub parents: Vec<String>,
+    #[serde(default)]
+    pub refs: Vec<CommitRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +58,10 @@ pub struct BranchSummary {
     pub is_head: bool,
     pub kind: String,
     pub target: Option<String>,
+    #[serde(default)]
+    pub ahead: Option<usize>,
+    #[serde(default)]
+    pub behind: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +119,29 @@ pub struct LfsSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthorStat {
+    pub name: String,
+    pub commits: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonthStat {
+    pub year: i64,
+    pub month: u32,
+    pub total: usize,
+    pub top: Vec<AuthorStat>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoStats {
+    pub commit_count: usize,
+    pub contributors: Vec<AuthorStat>,
+    pub monthly: Vec<MonthStat>,
+    pub first_commit_time: i64,
+    pub last_commit_time: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StashSummary {
     pub index: usize,
     pub name: String,
@@ -128,6 +170,8 @@ pub struct ConflictDetail {
 pub struct RebaseStep {
     pub commit: String,
     pub action: RebaseAction,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -408,6 +452,23 @@ pub fn branches(path: impl AsRef<Path>) -> anyhow::Result<Vec<BranchSummary>> {
         let (branch, kind) = item?;
         let name = branch.name()?.unwrap_or("unknown").to_string();
         let target = branch.get().target().map(|oid| oid.to_string());
+        let (ahead, behind) = match kind {
+            BranchType::Local => target
+                .as_deref()
+                .and_then(|_| branch.get().target())
+                .and_then(|local_oid| {
+                    branch
+                        .upstream()
+                        .ok()
+                        .and_then(|upstream| upstream.get().target())
+                        .and_then(|upstream_oid| {
+                            repo.graph_ahead_behind(local_oid, upstream_oid).ok()
+                        })
+                })
+                .map(|(ahead, behind)| (Some(ahead), Some(behind)))
+                .unwrap_or((None, None)),
+            BranchType::Remote => (None, None),
+        };
         branches.push(BranchSummary {
             name,
             is_head: branch.is_head(),
@@ -417,6 +478,8 @@ pub fn branches(path: impl AsRef<Path>) -> anyhow::Result<Vec<BranchSummary>> {
             }
             .to_string(),
             target,
+            ahead,
+            behind,
         });
     }
     Ok(branches)
@@ -454,25 +517,215 @@ pub fn delete_tag(path: impl AsRef<Path>, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn commit_graph(path: impl AsRef<Path>, limit: usize) -> anyhow::Result<Vec<CommitSummary>> {
-    let repo = Repository::open(path.as_ref())?;
-    let mut walk = repo.revwalk()?;
-    walk.push_head()?;
-    walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)?;
-
-    let mut commits = Vec::new();
-    for oid in walk.take(limit) {
-        let oid = oid?;
-        let commit = repo.find_commit(oid)?;
-        commits.push(CommitSummary {
-            id: oid.to_string(),
-            summary: commit.summary().unwrap_or("").to_string(),
-            author: commit.author().name().unwrap_or("").to_string(),
-            time: commit.time().seconds(),
-            parents: commit.parent_ids().map(|id| id.to_string()).collect(),
+fn commit_ref_map(repo: &Repository) -> HashMap<Oid, Vec<CommitRef>> {
+    let mut map: HashMap<Oid, Vec<CommitRef>> = HashMap::new();
+    let head_target = repo
+        .head()
+        .ok()
+        .filter(|head| head.is_branch())
+        .and_then(|head| head.shorthand().map(ToOwned::to_owned));
+    let Ok(references) = repo.references() else {
+        return map;
+    };
+    for reference in references.flatten() {
+        let Some(name) = reference.shorthand().map(ToOwned::to_owned) else {
+            continue;
+        };
+        let kind = if reference.is_branch() {
+            if head_target.as_deref() == Some(name.as_str()) {
+                "head"
+            } else {
+                "local"
+            }
+        } else if reference.is_remote() {
+            "remote"
+        } else if reference.is_tag() {
+            "tag"
+        } else {
+            continue;
+        };
+        let Ok(commit) = reference.peel_to_commit() else {
+            continue;
+        };
+        map.entry(commit.id()).or_default().push(CommitRef {
+            name,
+            kind: kind.to_string(),
         });
     }
+    for refs in map.values_mut() {
+        refs.sort_by(|a, b| ref_kind_order(&a.kind).cmp(&ref_kind_order(&b.kind)));
+    }
+    map
+}
+
+fn ref_kind_order(kind: &str) -> u8 {
+    match kind {
+        "head" => 0,
+        "local" => 1,
+        "remote" => 2,
+        "tag" => 3,
+        _ => 4,
+    }
+}
+
+fn summarize_commit(commit: &git2::Commit, refs: Vec<CommitRef>) -> CommitSummary {
+    CommitSummary {
+        id: commit.id().to_string(),
+        summary: commit.summary().unwrap_or("").to_string(),
+        author: commit.author().name().unwrap_or("").to_string(),
+        author_email: commit.author().email().unwrap_or("").to_string(),
+        committer: commit.committer().name().unwrap_or("").to_string(),
+        committer_email: commit.committer().email().unwrap_or("").to_string(),
+        time: commit.time().seconds(),
+        parents: commit.parent_ids().map(|id| id.to_string()).collect(),
+        refs,
+    }
+}
+
+pub fn commit_graph(
+    path: impl AsRef<Path>,
+    limit: usize,
+    cursor: Option<&str>,
+) -> anyhow::Result<Vec<CommitSummary>> {
+    let repo = Repository::open(path.as_ref())?;
+    let mut walk = repo.revwalk()?;
+    let cursor_oid = match cursor {
+        Some(cursor) => {
+            let oid = Oid::from_str(cursor)?;
+            walk.push(oid)?;
+            Some(oid)
+        }
+        None => {
+            walk.push_head()?;
+            None
+        }
+    };
+    walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)?;
+
+    let mut ref_map = commit_ref_map(&repo);
+    let mut commits = Vec::new();
+    for oid in walk {
+        let oid = oid?;
+        if Some(oid) == cursor_oid {
+            // The cursor commit was already returned on the previous page;
+            // the next page starts after it.
+            continue;
+        }
+        let commit = repo.find_commit(oid)?;
+        let refs = ref_map.remove(&oid).unwrap_or_default();
+        commits.push(summarize_commit(&commit, refs));
+        if commits.len() >= limit {
+            break;
+        }
+    }
     Ok(commits)
+}
+
+pub fn repo_stats(path: impl AsRef<Path>, max_commits: usize) -> anyhow::Result<RepoStats> {
+    let repo = Repository::open(path.as_ref())?;
+    let mut walk = match repo.revwalk() {
+        Ok(walk) => walk,
+        Err(_) => return Ok(empty_repo_stats()),
+    };
+    if walk.push_head().is_err() {
+        return Ok(empty_repo_stats());
+    }
+    walk.set_sorting(git2::Sort::TIME)?;
+
+    let mut commit_count = 0usize;
+    let mut author_totals: HashMap<String, usize> = HashMap::new();
+    let mut month_totals: HashMap<(i64, u32), HashMap<String, usize>> = HashMap::new();
+    let mut first_commit_time = i64::MAX;
+    let mut last_commit_time = i64::MIN;
+
+    for oid in walk.take(max_commits) {
+        let oid = oid?;
+        let commit = repo.find_commit(oid)?;
+        let author_name = commit.author().name().unwrap_or("").to_string();
+        let time = commit.time().seconds();
+
+        commit_count += 1;
+        *author_totals.entry(author_name.clone()).or_insert(0) += 1;
+        first_commit_time = first_commit_time.min(time);
+        last_commit_time = last_commit_time.max(time);
+
+        let (year, month, _day) = civil_from_unix_time(time);
+        *month_totals
+            .entry((year, month))
+            .or_default()
+            .entry(author_name)
+            .or_insert(0) += 1;
+    }
+
+    if commit_count == 0 {
+        return Ok(empty_repo_stats());
+    }
+
+    let mut contributors: Vec<AuthorStat> = author_totals
+        .into_iter()
+        .map(|(name, commits)| AuthorStat { name, commits })
+        .collect();
+    contributors.sort_by(|a, b| b.commits.cmp(&a.commits).then_with(|| a.name.cmp(&b.name)));
+
+    let mut month_keys: Vec<(i64, u32)> = month_totals.keys().copied().collect();
+    month_keys.sort();
+    if month_keys.len() > 24 {
+        let skip = month_keys.len() - 24;
+        month_keys.drain(0..skip);
+    }
+
+    let monthly = month_keys
+        .into_iter()
+        .map(|(year, month)| {
+            let authors = month_totals.remove(&(year, month)).unwrap_or_default();
+            let total = authors.values().sum();
+            let mut top: Vec<AuthorStat> = authors
+                .into_iter()
+                .map(|(name, commits)| AuthorStat { name, commits })
+                .collect();
+            top.sort_by(|a, b| b.commits.cmp(&a.commits).then_with(|| a.name.cmp(&b.name)));
+            top.truncate(5);
+            MonthStat {
+                year,
+                month,
+                total,
+                top,
+            }
+        })
+        .collect();
+
+    Ok(RepoStats {
+        commit_count,
+        contributors,
+        monthly,
+        first_commit_time,
+        last_commit_time,
+    })
+}
+
+fn empty_repo_stats() -> RepoStats {
+    RepoStats {
+        commit_count: 0,
+        contributors: Vec::new(),
+        monthly: Vec::new(),
+        first_commit_time: 0,
+        last_commit_time: 0,
+    }
+}
+
+// Howard Hinnant's civil-from-days algorithm; dates rendered in UTC.
+fn civil_from_unix_time(seconds: i64) -> (i64, u32, u32) {
+    let days = seconds.div_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (year, month, day)
 }
 
 pub fn create_branch(path: impl AsRef<Path>, name: &str, checkout: bool) -> anyhow::Result<()> {
@@ -623,6 +876,15 @@ pub fn diff_commit(path: impl AsRef<Path>, commit_id: &str) -> anyhow::Result<St
     diff_to_patch(&diff)
 }
 
+pub fn diff_commit_to_workdir(path: impl AsRef<Path>, commit_id: &str) -> anyhow::Result<String> {
+    let repo = Repository::open(path.as_ref())?;
+    let oid = git2::Oid::from_str(commit_id)?;
+    let commit = repo.find_commit(oid)?;
+    let tree = commit.tree()?;
+    let diff = repo.diff_tree_to_workdir_with_index(Some(&tree), None)?;
+    diff_to_patch(&diff)
+}
+
 pub fn blame_file(path: impl AsRef<Path>, file_path: &str) -> anyhow::Result<Vec<BlameLine>> {
     let repo = Repository::open(path.as_ref())?;
     let blame = repo.blame_file(Path::new(file_path), None)?;
@@ -670,13 +932,7 @@ pub fn file_history(
         options.pathspec(file_path);
         let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut options))?;
         if diff.deltas().len() > 0 {
-            commits.push(CommitSummary {
-                id: oid.to_string(),
-                summary: commit.summary().unwrap_or("").to_string(),
-                author: commit.author().name().unwrap_or("").to_string(),
-                time: commit.time().seconds(),
-                parents: commit.parent_ids().map(|id| id.to_string()).collect(),
-            });
+            commits.push(summarize_commit(&commit, Vec::new()));
         }
         if commits.len() >= limit {
             break;
@@ -859,6 +1115,14 @@ pub fn cherry_pick(path: impl AsRef<Path>, commit_ids: &[String]) -> anyhow::Res
 
 pub fn cherry_pick_abort(path: impl AsRef<Path>) -> anyhow::Result<()> {
     let repo = Repository::open(path.as_ref())?;
+    let has_conflicts = repo.index()?.has_conflicts();
+    if repo.state() == git2::RepositoryState::Clean && !has_conflicts {
+        anyhow::bail!("no cherry-pick in progress");
+    }
+    // cleanup_state alone leaves the conflicted index/workdir behind;
+    // restore HEAD like `git cherry-pick --abort` does.
+    let head = repo.head()?.peel_to_commit()?;
+    repo.reset(head.as_object(), ResetType::Hard, None)?;
     repo.cleanup_state()?;
     Ok(())
 }
@@ -888,7 +1152,7 @@ pub fn interactive_rebase(
                 result.dropped.push(step.commit.clone());
             }
             RebaseAction::Pick => {
-                replay_commit(&repo, &step.commit, ReplayMode::Pick)?;
+                replay_commit(&repo, &step.commit, ReplayMode::Pick(step.message.clone()))?;
                 result.head = head_oid(&repo);
                 result.applied.push(step.commit.clone());
             }
@@ -1085,6 +1349,13 @@ fn repo_info(repo: &Repository) -> anyhow::Result<RepoInfo> {
 fn diff_to_patch(diff: &git2::Diff<'_>) -> anyhow::Result<String> {
     let mut output = Vec::new();
     diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
+        // line.content() excludes the origin marker; without it the output is
+        // not a valid unified diff (git2::Diff::from_buffer rejects it and the
+        // UI cannot tell additions from removals).
+        match line.origin() {
+            '+' | '-' | ' ' => output.push(line.origin() as u8),
+            _ => {}
+        }
         output.extend_from_slice(line.content());
         true
     })?;
@@ -1103,7 +1374,7 @@ fn conflict_blob(repo: &Repository, entry: Option<&git2::IndexEntry>) -> anyhow:
 }
 
 enum ReplayMode {
-    Pick,
+    Pick(Option<String>),
     Squash,
     Fixup,
 }
@@ -1127,8 +1398,11 @@ fn replay_commit(repo: &Repository, commit_id: &str, mode: ReplayMode) -> anyhow
     }
 
     match mode {
-        ReplayMode::Pick => {
-            commit_current_index(repo, commit.message().unwrap_or("Rebased commit"))?;
+        ReplayMode::Pick(message_override) => {
+            let message = message_override
+                .as_deref()
+                .unwrap_or_else(|| commit.message().unwrap_or("Rebased commit"));
+            commit_current_index(repo, message)?;
         }
         ReplayMode::Squash => {
             let head = repo.head()?.peel_to_commit()?;

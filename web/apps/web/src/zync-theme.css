@@ -1,0 +1,33 @@
+/*
+ * Functional (data-viz) color tokens only.
+ *
+ * The app uses shadcn/ui's DEFAULT neutral theme — the semantic tokens
+ * (background/foreground/primary/accent/muted/destructive/...) come from
+ * packages/ui/src/styles/globals.css (`:root` light + `.dark` neutral). This
+ * file no longer overrides them; there is no brand accent.
+ *
+ * The tokens below are NOT theme colors — they are functional data-viz values
+ * that shadcn does not provide and that must stay stable regardless of theme:
+ *   - Commit-graph lane palette: distinguishes independent git branch lanes,
+ *     akin to chart series colors (see helpers.ts `laneColor`).
+ *   - Diff highlighting: added (green), removed (destructive red), and hunk
+ *     headers (muted neutral). This is the data-viz exception in styling.md.
+ */
+
+:root {
+  /* Diff surfaces: added (green), removed (destructive red), hunk (muted). */
+  --zync-diff-added-bg: rgba(52, 211, 153, 0.2);
+  --zync-diff-added-fg: #d1fae5;
+  --zync-diff-removed-bg: rgba(240, 116, 106, 0.25);
+  --zync-diff-removed-fg: #fee2e2;
+  --zync-diff-hunk-bg: rgba(255, 255, 255, 0.06);
+  --zync-diff-hunk-fg: #a1a1aa;
+  /* Commit-graph lane palette (index % 7) — functional, chart-like hues. */
+  --zync-lane-0: #2dd4bf;
+  --zync-lane-1: #f59e0b;
+  --zync-lane-2: #a78bfa;
+  --zync-lane-3: #fb7185;
+  --zync-lane-4: #38bdf8;
+  --zync-lane-5: #34d399;
+  --zync-lane-6: #f472b6;
+}

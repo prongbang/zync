@@ -1,3 +1,4 @@
+use crate::websocket::WorkspaceEvent;
 use crate::AppState;
 use axum::{
     extract::{Path, Query, State},
@@ -22,6 +23,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(
             "/repositories/:id/git/diff/commit/:commit_id",
             get(diff_commit),
+        )
+        .route(
+            "/repositories/:id/git/diff/compare/:commit_id",
+            get(diff_compare_commit),
         )
         .route("/repositories/:id/git/fetch", post(fetch))
         .route("/repositories/:id/git/pull", post(pull))
@@ -60,6 +65,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/repositories/:id/git/tags/delete", post(delete_tag))
         .route("/repositories/:id/git/revert", post(revert_commit))
         .route("/repositories/:id/git/graph", get(commit_graph))
+        .route("/repositories/:id/git/stats", get(repo_stats))
         .route("/repositories/:id/git/blame", get(blame))
         .route("/repositories/:id/git/history/file", get(file_history))
         .route("/repositories/:id/git/tree", get(tree_at_revision))
@@ -197,6 +203,8 @@ struct RebaseRequest {
 struct RebaseStepRequest {
     commit: String,
     action: zync_git_core::RebaseAction,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -225,6 +233,7 @@ async fn add(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     zync_git_core::add(repository.path, &request.files).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff"]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -235,6 +244,7 @@ async fn unstage(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     zync_git_core::unstage(repository.path, &request.files).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff"]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -245,6 +255,7 @@ async fn discard(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     zync_git_core::discard(repository.path, &request.files).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff"]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -256,6 +267,7 @@ async fn stage_patch(
     let repository = repository(&state, &id)?;
     zync_git_core::stage_patch(repository.path, request.patch.as_bytes())
         .map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff"]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -288,6 +300,7 @@ async fn commit(
         )
     }
     .map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff", "commits", "branches"]);
     Ok(Json(serde_json::json!({ "commit": oid })))
 }
 
@@ -297,8 +310,16 @@ async fn diff_workdir(
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::diff_workdir_path(repository.path, query.get("path").map(String::as_str))
-        .map_err(internal_error)
+    let path = query.get("path").map(String::as_str);
+    let patch = zync_git_core::diff_workdir_path(repository.path, path).map_err(internal_error)?;
+    // Only cap whole-tree diffs: path-scoped diffs feed the staging UI and
+    // must never be truncated, or the client would build a stage patch from
+    // incomplete input.
+    Ok(if path.is_none() {
+        cap_diff(patch, max_bytes(&query))
+    } else {
+        patch
+    })
 }
 
 async fn diff_staged(
@@ -307,16 +328,72 @@ async fn diff_staged(
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::diff_staged_path(repository.path, query.get("path").map(String::as_str))
-        .map_err(internal_error)
+    let path = query.get("path").map(String::as_str);
+    let patch = zync_git_core::diff_staged_path(repository.path, path).map_err(internal_error)?;
+    // Same rule as diff_workdir: leave path-scoped (staging) diffs untouched.
+    Ok(if path.is_none() {
+        cap_diff(patch, max_bytes(&query))
+    } else {
+        patch
+    })
 }
 
 async fn diff_commit(
     State(state): State<Arc<AppState>>,
     Path((id, commit_id)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::diff_commit(repository.path, &commit_id).map_err(internal_error)
+    let patch = zync_git_core::diff_commit(repository.path, &commit_id).map_err(internal_error)?;
+    Ok(cap_diff(patch, max_bytes(&query)))
+}
+
+async fn diff_compare_commit(
+    State(state): State<Arc<AppState>>,
+    Path((id, commit_id)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let patch =
+        zync_git_core::diff_commit_to_workdir(repository.path, &commit_id).map_err(internal_error)?;
+    Ok(cap_diff(patch, max_bytes(&query)))
+}
+
+const DEFAULT_DIFF_MAX_BYTES: usize = 5_000_000;
+const MIN_DIFF_MAX_BYTES: usize = 65_536;
+const MAX_DIFF_MAX_BYTES: usize = 50_000_000;
+
+/// Reads the optional `max_bytes` query param, clamped to a sane range.
+fn max_bytes(query: &HashMap<String, String>) -> usize {
+    query
+        .get("max_bytes")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_DIFF_MAX_BYTES)
+        .clamp(MIN_DIFF_MAX_BYTES, MAX_DIFF_MAX_BYTES)
+}
+
+/// Truncates a whole-tree diff at the last newline before `max_bytes`,
+/// appending a note so clients know the patch was cut off. Never call this
+/// on path-scoped diffs used to build stage patches.
+fn cap_diff(patch: String, max_bytes: usize) -> String {
+    if patch.len() <= max_bytes {
+        return patch;
+    }
+    // Clamp to the nearest valid char boundary at or before max_bytes so we
+    // never slice inside a multi-byte UTF-8 sequence.
+    let mut boundary = max_bytes.min(patch.len());
+    while boundary > 0 && !patch.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    let cut = patch[..boundary]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let mut truncated = patch[..cut].to_string();
+    truncated.push_str(&format!(
+        "\n... [diff truncated: exceeded {max_bytes} bytes; pass ?max_bytes= to raise]"
+    ));
+    truncated
 }
 
 async fn fetch(
@@ -325,7 +402,10 @@ async fn fetch(
     Json(request): Json<RemoteRequest>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::fetch(repository.path, request.remote.as_deref()).map_err(internal_error)
+    let result = zync_git_core::fetch(repository.path, request.remote.as_deref())
+        .map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["branches", "commits"]);
+    Ok(result)
 }
 
 async fn pull(
@@ -334,12 +414,18 @@ async fn pull(
     Json(request): Json<RemoteRequest>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::pull(
+    let result = zync_git_core::pull(
         repository.path,
         request.remote.as_deref(),
         request.branch.as_deref(),
     )
-    .map_err(internal_error)
+    .map_err(internal_error)?;
+    broadcast_git_change(
+        &state,
+        &id,
+        &["status", "diff", "commits", "branches", "conflicts"],
+    );
+    Ok(result)
 }
 
 async fn push(
@@ -348,12 +434,14 @@ async fn push(
     Json(request): Json<RemoteRequest>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::push(
+    let result = zync_git_core::push(
         repository.path,
         request.remote.as_deref(),
         request.branch.as_deref(),
     )
-    .map_err(internal_error)
+    .map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["branches", "commits"]);
+    Ok(result)
 }
 
 async fn remotes(
@@ -378,6 +466,7 @@ async fn add_remote(
         .as_deref()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "url is required".to_string()))?;
     zync_git_core::add_remote(repository.path, name, url).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["branches"]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -389,6 +478,7 @@ async fn delete_remote(
     let repository = repository(&state, &id)?;
     let name = request.remote.as_deref().unwrap_or("origin");
     zync_git_core::delete_remote(repository.path, name).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["branches"]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -399,7 +489,9 @@ async fn prune_remote(
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     let name = request.remote.as_deref().unwrap_or("origin");
-    zync_git_core::prune_remote(repository.path, name).map_err(internal_error)
+    let result = zync_git_core::prune_remote(repository.path, name).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["branches"]);
+    Ok(result)
 }
 
 async fn delete_remote_branch(
@@ -414,6 +506,7 @@ async fn delete_remote_branch(
         .as_deref()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "branch is required".to_string()))?;
     zync_git_core::delete_remote_branch(repository.path, remote, branch).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["branches"]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -428,7 +521,10 @@ async fn push_force_with_lease(
         .branch
         .as_deref()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "branch is required".to_string()))?;
-    zync_git_core::push_force_with_lease(repository.path, remote, branch).map_err(internal_error)
+    let result = zync_git_core::push_force_with_lease(repository.path, remote, branch)
+        .map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["branches", "commits"]);
+    Ok(result)
 }
 
 async fn branches(
@@ -463,6 +559,7 @@ async fn create_branch(
         )
         .map_err(internal_error)?;
     }
+    broadcast_git_change(&state, &id, &["branches"]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -473,6 +570,11 @@ async fn checkout_branch(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     zync_git_core::checkout_branch(repository.path, &request.name).map_err(internal_error)?;
+    broadcast_git_change(
+        &state,
+        &id,
+        &["status", "diff", "commits", "branches", "conflicts"],
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -483,6 +585,11 @@ async fn checkout_revision(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     zync_git_core::checkout_revision(repository.path, &request.revision).map_err(internal_error)?;
+    broadcast_git_change(
+        &state,
+        &id,
+        &["status", "diff", "commits", "branches", "conflicts"],
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -493,6 +600,7 @@ async fn delete_branch(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     zync_git_core::delete_branch(repository.path, &request.name).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["branches"]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -507,6 +615,7 @@ async fn rename_branch(
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "new_name is required".to_string()))?;
     zync_git_core::rename_branch(repository.path, &request.name, &new_name)
         .map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["branches"]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -517,6 +626,11 @@ async fn merge_branch(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     zync_git_core::merge_branch(repository.path, &request.name).map_err(internal_error)?;
+    broadcast_git_change(
+        &state,
+        &id,
+        &["status", "diff", "commits", "branches", "conflicts"],
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -531,7 +645,10 @@ async fn set_upstream(
         .branch
         .as_deref()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "branch is required".to_string()))?;
-    zync_git_core::set_upstream(repository.path, branch, remote, branch).map_err(internal_error)
+    let result = zync_git_core::set_upstream(repository.path, branch, remote, branch)
+        .map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["branches"]);
+    Ok(result)
 }
 
 async fn tags(
@@ -552,6 +669,7 @@ async fn create_tag(
     let repository = repository(&state, &id)?;
     zync_git_core::create_tag(repository.path, &request.name, request.target.as_deref())
         .map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["commits", "branches"]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -562,6 +680,7 @@ async fn delete_tag(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     zync_git_core::delete_tag(repository.path, &request.name).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["commits", "branches"]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -573,6 +692,18 @@ async fn revert_commit(
     let repository = repository(&state, &id)?;
     let commit =
         zync_git_core::revert_commit(repository.path, &request.commit).map_err(internal_error)?;
+    broadcast_git_change(
+        &state,
+        &id,
+        &[
+            "status",
+            "diff",
+            "commits",
+            "branches",
+            "conflicts",
+            "stashes",
+        ],
+    );
     Ok(Json(serde_json::json!({ "commit": commit })))
 }
 
@@ -587,7 +718,23 @@ async fn commit_graph(
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(500)
         .min(5000);
-    zync_git_core::commit_graph(repository.path, limit)
+    let cursor = query.get("cursor").map(String::as_str);
+    zync_git_core::commit_graph(repository.path, limit, cursor)
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn repo_stats(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<zync_git_core::RepoStats>, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let limit = query
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(20_000);
+    zync_git_core::repo_stats(repository.path, limit)
         .map(Json)
         .map_err(internal_error)
 }
@@ -603,7 +750,7 @@ async fn rebase_plan(
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(20)
         .min(200);
-    zync_git_core::commit_graph(repository.path, limit)
+    zync_git_core::commit_graph(repository.path, limit, None)
         .map(Json)
         .map_err(internal_error)
 }
@@ -700,6 +847,18 @@ async fn reset_to_revision(
         request.hard.unwrap_or(false),
     )
     .map_err(internal_error)?;
+    broadcast_git_change(
+        &state,
+        &id,
+        &[
+            "status",
+            "diff",
+            "commits",
+            "branches",
+            "conflicts",
+            "stashes",
+        ],
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -718,7 +877,9 @@ async fn submodule_init(
     Path(id): Path<String>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::submodule_init(repository.path).map_err(internal_error)
+    let result = zync_git_core::submodule_init(repository.path).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff"]);
+    Ok(result)
 }
 
 async fn submodule_update(
@@ -726,7 +887,9 @@ async fn submodule_update(
     Path(id): Path<String>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::submodule_update(repository.path).map_err(internal_error)
+    let result = zync_git_core::submodule_update(repository.path).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff"]);
+    Ok(result)
 }
 
 async fn submodule_sync(
@@ -734,7 +897,9 @@ async fn submodule_sync(
     Path(id): Path<String>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::submodule_sync(repository.path).map_err(internal_error)
+    let result = zync_git_core::submodule_sync(repository.path).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff"]);
+    Ok(result)
 }
 
 async fn lfs_summary(
@@ -752,7 +917,9 @@ async fn lfs_install(
     Path(id): Path<String>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::lfs_install(repository.path).map_err(internal_error)
+    let result = zync_git_core::lfs_install(repository.path).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff"]);
+    Ok(result)
 }
 
 async fn lfs_track(
@@ -765,7 +932,9 @@ async fn lfs_track(
         .pattern
         .as_deref()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "pattern is required".to_string()))?;
-    zync_git_core::lfs_track(repository.path, pattern).map_err(internal_error)
+    let result = zync_git_core::lfs_track(repository.path, pattern).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff"]);
+    Ok(result)
 }
 
 async fn lfs_untrack(
@@ -778,7 +947,9 @@ async fn lfs_untrack(
         .pattern
         .as_deref()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "pattern is required".to_string()))?;
-    zync_git_core::lfs_untrack(repository.path, pattern).map_err(internal_error)
+    let result = zync_git_core::lfs_untrack(repository.path, pattern).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff"]);
+    Ok(result)
 }
 
 async fn lfs_pull(
@@ -786,7 +957,9 @@ async fn lfs_pull(
     Path(id): Path<String>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::lfs_pull(repository.path).map_err(internal_error)
+    let result = zync_git_core::lfs_pull(repository.path).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff"]);
+    Ok(result)
 }
 
 async fn lfs_push(
@@ -800,7 +973,10 @@ async fn lfs_push(
         .branch
         .as_deref()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "branch is required".to_string()))?;
-    zync_git_core::lfs_push(repository.path, remote, branch).map_err(internal_error)
+    let result =
+        zync_git_core::lfs_push(repository.path, remote, branch).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff"]);
+    Ok(result)
 }
 
 async fn interactive_rebase(
@@ -815,11 +991,24 @@ async fn interactive_rebase(
         .map(|step| zync_git_core::RebaseStep {
             commit: step.commit,
             action: step.action,
+            message: step.message,
         })
         .collect::<Vec<_>>();
-    zync_git_core::interactive_rebase(repository.path, &request.base, &steps)
-        .map(Json)
-        .map_err(internal_error)
+    let result = zync_git_core::interactive_rebase(repository.path, &request.base, &steps)
+        .map_err(internal_error)?;
+    broadcast_git_change(
+        &state,
+        &id,
+        &[
+            "status",
+            "diff",
+            "commits",
+            "branches",
+            "conflicts",
+            "stashes",
+        ],
+    );
+    Ok(Json(result))
 }
 
 async fn rebase_continue(
@@ -827,7 +1016,20 @@ async fn rebase_continue(
     Path(id): Path<String>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::rebase_continue(repository.path).map_err(internal_error)
+    let result = zync_git_core::rebase_continue(repository.path).map_err(internal_error)?;
+    broadcast_git_change(
+        &state,
+        &id,
+        &[
+            "status",
+            "diff",
+            "commits",
+            "branches",
+            "conflicts",
+            "stashes",
+        ],
+    );
+    Ok(result)
 }
 
 async fn rebase_abort(
@@ -835,7 +1037,20 @@ async fn rebase_abort(
     Path(id): Path<String>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::rebase_abort(repository.path).map_err(internal_error)
+    let result = zync_git_core::rebase_abort(repository.path).map_err(internal_error)?;
+    broadcast_git_change(
+        &state,
+        &id,
+        &[
+            "status",
+            "diff",
+            "commits",
+            "branches",
+            "conflicts",
+            "stashes",
+        ],
+    );
+    Ok(result)
 }
 
 async fn rebase_skip(
@@ -843,7 +1058,20 @@ async fn rebase_skip(
     Path(id): Path<String>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::rebase_skip(repository.path).map_err(internal_error)
+    let result = zync_git_core::rebase_skip(repository.path).map_err(internal_error)?;
+    broadcast_git_change(
+        &state,
+        &id,
+        &[
+            "status",
+            "diff",
+            "commits",
+            "branches",
+            "conflicts",
+            "stashes",
+        ],
+    );
+    Ok(result)
 }
 
 async fn stashes(
@@ -863,6 +1091,18 @@ async fn cherry_pick(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     zync_git_core::cherry_pick(repository.path, &request.commits).map_err(internal_error)?;
+    broadcast_git_change(
+        &state,
+        &id,
+        &[
+            "status",
+            "diff",
+            "commits",
+            "branches",
+            "conflicts",
+            "stashes",
+        ],
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -872,6 +1112,18 @@ async fn cherry_pick_abort(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     zync_git_core::cherry_pick_abort(repository.path).map_err(internal_error)?;
+    broadcast_git_change(
+        &state,
+        &id,
+        &[
+            "status",
+            "diff",
+            "commits",
+            "branches",
+            "conflicts",
+            "stashes",
+        ],
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -917,6 +1169,18 @@ async fn resolve_conflict(
     };
     zync_git_core::resolve_conflict_with_checkout(repository.path, &request.path, side)
         .map_err(internal_error)?;
+    broadcast_git_change(
+        &state,
+        &id,
+        &[
+            "status",
+            "diff",
+            "commits",
+            "branches",
+            "conflicts",
+            "stashes",
+        ],
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -933,6 +1197,7 @@ async fn create_stash(
         request.author_email.as_deref().unwrap_or("zync@local"),
     )
     .map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["stashes", "status", "diff"]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -948,6 +1213,7 @@ async fn apply_stash(
         request.pop.unwrap_or(false),
     )
     .map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["stashes", "status", "diff"]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -959,6 +1225,7 @@ async fn drop_stash(
     let repository = repository(&state, &id)?;
     zync_git_core::drop_stash(repository.path, request.index.unwrap_or(0))
         .map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["stashes", "status", "diff"]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -971,6 +1238,21 @@ fn repository(
         .repository(id)
         .map_err(internal_error)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "repository not found".to_string()))
+}
+
+fn broadcast_git_change(state: &AppState, repository_id: &str, scopes: &[&str]) {
+    let Ok(Some(repository)) = state.db.repository(repository_id) else {
+        return;
+    };
+    let Ok(workspace) = state
+        .db
+        .workspace_for_repository(&repository.id, &repository.name)
+    else {
+        return;
+    };
+    let mut event = WorkspaceEvent::new("git_changed");
+    event.payload = serde_json::json!({ "scopes": scopes });
+    state.hub.broadcast(&workspace.id, event);
 }
 
 fn internal_error(error: anyhow::Error) -> (StatusCode, String) {

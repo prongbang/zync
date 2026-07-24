@@ -3,3 +3,13 @@
 /.DS_Store
 /.env
 /PLAN.md
+
+# React frontend (web/)
+web/node_modules
+web/**/node_modules
+web/**/dist
+web/**/.turbo
+web/.turbo
+
+# Local Claude Code settings
+.claude/settings.local.json

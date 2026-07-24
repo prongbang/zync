@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "zync-server",
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": ["run", "-p", "zync-server"],
+      "port": 58271
+    },
+    {
+      "name": "zync-react",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "cd web/apps/web && bun run dev --port 5173 --host"],
+      "port": 5173
+    },
+    {
+      "name": "zync-prod",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "ZYNC_BIND=0.0.0.0:58271 ZYNC_STATIC_DIR=\"$PWD/web/apps/web/dist\" cargo run -p zync-server"],
+      "port": 58271
+    }
+  ]
+}

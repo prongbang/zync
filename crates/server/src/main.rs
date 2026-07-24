@@ -10,7 +10,12 @@ mod workspace;
 
 use axum::{routing::get, Router};
 use std::{net::SocketAddr, sync::Arc};
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{
+    compression::CompressionLayer,
+    cors::CorsLayer,
+    services::{ServeDir, ServeFile},
+    trace::TraceLayer,
+};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Clone)]
@@ -39,6 +44,16 @@ async fn main() -> anyhow::Result<()> {
         collaboration: collaboration::CollaborationState::default(),
     });
 
+    // Serve the built React app (Vite emits index.html + /assets/*). Unmatched
+    // routes fall back to index.html with a 200 so client-side navigation and
+    // hard refreshes work (a plain not_found_service would preserve the 404
+    // status even while serving the index body).
+    let static_root = static_dir();
+    let index_path = std::path::Path::new(&static_root).join("index.html");
+    let spa = ServeDir::new(&static_root)
+        .append_index_html_on_directories(true)
+        .fallback(ServeFile::new(index_path));
+
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .merge(auth::routes())
@@ -48,8 +63,10 @@ async fn main() -> anyhow::Result<()> {
         .merge(git::routes())
         .merge(websocket::routes())
         .merge(collaboration::routes())
+        .fallback_service(spa)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
+        .layer(CompressionLayer::new())
         .with_state(state);
 
     let addr: SocketAddr = std::env::var("ZYNC_BIND")
@@ -60,3 +77,8 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
     Ok(())
 }
+
+fn static_dir() -> String {
+    std::env::var("ZYNC_STATIC_DIR").unwrap_or_else(|_| "/app/public".to_string())
+}
+

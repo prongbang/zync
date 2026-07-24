@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: ""
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # git2/libgit2 and rusqlite are built from their bundled/vendored
+      # sources (see workspace Cargo.toml: git2 default features, rusqlite
+      # "bundled"), so no extra apt packages (e.g. libssl-dev, pkg-config)
+      # are required on the default ubuntu-latest runner image.
+
+      - name: cargo check zync-git-core
+        run: cargo check -p zync-git-core
+
+      - name: cargo check zync-server
+        run: cargo check -p zync-server
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: ""
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo test zync-git-core
+        run: cargo test -p zync-git-core
+
+  web-check:
+    name: Web typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1"
+
+      - name: Install web dependencies
+        run: cd web && bun install
+
+      - name: Typecheck web app
+        run: cd web/apps/web && bun run typecheck
+
+  e2e:
+    name: E2E
+    runs-on: ubuntu-latest
+    needs: [check, web-check]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1"
+
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@zync.local"
+          git config --global user.name "Zync CI"
+
+      - name: Build UI (React)
+        run: |
+          cd web && bun install
+          cd apps/web && bun run build
+
+      - name: Build server (release)
+        run: cargo build --release -p zync-server
+
+      - name: Start server
+        run: |
+          ZYNC_DB="$(mktemp -d)/zync.db" \
+          ZYNC_BIND=127.0.0.1:58271 \
+          ZYNC_STATIC_DIR="${{ github.workspace }}/web/apps/web/dist" \
+          nohup ./target/release/zync-server > server.log 2>&1 &
+          echo "Waiting for server to become healthy..."
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:58271/health > /dev/null; then
+              echo "Server is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Server did not become healthy in time"
+          cat server.log
+          exit 1
+
+      - name: Install e2e dependencies
+        run: |
+          cd tests/e2e
+          npm ci || npm install
+
+      - name: Run e2e audit
+        # E2E_BASE_URL points the audit at the Rust server origin, which
+        # serves the built React app as static assets (same-origin as the API).
+        env:
+          E2E_BASE_URL: http://127.0.0.1:58271
+        run: |
+          cd tests/e2e
+          npm run audit
+
+      - name: Server log
+        if: always()
+        run: cat server.log || true

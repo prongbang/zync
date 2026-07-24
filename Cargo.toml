@@ -2,6 +2,11 @@
 members = [
     "crates/git-core",
     "crates/server",
+]
+# The UI is now the React app in web/ (served by the server from ZYNC_STATIC_DIR).
+# The legacy Dioxus UI is excluded from the build but kept on disk for reference
+# until it is removed in a dedicated commit.
+exclude = [
     "crates/ui",
 ]
 resolver = "2"
@@ -22,7 +27,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+tower-http = { version = "0.5", features = ["compression-gzip", "cors", "fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }

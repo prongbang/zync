@@ -62,12 +62,26 @@ pub struct FileStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommitRef {
+    pub name: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitSummary {
     pub id: String,
     pub summary: String,
     pub author: String,
+    #[serde(default)]
+    pub author_email: String,
+    #[serde(default)]
+    pub committer: String,
+    #[serde(default)]
+    pub committer_email: String,
     pub time: i64,
     pub parents: Vec<String>,
+    #[serde(default)]
+    pub refs: Vec<CommitRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -76,6 +90,33 @@ pub struct BranchSummary {
     pub is_head: bool,
     pub kind: String,
     pub target: Option<String>,
+    #[serde(default)]
+    pub ahead: Option<usize>,
+    #[serde(default)]
+    pub behind: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuthorStat {
+    pub name: String,
+    pub commits: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MonthStat {
+    pub year: i64,
+    pub month: u32,
+    pub total: usize,
+    pub top: Vec<AuthorStat>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepoStats {
+    pub commit_count: usize,
+    pub contributors: Vec<AuthorStat>,
+    pub monthly: Vec<MonthStat>,
+    pub first_commit_time: i64,
+    pub last_commit_time: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -278,6 +319,8 @@ pub struct ConflictResolveRequest {
 pub struct RebaseStepRequest {
     pub commit: String,
     pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -326,8 +369,13 @@ impl Default for ZyncApi {
             .ok()
             .filter(|hostname| !hostname.is_empty())
             .unwrap_or_else(|| "127.0.0.1".to_string());
+        let port = location.port().ok().unwrap_or_default();
+        let api_port = match port.as_str() {
+            "" | "8080" | "8081" => "58271",
+            current => current,
+        };
         Self {
-            base_url: format!("{protocol}//{hostname}:58271"),
+            base_url: format!("{protocol}//{hostname}:{api_port}"),
         }
     }
 }
@@ -395,6 +443,10 @@ impl ZyncApi {
         self.graph_with_limit(repository_id, 500).await
     }
 
+    pub async fn repo_stats(&self, repository_id: &str) -> Result<RepoStats, String> {
+        get_json(&self.url(&format!("/repositories/{repository_id}/git/stats"))).await
+    }
+
     pub async fn graph_with_limit(
         &self,
         repository_id: &str,
@@ -430,6 +482,17 @@ impl ZyncApi {
         get_text(&self.url(&format!(
             "/repositories/{repository_id}/git/diff/staged?path={}",
             urlencoding::encode(path)
+        )))
+        .await
+    }
+
+    pub async fn diff_commit_to_workdir(
+        &self,
+        repository_id: &str,
+        commit_id: &str,
+    ) -> Result<String, String> {
+        get_text(&self.url(&format!(
+            "/repositories/{repository_id}/git/diff/compare/{commit_id}"
         )))
         .await
     }
@@ -1229,13 +1292,21 @@ impl ZyncApi {
 
 #[cfg(target_arch = "wasm32")]
 async fn get_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T, String> {
-    gloo_net::http::Request::get(url)
+    let response = gloo_net::http::Request::get(url)
         .send()
         .await
-        .map_err(|error| error.to_string())?
-        .json()
-        .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    if !response.ok() {
+        // Surface the server's error text instead of a JSON parse error.
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(if text.trim().is_empty() {
+            format!("request failed with status {status}")
+        } else {
+            text
+        });
+    }
+    response.json().await.map_err(|error| error.to_string())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1265,15 +1336,23 @@ where
     T: Serialize,
     R: for<'de> Deserialize<'de>,
 {
-    gloo_net::http::Request::post(url)
+    let response = gloo_net::http::Request::post(url)
         .json(body)
         .map_err(|error| error.to_string())?
         .send()
         .await
-        .map_err(|error| error.to_string())?
-        .json()
-        .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    if !response.ok() {
+        // Surface the server's error text instead of a JSON parse error.
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(if text.trim().is_empty() {
+            format!("request failed with status {status}")
+        } else {
+            text
+        });
+    }
+    response.json().await.map_err(|error| error.to_string())
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -75,10 +75,12 @@ fn unstage_discard_and_interactive_rebase_flow() {
             zync_git_core::RebaseStep {
                 commit: commit_c.clone(),
                 action: zync_git_core::RebaseAction::Pick,
+                message: None,
             },
             zync_git_core::RebaseStep {
                 commit: commit_b.clone(),
                 action: zync_git_core::RebaseAction::Drop,
+                message: None,
             },
         ],
     )
@@ -91,4 +93,36 @@ fn unstage_discard_and_interactive_rebase_flow() {
     assert!(zync_git_core::status(temp.path())
         .expect("status")
         .is_empty());
+}
+
+#[test]
+fn commit_graph_cursor_pagination() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    Repository::init(temp.path()).expect("init repo");
+
+    let mut commits = Vec::new();
+    for name in ["one", "two", "three", "four"] {
+        fs::write(temp.path().join(format!("{name}.txt")), name).expect("write file");
+        zync_git_core::add(temp.path(), &[format!("{name}.txt")]).expect("add file");
+        let oid = zync_git_core::commit(temp.path(), name, "Zync Test", "zync@test.local")
+            .expect("commit");
+        commits.push(oid);
+    }
+    // commits is oldest-first: [one, two, three, four]; the graph walks newest-first.
+    let newest_first: Vec<_> = commits.iter().rev().cloned().collect();
+
+    let full = zync_git_core::commit_graph(temp.path(), 10, None).expect("full graph");
+    let full_ids: Vec<_> = full.iter().map(|commit| commit.id.clone()).collect();
+    assert_eq!(full_ids, newest_first);
+
+    let first_page = zync_git_core::commit_graph(temp.path(), 2, None).expect("first page");
+    assert_eq!(first_page.len(), 2);
+    assert_eq!(first_page[0].id, newest_first[0]);
+    assert_eq!(first_page[1].id, newest_first[1]);
+
+    let cursor = first_page.last().unwrap().id.clone();
+    let second_page =
+        zync_git_core::commit_graph(temp.path(), 10, Some(&cursor)).expect("second page");
+    let second_ids: Vec<_> = second_page.iter().map(|commit| commit.id.clone()).collect();
+    assert_eq!(second_ids, newest_first[2..]);
 }

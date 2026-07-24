@@ -187,6 +187,16 @@ impl Database {
 
     pub fn remove_repository(&self, id: &str) -> anyhow::Result<()> {
         let conn = self.conn.lock().expect("database lock");
+        // workspaces/workspace_members reference repositories; clear them
+        // first or the FK constraint rejects the delete.
+        conn.execute(
+            "DELETE FROM workspace_members WHERE workspace_id IN (SELECT id FROM workspaces WHERE repository_id = ?1)",
+            params![id],
+        )?;
+        conn.execute(
+            "DELETE FROM workspaces WHERE repository_id = ?1",
+            params![id],
+        )?;
         conn.execute("DELETE FROM repositories WHERE id = ?1", params![id])?;
         Ok(())
     }
