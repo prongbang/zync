@@ -14,6 +14,7 @@ import {
   SCOPE_GRAPH,
   SCOPE_STASHES,
   SCOPE_STATUS,
+  SCOPE_TAGS,
   SCOPE_WORKDIR,
   SCOPE_WORKSPACE,
   scopeForEvent,
@@ -30,6 +31,7 @@ import type {
   RepoStats,
   RepositoryRecord,
   StashSummary,
+  TagSummary,
   WorkspaceResponse,
 } from "./types"
 
@@ -48,6 +50,7 @@ export type WorkspaceState = {
   workspace: WorkspaceResponse | null
   gitStatus: FileStatus[]
   branches: BranchSummary[]
+  tags: TagSummary[]
   commits: CommitSummary[]
   stashes: StashSummary[]
   conflicts: ConflictSummary[]
@@ -106,6 +109,10 @@ export type WorkspaceState = {
   mergeBranch: (name: string, strategy?: MergeStrategy) => Promise<void>
   createTag: (name: string, target?: string) => Promise<void>
   deleteTag: (name: string) => Promise<void>
+  /** Pushes `refs/tags/<name>` to `remote` (defaults to `"origin"`). Same shape as
+   * `pushRemote`/`fetchRemote`/`pullRemote`: resolves to the server's message, rejects on
+   * failure (auth/network errors included) so callers can drive their own toast/busy state. */
+  pushTag: (name: string, remote?: string) => Promise<string>
   createStash: (message: string) => Promise<void>
   applyStash: (index: number, pop: boolean) => Promise<void>
   dropStash: (index: number) => Promise<void>
@@ -145,6 +152,7 @@ export function useWorkspace(): WorkspaceState {
   const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null)
   const [gitStatus, setGitStatus] = useState<FileStatus[]>([])
   const [branches, setBranches] = useState<BranchSummary[]>([])
+  const [tags, setTags] = useState<TagSummary[]>([])
   const [commits, setCommits] = useState<CommitSummary[]>([])
   const [stashes, setStashes] = useState<StashSummary[]>([])
   const [conflicts, setConflicts] = useState<ConflictSummary[]>([])
@@ -200,6 +208,7 @@ export function useWorkspace(): WorkspaceState {
       run(SCOPE_WORKSPACE, async () => setWorkspace(await api.workspace(workspaceId)))
       run(SCOPE_STATUS, async () => setGitStatus(await api.status(repositoryId)))
       run(SCOPE_BRANCHES, async () => setBranches(await api.branches(repositoryId)))
+      run(SCOPE_TAGS, async () => setTags(await api.tags(repositoryId)))
       run(SCOPE_GRAPH, async () =>
         setCommits(await api.graphWithLimit(repositoryId, limit)),
       )
@@ -593,13 +602,25 @@ export function useWorkspace(): WorkspaceState {
   )
   const createTag = useCallback(
     (name: string, target?: string) =>
-      run((id) => api.createTag(id, name, target ?? null).then(() => `Created tag ${name}`), SCOPE_GRAPH),
+      run(
+        (id) => api.createTag(id, name, target ?? null).then(() => `Created tag ${name}`),
+        SCOPE_GRAPH | SCOPE_TAGS,
+      ),
     [run],
   )
   const deleteTag = useCallback(
     (name: string) =>
-      run((id) => api.deleteTag(id, name).then(() => `Deleted tag ${name}`), SCOPE_GRAPH),
+      run((id) => api.deleteTag(id, name).then(() => `Deleted tag ${name}`), SCOPE_GRAPH | SCOPE_TAGS),
     [run],
+  )
+  const pushTag = useCallback(
+    (name: string, remote?: string) =>
+      runRemote(
+        (id) => api.pushTag(id, name, remote ?? "origin"),
+        SCOPE_BRANCHES | SCOPE_TAGS,
+        `Pushed tag ${name}`,
+      ),
+    [runRemote],
   )
   const createStash = useCallback(
     (message: string) =>
@@ -728,6 +749,7 @@ export function useWorkspace(): WorkspaceState {
     workspace,
     gitStatus,
     branches,
+    tags,
     commits,
     stashes,
     conflicts,
@@ -762,6 +784,7 @@ export function useWorkspace(): WorkspaceState {
     mergeBranch,
     createTag,
     deleteTag,
+    pushTag,
     createStash,
     applyStash,
     dropStash,

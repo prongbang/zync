@@ -42,6 +42,22 @@ fn status_add_commit_and_branch_flow() {
 }
 
 #[test]
+fn read_workdir_file_returns_bytes_and_blocks_traversal() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    Repository::init(temp.path()).expect("init repo");
+
+    let bytes: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    fs::write(temp.path().join("logo.png"), bytes).expect("write png");
+
+    let read = zync_git_core::read_workdir_file(temp.path(), "logo.png").expect("read workdir file");
+    assert_eq!(read, bytes);
+
+    // A traversal attempt must not escape the working directory.
+    let escaped = zync_git_core::read_workdir_file(temp.path(), "../secret.txt");
+    assert!(escaped.is_err());
+}
+
+#[test]
 fn init_repo_creates_headless_repo_with_no_commit() {
     let temp = tempfile::tempdir().expect("tempdir");
     let target = temp.path().join("nested").join("new-repo");
@@ -432,6 +448,80 @@ fn pull_ff_only_fast_forwards_after_remote_advances() {
     let clone_info = zync_git_core::open_repo(&clone_path).expect("open clone");
     assert_eq!(clone_info.head, Some(advanced_commit));
     assert!(clone_path.join("b.txt").exists());
+}
+
+#[test]
+fn tags_lists_lightweight_and_annotated_with_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let commit_oid = init_repo_with_commit(temp.path(), "README.md", "hello");
+    let repo = Repository::open(temp.path()).expect("open repo");
+    let signature = Signature::now("Zync Test", "zync@test.local").expect("signature");
+
+    let target = repo
+        .find_object(
+            git2::Oid::from_str(&commit_oid).expect("oid"),
+            Some(git2::ObjectType::Commit),
+        )
+        .expect("find commit object");
+    repo.tag_lightweight("v1.0.0-lightweight", &target, false)
+        .expect("create lightweight tag");
+    repo.tag(
+        "v1.0.0-annotated",
+        &target,
+        &signature,
+        "Release 1.0.0",
+        false,
+    )
+    .expect("create annotated tag");
+
+    let mut tags = zync_git_core::tags(temp.path()).expect("list tags");
+    tags.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let annotated = tags
+        .iter()
+        .find(|tag| tag.name == "v1.0.0-annotated")
+        .expect("annotated tag present");
+    assert!(annotated.annotated);
+    assert_eq!(annotated.target.as_deref(), Some(commit_oid.as_str()));
+    assert_eq!(annotated.message.as_deref(), Some("Release 1.0.0"));
+    assert_eq!(annotated.tagger.as_deref(), Some("Zync Test"));
+    assert!(annotated.time.is_some());
+
+    let lightweight = tags
+        .iter()
+        .find(|tag| tag.name == "v1.0.0-lightweight")
+        .expect("lightweight tag present");
+    assert!(!lightweight.annotated);
+    assert_eq!(lightweight.target.as_deref(), Some(commit_oid.as_str()));
+    assert_eq!(lightweight.message, None);
+    assert_eq!(lightweight.tagger, None);
+    assert_eq!(lightweight.time, None);
+}
+
+#[test]
+fn push_tag_to_bare_remote_via_libgit2() {
+    let bare = tempfile::tempdir().expect("bare tempdir");
+    Repository::init_bare(bare.path()).expect("init bare repo");
+    let bare_url = format!("file://{}", bare.path().display());
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let commit_oid = init_repo_with_commit(temp.path(), "README.md", "hello");
+    zync_git_core::add_remote(temp.path(), "origin", &bare_url).expect("add remote");
+    zync_git_core::push(temp.path(), Some("origin"), None).expect("push branch");
+    zync_git_core::create_tag(temp.path(), "v1.0.0", None).expect("create tag");
+
+    // Exercises the new libgit2 push_refspecs path for `refs/tags/<tag>:refs/tags/<tag>`
+    // (CredentialSpec::Default via the `None` spec) against a real file:// remote.
+    let output =
+        zync_git_core::push_tag(temp.path(), "origin", "v1.0.0").expect("push tag succeeds");
+    assert!(output.contains("v1.0.0"));
+
+    let bare_repo = Repository::open(bare.path()).expect("open bare repo");
+    let bare_tag_ref = bare_repo
+        .find_reference("refs/tags/v1.0.0")
+        .expect("bare repo has pushed tag");
+    let pushed_commit = bare_tag_ref.peel_to_commit().expect("peel to commit");
+    assert_eq!(pushed_commit.id().to_string(), commit_oid);
 }
 
 #[test]

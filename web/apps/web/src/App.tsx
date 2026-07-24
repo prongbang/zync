@@ -44,7 +44,11 @@ import {
 import { toast } from "@workspace/ui/components/toast"
 import { cn } from "@workspace/ui/lib/utils"
 
-import { BranchSidebar, type BranchCommand } from "./components/BranchSidebar"
+import {
+  BranchSidebar,
+  type BranchCommand,
+  type TagCommand,
+} from "./components/BranchSidebar"
 import { CommitGraph } from "./components/CommitGraph"
 import { ConflictResolver } from "./components/ConflictResolver"
 import { DiffPanel } from "./components/DiffPanel"
@@ -55,6 +59,7 @@ import { Toolbar } from "./components/Toolbar"
 import {
   AddRepositoryDialog,
   DeleteDialog,
+  DeleteTagDialog,
   DropDialog,
   MergeDialog,
   NewBranchDialog,
@@ -66,6 +71,7 @@ import {
   TagDialog,
 } from "./components/dialogs"
 import { useIsMobile } from "./hooks/use-mobile"
+import { WORKDIR_REVISION } from "./lib/api"
 import { graphRows, statusLabel, type BlameRow } from "./lib/helpers"
 import { formatCommitTime, gravatarSrc, shortId } from "./lib/format"
 import type { CreateRepositoryRequest, RepositoryRecord } from "./lib/types"
@@ -79,6 +85,7 @@ type ActiveDialog =
   | { kind: "tag"; target: string }
   | { kind: "rename"; name: string }
   | { kind: "delete"; name: string }
+  | { kind: "deleteTag"; name: string }
   | { kind: "merge"; name: string }
   | { kind: "reword"; commitId: string; message: string }
   | { kind: "reset"; commitId: string }
@@ -186,6 +193,37 @@ export function App() {
       case "rebase":
       case "interactiveRebase":
         ws.setNotice("Rebase onto a branch is available from a commit menu")
+        break
+    }
+  }
+
+  function onTagCommand(cmd: TagCommand) {
+    switch (cmd.kind) {
+      case "checkout":
+        // Reuses the same detached checkout-at-revision path commits use — a tag
+        // name resolves via revparse the same way a commit id does.
+        void ws.runCommitAction("checkout", cmd.name)
+        break
+      case "push":
+        ws.pushTag(cmd.name)
+          .then((message) => toast.add({ title: message, type: "success" }))
+          .catch((error) =>
+            toast.add({
+              title: error instanceof Error ? error.message : String(error),
+              type: "error",
+            }),
+          )
+        break
+      case "copySha":
+        navigator.clipboard
+          .writeText(cmd.sha)
+          .then(() => ws.setNotice(`Copied ${shortId(cmd.sha)}`))
+          .catch(() =>
+            toast.add({ title: "Couldn't copy to clipboard", type: "error" }),
+          )
+        break
+      case "delete":
+        setDialog({ kind: "deleteTag", name: cmd.name })
         break
     }
   }
@@ -380,6 +418,15 @@ export function App() {
                 void ws.requestBlame(ws.selectedFile).then(setBlame)
               }}
               onCloseBlame={() => setBlame(null)}
+              imageSrc={(path, side) =>
+                currentRepoId
+                  ? ws.api.blobUrl(
+                      currentRepoId,
+                      side === "before" ? "HEAD" : WORKDIR_REVISION,
+                      path,
+                    )
+                  : null
+              }
             />
           ) : (
             <Tabs
@@ -559,7 +606,9 @@ export function App() {
             <aside className="h-full min-h-0 overflow-y-auto">
               <BranchSidebar
                 branches={ws.branches}
+                tags={ws.tags}
                 onCommand={onBranchCommand}
+                onTagCommand={onTagCommand}
               />
             </aside>
           </ResizablePanel>
@@ -618,8 +667,13 @@ export function App() {
               <Separator />
               <BranchSidebar
                 branches={ws.branches}
+                tags={ws.tags}
                 onCommand={(cmd) => {
                   onBranchCommand(cmd)
+                  if (cmd.kind === "checkout") setBranchSheetOpen(false)
+                }}
+                onTagCommand={(cmd) => {
+                  onTagCommand(cmd)
                   if (cmd.kind === "checkout") setBranchSheetOpen(false)
                 }}
               />
@@ -684,6 +738,17 @@ export function App() {
           onOpenChange={(o) => !o && setDialog(null)}
           onSubmit={() => {
             void ws.deleteBranch(dialog.name)
+            setDialog(null)
+          }}
+        />
+      )}
+      {dialog?.kind === "deleteTag" && (
+        <DeleteTagDialog
+          open
+          tag={dialog.name}
+          onOpenChange={(o) => !o && setDialog(null)}
+          onSubmit={() => {
+            void ws.deleteTag(dialog.name)
             setDialog(null)
           }}
         />

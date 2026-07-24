@@ -120,6 +120,10 @@ export interface RepoStats {
 export interface TagSummary {
   name: string
   target: string | null
+  annotated: boolean
+  message: string | null
+  tagger: string | null
+  time: number | null
 }
 
 export interface RemoteSummary {
@@ -317,6 +321,11 @@ export interface RevisionRequest {
 export interface TagRequest {
   name: string
   target: string | null
+}
+
+export interface PushTagRequest {
+  name: string
+  remote: string | null
 }
 
 export interface CommitIdRequest {

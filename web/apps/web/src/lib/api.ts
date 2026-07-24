@@ -32,6 +32,7 @@ import type {
   MergeStrategy,
   PatchRequest,
   PullMode,
+  PushTagRequest,
   ReflogEntrySummary,
   RemoteRequest,
   RemoteSummary,
@@ -115,6 +116,13 @@ async function del(url: string): Promise<void> {
   const response = await fetch(url, { method: "DELETE" })
   await readOkOrThrow(response)
 }
+
+/**
+ * Reserved `revision` sentinel for the raw-blob route: read the uncommitted
+ * working-tree copy of a file (the "After" side of an added/modified image
+ * diff) instead of a committed revision. Mirrors the server's `WORKDIR_REVISION`.
+ */
+export const WORKDIR_REVISION = ":workdir"
 
 export class ZyncApi {
   readonly baseUrl: string
@@ -495,6 +503,18 @@ export class ZyncApi {
     const request: TagRequest = { name, target: null }
     return postEmpty(
       this.url(`/repositories/${repositoryId}/git/tags/delete`),
+      request
+    )
+  }
+
+  async pushTag(
+    repositoryId: string,
+    name: string,
+    remote?: string | null
+  ): Promise<string> {
+    const request: PushTagRequest = { name, remote: remote ?? null }
+    return postText(
+      this.url(`/repositories/${repositoryId}/git/tags/push`),
       request
     )
   }

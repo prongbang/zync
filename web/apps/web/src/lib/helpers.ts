@@ -20,7 +20,8 @@ export const SCOPE_GRAPH = 1 << 3
 export const SCOPE_STASHES = 1 << 4
 export const SCOPE_CONFLICTS = 1 << 5
 export const SCOPE_DIFF = 1 << 6
-export const SCOPE_ALL = 0x7f
+export const SCOPE_TAGS = 1 << 7
+export const SCOPE_ALL = 0xff
 export const SCOPE_WORKDIR = SCOPE_STATUS | SCOPE_DIFF | SCOPE_CONFLICTS
 
 export function scopeBit(name: string): number {
@@ -40,6 +41,8 @@ export function scopeBit(name: string): number {
       return SCOPE_CONFLICTS
     case "diff":
       return SCOPE_DIFF
+    case "tags":
+      return SCOPE_TAGS
     default:
       return SCOPE_ALL
   }
@@ -749,13 +752,28 @@ export function isImagePath(path: string): boolean {
   return [
     "apng",
     "avif",
+    "bmp",
     "gif",
+    "ico",
     "jpg",
     "jpeg",
     "png",
     "svg",
     "webp",
   ].includes(ext)
+}
+
+// How DiffPanel should render a per-file sub-patch:
+//   "image"  -> side-by-side before/after <img> preview (no textual hunks)
+//   "binary" -> non-image binary blob; keep the "Binary files … differ" fallback
+//   "text"   -> ordinary unified-diff hunks
+export type PatchFileKind = "text" | "image" | "binary"
+
+export function patchFileKind(file: PatchFile): PatchFileKind {
+  if (isImagePath(file.newPath) || isImagePath(file.oldPath)) return "image"
+  if (/^Binary files .* differ$/m.test(file.patch) || file.patch.includes("GIT binary patch"))
+    return "binary"
+  return "text"
 }
 
 // ---------------------------------------------------------------------------

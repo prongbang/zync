@@ -3,7 +3,7 @@ use crate::websocket::WorkspaceEvent;
 use crate::AppState;
 use axum::{
     extract::{Path, Query, State},
-    http::{header, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -65,6 +65,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
         .route("/repositories/:id/git/tags", get(tags).post(create_tag))
         .route("/repositories/:id/git/tags/delete", post(delete_tag))
+        .route("/repositories/:id/git/tags/push", post(push_tag))
         .route("/repositories/:id/git/revert", post(revert_commit))
         .route("/repositories/:id/git/graph", get(commit_graph))
         .route("/repositories/:id/git/stats", get(repo_stats))
@@ -193,6 +194,12 @@ struct RevisionRequest {
 struct TagRequest {
     name: String,
     target: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PushTagRequest {
+    name: String,
+    remote: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -855,7 +862,7 @@ async fn create_tag(
     let repository = repository(&state, &id)?;
     zync_git_core::create_tag(repository.path, &request.name, request.target.as_deref())
         .map_err(internal_error)?;
-    broadcast_git_change(&state, &id, &["commits", "branches"]);
+    broadcast_git_change(&state, &id, &["commits", "branches", "tags"]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -866,8 +873,35 @@ async fn delete_tag(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     zync_git_core::delete_tag(repository.path, &request.name).map_err(internal_error)?;
-    broadcast_git_change(&state, &id, &["commits", "branches"]);
+    broadcast_git_change(&state, &id, &["commits", "branches", "tags"]);
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn push_tag(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<PushTagRequest>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    if request.name.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "name is required".to_string()));
+    }
+    let remote = request.remote.as_deref().unwrap_or("origin");
+    let spec = credentials::resolve_credential_spec(
+        &state,
+        credentials::DEFAULT_USER_ID,
+        &repository.path,
+        remote,
+    )?;
+    let result = zync_git_core::push_tag_with_credentials(
+        &repository.path,
+        remote,
+        &request.name,
+        Some(&spec),
+    )
+    .map_err(map_git_error)?;
+    broadcast_git_change(&state, &id, &["branches", "tags"]);
+    Ok(result)
 }
 
 async fn revert_commit(
@@ -1000,13 +1034,44 @@ async fn blob_at_revision(
         .get("path")
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "path is required".to_string()))?;
     let revision = query.get("revision").map(String::as_str).unwrap_or("HEAD");
-    let bytes =
-        zync_git_core::blob_at_revision(repository.path, revision, path).map_err(internal_error)?;
-    let headers = [(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(content_type_for_path(path)),
-    )];
-    Ok((headers, bytes))
+    // `:workdir` is the reserved sentinel for the uncommitted working-tree side of an
+    // image diff (the "After" of an added/modified file); everything else is a committed
+    // revision resolved through git. The colon prefix keeps it from colliding with a ref.
+    let bytes = if revision == WORKDIR_REVISION {
+        zync_git_core::read_workdir_file(repository.path, path).map_err(internal_error)?
+    } else {
+        zync_git_core::blob_at_revision(repository.path, revision, path).map_err(internal_error)?
+    };
+    Ok((blob_response_headers(content_type_for_path(path)), bytes))
+}
+
+/// Security headers for the raw-blob response. These blobs are attacker-controlled
+/// repository bytes served on the app's own origin, so we harden every response:
+///   - `X-Content-Type-Options: nosniff` stops the browser from re-interpreting a
+///     blob as HTML/JS via MIME sniffing.
+///   - SVG must keep `image/svg+xml` so `<img src>` can still render it, but an SVG
+///     opened directly as a top-level document can execute inline `<script>`. An
+///     empty `Content-Security-Policy: sandbox` (no scripts, no same-origin) neuters
+///     that, and `Content-Disposition: inline` keeps it a viewable (non-download)
+///     resource. Raster images need no CSP — they cannot run script when navigated to.
+fn blob_response_headers(content_type: &'static str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    if content_type == "image/svg+xml" {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("sandbox"),
+        );
+        headers.insert(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("inline"),
+        );
+    }
+    headers
 }
 
 async fn reflog(
@@ -1480,6 +1545,9 @@ fn git_error_kind_status(kind: zync_git_core::GitErrorKind) -> StatusCode {
     }
 }
 
+/// Reserved sentinel revision meaning "read from the working tree" (see `blob_at_revision`).
+const WORKDIR_REVISION: &str = ":workdir";
+
 fn content_type_for_path(path: &str) -> &'static str {
     match path
         .rsplit('.')
@@ -1490,7 +1558,9 @@ fn content_type_for_path(path: &str) -> &'static str {
     {
         "apng" => "image/apng",
         "avif" => "image/avif",
+        "bmp" => "image/bmp",
         "gif" => "image/gif",
+        "ico" => "image/x-icon",
         "jpg" | "jpeg" => "image/jpeg",
         "png" => "image/png",
         "svg" => "image/svg+xml",
@@ -1502,6 +1572,22 @@ fn content_type_for_path(path: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blob_headers_always_nosniff_and_sandbox_svg() {
+        // SVG stays renderable via <img> but is neutralized against script execution
+        // when navigated to directly.
+        let svg = blob_response_headers("image/svg+xml");
+        assert_eq!(svg.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
+        assert_eq!(svg.get(header::CONTENT_SECURITY_POLICY).unwrap(), "sandbox");
+        assert_eq!(svg.get(header::CONTENT_DISPOSITION).unwrap(), "inline");
+
+        // Raster images (and any other blob) still get nosniff but need no CSP.
+        let png = blob_response_headers("image/png");
+        assert_eq!(png.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
+        assert!(png.get(header::CONTENT_SECURITY_POLICY).is_none());
+        assert!(png.get(header::CONTENT_DISPOSITION).is_none());
+    }
 
     fn git_error(kind: zync_git_core::GitErrorKind) -> anyhow::Error {
         zync_git_core::GitCommandError {

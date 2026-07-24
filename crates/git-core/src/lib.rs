@@ -75,6 +75,15 @@ pub struct BranchSummary {
 pub struct TagSummary {
     pub name: String,
     pub target: Option<String>,
+    /// `true` for an annotated tag (a real tag object with its own message/tagger/date),
+    /// `false` for a lightweight tag (a ref pointing directly at a commit).
+    pub annotated: bool,
+    /// Annotated tags only — the tag message, trailing newline trimmed.
+    pub message: Option<String>,
+    /// Annotated tags only — the tagger's display name.
+    pub tagger: Option<String>,
+    /// Annotated tags only — the tagger's timestamp, Unix seconds.
+    pub time: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -685,6 +694,31 @@ pub fn delete_remote_branch_with_credentials(
     Ok(())
 }
 
+pub fn push_tag(path: impl AsRef<Path>, remote_name: &str, tag: &str) -> anyhow::Result<String> {
+    push_tag_with_credentials(path, remote_name, tag, None)
+}
+
+/// Pushes `refs/tags/<tag>:refs/tags/<tag>` to `remote_name` over the same libgit2
+/// `push_refspecs` path used by branch pushes (ADR-001 credentialed transport). `spec: None`
+/// behaves like today (ambient ssh-agent / `Cred::default()`).
+pub fn push_tag_with_credentials(
+    path: impl AsRef<Path>,
+    remote_name: &str,
+    tag: &str,
+    spec: Option<&CredentialSpec>,
+) -> anyhow::Result<String> {
+    let repo = Repository::open(path.as_ref())?;
+    let mut remote = repo.find_remote(remote_name)?;
+    let host = remote_host(remote.url().unwrap_or(""));
+    let default_spec = CredentialSpec::Default;
+    let spec = spec.unwrap_or(&default_spec);
+
+    let refspec = format!("refs/tags/{tag}:refs/tags/{tag}");
+    let command = format!("git push {remote_name} refs/tags/{tag}");
+    push_refspecs(&mut remote, &[refspec], spec, &host, &command)?;
+    Ok(format!("pushed tag {tag} to {remote_name}"))
+}
+
 pub fn set_upstream(
     path: impl AsRef<Path>,
     branch: &str,
@@ -946,13 +980,41 @@ pub fn tags(path: impl AsRef<Path>) -> anyhow::Result<Vec<TagSummary>> {
     let names = repo.tag_names(None)?;
     let mut tags = Vec::new();
     for name in names.iter().flatten() {
+        // `^{commit}` peels an annotated tag down to the commit it ultimately points at (a
+        // bare `refs/tags/<name>` revspec resolves to the tag object itself for annotated
+        // tags) — lightweight tags already point straight at the commit either way.
         let target = repo
-            .revparse_single(&format!("refs/tags/{name}"))
+            .revparse_single(&format!("refs/tags/{name}^{{commit}}"))
             .ok()
             .map(|object| object.id().to_string());
+
+        // A ref's direct target (before peeling) is either an annotated tag object (for
+        // annotated tags) or the commit itself (for lightweight tags) — `find_tag` only
+        // succeeds in the former case, which is how we tell them apart.
+        let annotated_tag = repo
+            .find_reference(&format!("refs/tags/{name}"))
+            .ok()
+            .and_then(|reference| reference.target())
+            .and_then(|oid| repo.find_tag(oid).ok());
+
+        let (annotated, message, tagger, time) = match &annotated_tag {
+            Some(tag) => (
+                true,
+                tag.message().map(|message| message.trim_end().to_string()),
+                tag.tagger()
+                    .and_then(|signature| signature.name().map(ToOwned::to_owned)),
+                tag.tagger().map(|signature| signature.when().seconds()),
+            ),
+            None => (false, None, None, None),
+        };
+
         tags.push(TagSummary {
             name: name.to_string(),
             target,
+            annotated,
+            message,
+            tagger,
+            time,
         });
     }
     Ok(tags)
@@ -1562,6 +1624,23 @@ pub fn blob_at_revision(
     let entry = tree.get_path(Path::new(file_path))?;
     let blob = repo.find_blob(entry.id())?;
     Ok(blob.content().to_vec())
+}
+
+/// Reads a file's raw bytes from the repository working tree (the "new"/uncommitted
+/// side of an image diff). Guards against path traversal by requiring the resolved
+/// path to stay inside the canonicalized working directory.
+/// TODO(P4.1): the broader `ZYNC_REPOS_ROOT` filesystem boundary is enforced there.
+pub fn read_workdir_file(path: impl AsRef<Path>, file_path: &str) -> anyhow::Result<Vec<u8>> {
+    let repo = Repository::open(path.as_ref())?;
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| anyhow::anyhow!("bare repository has no working directory"))?;
+    let root = workdir.canonicalize()?;
+    let resolved = root.join(file_path).canonicalize()?;
+    if !resolved.starts_with(&root) {
+        anyhow::bail!("path escapes repository working directory");
+    }
+    Ok(fs::read(resolved)?)
 }
 
 pub fn reflog(path: impl AsRef<Path>, limit: usize) -> anyhow::Result<Vec<ReflogEntrySummary>> {

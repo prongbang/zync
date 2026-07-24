@@ -22,6 +22,7 @@ import {
   compactDiffText,
   diffHunks,
   diffIsPatch,
+  patchFileKind,
   pathBasename,
   splitDiffLines,
   splitPatchByFile,
@@ -37,6 +38,9 @@ import type {
   SplitDiffLine,
   SplitKind,
 } from "@/lib/helpers"
+
+// Which committed/working revision to preview for each side of an image diff.
+export type ImageDiffSide = "before" | "after"
 
 // Fork-style diff panel: inline / split / blame toolbar over a single file's
 // unified diff. Ported from crates/ui/src/components/diff.rs
@@ -54,6 +58,12 @@ export interface DiffPanelProps {
   onStageHunk: (patch: string) => void
   onRequestBlame: () => void
   onCloseBlame: () => void
+  /**
+   * Resolves the <img> src for one side of an image file's diff, or `null` when
+   * unavailable (e.g. no repository open). `path` is the file's old path for
+   * "before" and new path for "after". Omit to fall back to the text renderer.
+   */
+  imageSrc?: (path: string, side: ImageDiffSide) => string | null
 }
 
 // A multi-file patch (whole-commit / whole-workdir diff) is split per
@@ -70,6 +80,7 @@ export function DiffPanel({
   onStageHunk,
   onRequestBlame,
   onCloseBlame,
+  imageSrc,
 }: DiffPanelProps): ReactElement {
   const [viewMode, setViewMode] = useState<DiffViewMode>("inline")
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
@@ -84,6 +95,13 @@ export function DiffPanel({
     : null
   const activeDiff = activeFile ? activeFile.patch : diff
   const headerPath = activeFile ? displayPath(activeFile) : path
+
+  // Image files render as a before/after preview instead of textual hunks, so the
+  // Inline/Split/Blame toggle is meaningless and hidden. Detection works in both
+  // single-file (files[0]) and multi-file (activeFile) modes.
+  const currentFile = activeFile ?? files[0] ?? null
+  const isImage =
+    currentFile !== null && imageSrc !== undefined && patchFileKind(currentFile) === "image"
 
   // Blame is keyed to the workspace's selected file (the `path`/`blame` props);
   // for multi-file whole-commit diffs `path` is empty, so blame stays disabled.
@@ -108,39 +126,45 @@ export function DiffPanel({
         <code className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
           {headerPath === "" ? "Select a file" : headerPath}
         </code>
-        <ToggleGroup
-          size="sm"
-          className="shrink-0"
-          aria-label="Diff view mode"
-          value={[mode]}
-          onValueChange={handleModeChange}
-        >
-          <ToggleGroupItem value="inline" data-testid="diff-inline">
-            Inline
-          </ToggleGroupItem>
-          <ToggleGroupItem value="split" data-testid="diff-split">
-            Split
-          </ToggleGroupItem>
-          <ToggleGroupItem
-            value="blame"
-            data-testid="diff-blame"
-            disabled={blameDisabled}
+        {!isImage && (
+          <ToggleGroup
+            size="sm"
+            className="shrink-0"
+            aria-label="Diff view mode"
+            value={[mode]}
+            onValueChange={handleModeChange}
           >
-            Blame
-          </ToggleGroupItem>
-        </ToggleGroup>
-      </header>
-      <div className="min-h-0 flex-1 overflow-auto font-mono text-[12px] leading-5">
-        {showBlame ? (
-          <BlameView rows={blame} />
-        ) : activeDiff.trim() === "" ? (
-          <EmptyDiffState />
-        ) : viewMode === "split" ? (
-          <SplitDiffView diff={activeDiff} />
-        ) : (
-          <InlineDiffView diff={activeDiff} onStageHunk={onStageHunk} />
+            <ToggleGroupItem value="inline" data-testid="diff-inline">
+              Inline
+            </ToggleGroupItem>
+            <ToggleGroupItem value="split" data-testid="diff-split">
+              Split
+            </ToggleGroupItem>
+            <ToggleGroupItem
+              value="blame"
+              data-testid="diff-blame"
+              disabled={blameDisabled}
+            >
+              Blame
+            </ToggleGroupItem>
+          </ToggleGroup>
         )}
-      </div>
+      </header>
+      {isImage && currentFile ? (
+        <ImageDiffView file={currentFile} imageSrc={imageSrc!} />
+      ) : (
+        <div className="min-h-0 flex-1 overflow-auto font-mono text-[12px] leading-5">
+          {showBlame ? (
+            <BlameView rows={blame} />
+          ) : activeDiff.trim() === "" ? (
+            <EmptyDiffState />
+          ) : viewMode === "split" ? (
+            <SplitDiffView diff={activeDiff} />
+          ) : (
+            <InlineDiffView diff={activeDiff} onStageHunk={onStageHunk} />
+          )}
+        </div>
+      )}
     </div>
   )
 
@@ -255,6 +279,76 @@ function DiffFileRow({
 function EmptyDiffState() {
   return (
     <div className="p-4 text-muted-foreground">Select a changed file to show its diff.</div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Image view — side-by-side Before/After preview for image files. Added files
+// show only After, deleted only Before, modified/renamed both. Panes sit on a
+// muted background so transparent pixels read against it.
+// ---------------------------------------------------------------------------
+
+function ImageDiffView({
+  file,
+  imageSrc,
+}: {
+  file: PatchFile
+  imageSrc: (path: string, side: ImageDiffSide) => string | null
+}) {
+  const showBefore = file.status !== "added"
+  const showAfter = file.status !== "deleted"
+  return (
+    <div
+      className={cn(
+        "grid min-h-0 flex-1 gap-px bg-border",
+        showBefore && showAfter ? "grid-cols-2" : "grid-cols-1",
+      )}
+    >
+      {showBefore && (
+        <ImagePane
+          label="Before"
+          testid="diff-image-before"
+          src={imageSrc(file.oldPath, "before")}
+        />
+      )}
+      {showAfter && (
+        <ImagePane
+          label="After"
+          testid="diff-image-after"
+          src={imageSrc(file.newPath, "after")}
+        />
+      )}
+    </div>
+  )
+}
+
+function ImagePane({
+  label,
+  testid,
+  src,
+}: {
+  label: string
+  testid: string
+  src: string | null
+}) {
+  return (
+    <figure className="bg-background flex min-h-0 min-w-0 flex-col">
+      <figcaption className="border-border text-muted-foreground border-b px-3 py-1.5 text-[11px] font-semibold tracking-wide uppercase">
+        {label}
+      </figcaption>
+      <div className="bg-muted flex min-h-0 flex-1 items-center justify-center overflow-auto p-4">
+        {src === null ? (
+          <span className="text-muted-foreground text-xs">No preview available</span>
+        ) : (
+          <img
+            src={src}
+            alt={`${label} image`}
+            data-testid={testid}
+            className="max-h-full max-w-full object-contain"
+          />
+        )}
+      </div>
+    </figure>
   )
 }
 
