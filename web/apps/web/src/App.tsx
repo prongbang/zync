@@ -340,7 +340,7 @@ export function App() {
                 value="tools"
                 className="min-h-0 flex-1 overflow-y-auto p-4"
               >
-                <GitToolsPanel onRefresh={() => ws.refresh()} />
+                <GitToolsPanel repositoryId={currentRepoId} onRefresh={() => ws.refresh()} />
               </TabsContent>
             </Tabs>
           )}
@@ -369,10 +369,11 @@ export function App() {
         <span className="text-sm font-semibold">Zync</span>
         <Toolbar
           disabled={!currentRepoId}
-          onAction={(kind) => {
-            if (kind === "stash") void ws.createStash("WIP from Zync")
-            else void ws.remoteAction(kind)
-          }}
+          branches={ws.branches}
+          onFetch={(all) => ws.fetchRemote(all)}
+          onPull={(mode) => ws.pullRemote(mode)}
+          onPush={(opts) => ws.pushRemote(opts)}
+          onStash={() => void ws.createStash("WIP from Zync")}
         />
         <Button
           variant="ghost"

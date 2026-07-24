@@ -25,6 +25,7 @@ import type {
   CommitSummary,
   ConflictSummary,
   FileStatus,
+  PullMode,
   RepoStats,
   RepositoryRecord,
   StashSummary,
@@ -62,7 +63,16 @@ export type WorkspaceState = {
   requestBlame: (path: string) => Promise<BlameRow[]>
   // Commit-menu / remote actions.
   runCommitAction: (action: CommitAction, commitId: string) => Promise<void>
-  remoteAction: (action: "fetch" | "pull" | "push") => Promise<void>
+  // Toolbar remote ops. Unlike `run`-based actions above, these resolve to
+  // the server's success message and reject with the thrown error instead of
+  // swallowing it, so the toolbar can drive a per-button busy state and toast
+  // the outcome itself (still setting the footer notice as a side effect).
+  fetchRemote: (all?: boolean) => Promise<string>
+  pullRemote: (mode?: PullMode) => Promise<string>
+  pushRemote: (opts?: {
+    forceWithLease?: boolean
+    setUpstream?: boolean
+  }) => Promise<string>
   // Branch / tag / stash / conflict / rebase actions.
   createBranch: (
     name: string,
@@ -354,15 +364,56 @@ export function useWorkspace(): WorkspaceState {
     [guard, run],
   )
 
-  const remoteAction = useCallback(
-    (action: "fetch" | "pull" | "push") =>
-      run(async (id) => {
-        if (action === "fetch") await api.fetch(id)
-        else if (action === "pull") await api.pull(id)
-        else await api.push(id)
-        return `${action[0].toUpperCase()}${action.slice(1)} complete`
-      }, SCOPE_ALL),
-    [run],
+  // Same shape as `run`, but resolves to a message and rethrows on failure
+  // instead of swallowing it — the toolbar needs both to drive its own
+  // busy/toast state per button. The footer notice keeps the old fixed
+  // "<Verb> complete" wording (kept for the e2e audit's notice assertions);
+  // the resolved value prefers the server's own message when it sent one,
+  // falling back to that same label so callers (toast) never show blank text.
+  const runRemote = useCallback(
+    async (
+      fn: (repositoryId: string) => Promise<string>,
+      scope: number,
+      noticeOnSuccess: string,
+    ): Promise<string> => {
+      const repositoryId = guard()
+      if (!repositoryId) throw new Error("Open a repository first")
+      try {
+        const message = await fn(repositoryId)
+        setNotice(noticeOnSuccess)
+        refresh(scope)
+        return message.trim() ? message : noticeOnSuccess
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error))
+        setNotice(err.message)
+        throw err
+      }
+    },
+    [guard, refresh],
+  )
+
+  const fetchRemote = useCallback(
+    (all?: boolean) =>
+      runRemote((id) => (all ? api.fetchAll(id) : api.fetch(id)), SCOPE_ALL, "Fetch complete"),
+    [runRemote],
+  )
+  const pullRemote = useCallback(
+    (mode?: PullMode) =>
+      runRemote(
+        (id) => api.pullRemote(id, "origin", null, mode ?? null),
+        SCOPE_ALL,
+        "Pull complete",
+      ),
+    [runRemote],
+  )
+  const pushRemote = useCallback(
+    (opts?: { forceWithLease?: boolean; setUpstream?: boolean }) =>
+      runRemote(
+        (id) => api.pushRemote(id, "origin", null, opts),
+        SCOPE_ALL,
+        "Push complete",
+      ),
+    [runRemote],
   )
 
   // Fork-style branch create with local-changes handling around the checkout.
@@ -589,7 +640,9 @@ export function useWorkspace(): WorkspaceState {
     commit,
     requestBlame,
     runCommitAction,
-    remoteAction,
+    fetchRemote,
+    pullRemote,
+    pushRemote,
     createBranch,
     renameBranch,
     deleteBranch,
