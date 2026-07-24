@@ -43,7 +43,7 @@ ZYNC_BIND=0.0.0.0:58271 cargo run -p zync-server
 cd web/apps/web && bun run dev --port 5173 --host
 ```
 
-Vite proxies backend route prefixes (`/repositories`, `/workspace`, `/files`, `/auth`, `/collaboration`, `/health`, and the `/ws` WebSocket) to the API at `http://127.0.0.1:58271` in dev — see `web/apps/web/vite.config.ts`, which must stay in sync with the route modules merged in `crates/server/src/main.rs`. In production the app is served same-origin, so no proxy target matters there.
+Vite proxies backend route prefixes (`/repositories`, `/workspace`, `/auth`, `/credentials`, `/directories`, `/health`, and the `/ws` WebSocket) to the API at `http://127.0.0.1:58271` in dev — `files::routes()`/`collaboration::routes()` only register nested `/workspace/:id/...` paths, so they ride on `/workspace` rather than needing their own prefix — see `web/apps/web/vite.config.ts`, which must stay in sync with the route modules merged in `crates/server/src/main.rs`. In production the app is served same-origin, so no proxy target matters there.
 
 Docker (production-shaped build/run):
 

@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useState } from "react"
 
-import { Info, PanelLeft } from "lucide-react"
+import { FolderGit2, Info, PanelLeft, Plus, RefreshCw } from "lucide-react"
 
+import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+} from "@workspace/ui/components/alert"
 import {
   Avatar,
   AvatarFallback,
@@ -9,6 +14,14 @@ import {
 } from "@workspace/ui/components/avatar"
 import { Badge } from "@workspace/ui/components/badge"
 import { Button } from "@workspace/ui/components/button"
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@workspace/ui/components/empty"
 import { Input } from "@workspace/ui/components/input"
 import {
   ResizableHandle,
@@ -28,6 +41,7 @@ import {
   TabsList,
   TabsTrigger,
 } from "@workspace/ui/components/tabs"
+import { toast } from "@workspace/ui/components/toast"
 import { cn } from "@workspace/ui/lib/utils"
 
 import { BranchSidebar, type BranchCommand } from "./components/BranchSidebar"
@@ -39,6 +53,7 @@ import { RepoMinibar } from "./components/RepoMinibar"
 import { RepoStatsPanel } from "./components/RepoStatsPanel"
 import { Toolbar } from "./components/Toolbar"
 import {
+  AddRepositoryDialog,
   DeleteDialog,
   DropDialog,
   MergeDialog,
@@ -52,6 +67,7 @@ import {
 import { useIsMobile } from "./hooks/use-mobile"
 import { graphRows, statusLabel, type BlameRow } from "./lib/helpers"
 import { formatCommitTime, gravatarSrc, shortId } from "./lib/format"
+import type { CreateRepositoryRequest, RepositoryRecord } from "./lib/types"
 import { useWorkspace } from "./lib/useWorkspace"
 
 type CenterMode = "changes" | "commits"
@@ -76,6 +92,7 @@ export function App() {
   const [message, setMessage] = useState("")
   const [blame, setBlame] = useState<BlameRow[] | null>(null)
   const [dialog, setDialog] = useState<ActiveDialog>(null)
+  const [addRepoOpen, setAddRepoOpen] = useState(false)
 
   const isMobile = useIsMobile()
   const [branchSheetOpen, setBranchSheetOpen] = useState(false)
@@ -89,6 +106,48 @@ export function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ws.repositories, ws.workspace])
+
+  async function handleCreateRepository(
+    request: CreateRepositoryRequest,
+  ): Promise<string> {
+    const created = await ws.api.createRepository(request)
+    await ws.loadRepositories()
+    await ws.openRepository(created.repository.id)
+    return created.repository.id
+  }
+
+  function handleToggleFavorite(repo: RepositoryRecord) {
+    void ws
+      .setRepositoryFavorite(repo.id, !repo.favorite)
+      .then(() =>
+        toast.add({
+          title: repo.favorite
+            ? `Removed ${repo.name} from favorites`
+            : `Favorited ${repo.name}`,
+          type: "success",
+        }),
+      )
+      .catch((error) =>
+        toast.add({
+          title: error instanceof Error ? error.message : String(error),
+          type: "error",
+        }),
+      )
+  }
+
+  function handleRemoveRepository(repo: RepositoryRecord) {
+    void ws
+      .removeRepository(repo.id)
+      .then(() =>
+        toast.add({ title: `Removed ${repo.name} from Zync`, type: "success" }),
+      )
+      .catch((error) =>
+        toast.add({
+          title: error instanceof Error ? error.message : String(error),
+          type: "error",
+        }),
+      )
+  }
 
   const rows = useMemo(() => graphRows(ws.commits), [ws.commits])
   const selected =
@@ -347,12 +406,98 @@ export function App() {
         </aside>
   )
 
+  // Empty state: nothing registered yet. Skip the toolbar/panel chrome
+  // entirely and surface a single CTA into the Add/Clone/Init dialog.
+  if (ws.repositoriesLoaded && ws.repositories.length === 0) {
+    return (
+      <div className="bg-background text-foreground flex h-svh">
+        <RepoMinibar
+          repos={[]}
+          activeId={null}
+          onSelect={() => {}}
+          onAddRepository={() => setAddRepoOpen(true)}
+          onToggleFavorite={() => {}}
+          onRemoveRepository={() => {}}
+        />
+        <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center p-6">
+          {ws.repositoriesError !== null ? (
+            // The load itself failed (server unreachable, etc.) — this is not the same as a
+            // genuine zero-repositories registry, so say so instead of silently showing the
+            // "No repositories yet" copy over a hidden error (ws.notice is in the footer only,
+            // which isn't visible in this empty-chrome layout).
+            <Empty>
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <FolderGit2 />
+                </EmptyMedia>
+                <EmptyTitle>Couldn&rsquo;t load repositories</EmptyTitle>
+                <EmptyDescription>
+                  The repository list failed to load — this isn&rsquo;t
+                  necessarily an empty registry.
+                </EmptyDescription>
+              </EmptyHeader>
+              <EmptyContent>
+                <Alert variant="destructive" className="text-left">
+                  <AlertTitle>Load failed</AlertTitle>
+                  <AlertDescription
+                    className="break-words"
+                    data-testid="repositories-load-error"
+                  >
+                    {ws.repositoriesError}
+                  </AlertDescription>
+                </Alert>
+                <Button
+                  variant="outline"
+                  data-testid="retry-load-repositories-btn"
+                  onClick={() => void ws.loadRepositories()}
+                >
+                  <RefreshCw data-icon="inline-start" />
+                  Retry
+                </Button>
+              </EmptyContent>
+            </Empty>
+          ) : (
+            <Empty>
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <FolderGit2 />
+                </EmptyMedia>
+                <EmptyTitle>No repositories yet</EmptyTitle>
+                <EmptyDescription>
+                  Add an existing repository, clone one from a URL, or start a
+                  new one.
+                </EmptyDescription>
+              </EmptyHeader>
+              <EmptyContent>
+                <Button
+                  data-testid="empty-add-repo-btn"
+                  onClick={() => setAddRepoOpen(true)}
+                >
+                  <Plus data-icon="inline-start" />
+                  Add Repository
+                </Button>
+              </EmptyContent>
+            </Empty>
+          )}
+        </div>
+        <AddRepositoryDialog
+          open={addRepoOpen}
+          onOpenChange={setAddRepoOpen}
+          onCreate={handleCreateRepository}
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="bg-background text-foreground flex h-svh">
       <RepoMinibar
         repos={ws.repositories}
         activeId={currentRepoId}
         onSelect={(id) => void ws.openRepository(id)}
+        onAddRepository={() => setAddRepoOpen(true)}
+        onToggleFavorite={handleToggleFavorite}
+        onRemoveRepository={handleRemoveRepository}
       />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="border-border flex h-12 shrink-0 items-center gap-2 border-b px-3">
@@ -599,6 +744,11 @@ export function App() {
             />
           )
         })()}
+      <AddRepositoryDialog
+        open={addRepoOpen}
+        onOpenChange={setAddRepoOpen}
+        onCreate={handleCreateRepository}
+      />
     </div>
   )
 }

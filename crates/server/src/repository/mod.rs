@@ -26,6 +26,11 @@ struct CreateRepositoryRequest {
     path: Option<String>,
     remote_url: Option<String>,
     clone_to: Option<String>,
+    /// When `true`, `path` is initialized as a brand-new repository (`git init`, no commit)
+    /// instead of being opened as an existing one. Mutually exclusive with the clone mode
+    /// above; ignored (treated as `false`) when `remote_url`/`clone_to` are both set.
+    #[serde(default)]
+    init: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,6 +135,44 @@ async fn create_repository(
         zync_git_core::clone_repo_with_credentials(remote_url, clone_to, Some(&spec))
             .map_err(map_git_error)?;
         clone_to.clone()
+    } else if request.init {
+        let target = request.path.clone().ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "path is required to init a repository".to_string(),
+            )
+        })?;
+        let trimmed = target.trim();
+        if trimmed.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "path must not be empty".to_string(),
+            ));
+        }
+        let target_path = PathBuf::from(trimmed);
+        if target_path.is_file() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "path exists and is a file, not a directory".to_string(),
+            ));
+        }
+        if target_path.join(".git").exists() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "path already contains a git repository".to_string(),
+            ));
+        }
+        // TODO(P4.1): enforce ZYNC_REPOS_ROOT allowlist here
+        zync_git_core::init_repo(&target_path).map_err(internal_error)?;
+        // Canonicalize after a successful init (never before — the path may not exist yet) so
+        // `repository_by_path` dedup and the fs watcher see the same resolved path that
+        // `/directories` and every other repo-path source already use.
+        target_path
+            .canonicalize()
+            .map_err(anyhow::Error::from)
+            .map_err(internal_error)?
+            .to_string_lossy()
+            .to_string()
     } else {
         request.path.clone().ok_or_else(|| {
             (

@@ -37,6 +37,13 @@ const api = new ZyncApi()
 export type WorkspaceState = {
   api: ZyncApi
   repositories: RepositoryRecord[]
+  /** True once the initial `loadRepositories()` has settled (success or failure) — lets callers
+   * distinguish "still loading" from a genuine zero-repositories empty state. */
+  repositoriesLoaded: boolean
+  /** Set when the most recent `loadRepositories()` call failed (server unreachable, etc.); `null`
+   * once a load succeeds. Lets an empty-state screen tell "nothing registered yet" apart from
+   * "couldn't even ask the server" instead of silently showing the former for both. */
+  repositoriesError: string | null
   workspace: WorkspaceResponse | null
   gitStatus: FileStatus[]
   branches: BranchSummary[]
@@ -49,6 +56,11 @@ export type WorkspaceState = {
   selectedFile: string
   loadRepositories: () => Promise<void>
   openRepository: (repositoryId: string) => Promise<void>
+  // Repository registry actions (RepoMinibar context menu / Add Repository dialog).
+  setRepositoryFavorite: (repositoryId: string, favorite: boolean) => Promise<void>
+  /** Unregisters a repository. If it was the open one, switches to another registered
+   * repository (or clears the open workspace so the zero-repositories empty state shows). */
+  removeRepository: (repositoryId: string) => Promise<void>
   refresh: (scope?: number) => void
   loadMore: () => void
   setDiff: (patch: string) => void
@@ -119,6 +131,8 @@ export type CommitAction =
 
 export function useWorkspace(): WorkspaceState {
   const [repositories, setRepositories] = useState<RepositoryRecord[]>([])
+  const [repositoriesLoaded, setRepositoriesLoaded] = useState(false)
+  const [repositoriesError, setRepositoriesError] = useState<string | null>(null)
   const [workspace, setWorkspace] = useState<WorkspaceResponse | null>(null)
   const [gitStatus, setGitStatus] = useState<FileStatus[]>([])
   const [branches, setBranches] = useState<BranchSummary[]>([])
@@ -142,8 +156,13 @@ export function useWorkspace(): WorkspaceState {
   const loadRepositories = useCallback(async () => {
     try {
       setRepositories(await api.repositories())
+      setRepositoriesError(null)
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error))
+      const message = error instanceof Error ? error.message : String(error)
+      setNotice(message)
+      setRepositoriesError(message)
+    } finally {
+      setRepositoriesLoaded(true)
     }
   }, [])
 
@@ -196,6 +215,52 @@ export function useWorkspace(): WorkspaceState {
       }
     },
     [refresh],
+  )
+
+  const setRepositoryFavorite = useCallback(
+    async (repositoryId: string, favorite: boolean) => {
+      try {
+        await api.setRepositoryFavorite(repositoryId, favorite)
+        setRepositories(await api.repositories())
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error))
+        setNotice(err.message)
+        throw err
+      }
+    },
+    [],
+  )
+
+  const removeRepository = useCallback(
+    async (repositoryId: string) => {
+      try {
+        await api.deleteRepository(repositoryId)
+        const remaining = await api.repositories()
+        setRepositories(remaining)
+        if (repoIdRef.current === repositoryId) {
+          repoIdRef.current = null
+          workspaceIdRef.current = null
+          setWorkspace(null)
+          setCommits([])
+          setBranches([])
+          setGitStatus([])
+          setStashes([])
+          setConflicts([])
+          setDiff("")
+          setSelectedFile("")
+          if (remaining.length > 0) {
+            await openRepository(remaining[0].id)
+          } else {
+            setNotice("Ready")
+          }
+        }
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error))
+        setNotice(err.message)
+        throw err
+      }
+    },
+    [openRepository],
   )
 
   const loadMore = useCallback(() => {
@@ -616,6 +681,8 @@ export function useWorkspace(): WorkspaceState {
   return {
     api,
     repositories,
+    repositoriesLoaded,
+    repositoriesError,
     workspace,
     gitStatus,
     branches,
@@ -628,6 +695,8 @@ export function useWorkspace(): WorkspaceState {
     selectedFile,
     loadRepositories,
     openRepository,
+    setRepositoryFavorite,
+    removeRepository,
     refresh,
     loadMore,
     setDiff,

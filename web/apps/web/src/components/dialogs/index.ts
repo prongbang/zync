@@ -1,6 +1,7 @@
 // Barrel for the Fork-style git dialogs. Each is a presentational component:
 // controlled open state in, typed payload out on submit.
 
+export { AddRepositoryDialog } from "./AddRepositoryDialog"
 export { NewBranchDialog } from "./NewBranchDialog"
 export type { LocalChangesMode, NewBranchPayload } from "./NewBranchDialog"
 export { TagDialog } from "./TagDialog"

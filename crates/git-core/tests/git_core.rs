@@ -42,6 +42,61 @@ fn status_add_commit_and_branch_flow() {
 }
 
 #[test]
+fn init_repo_creates_headless_repo_with_no_commit() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let target = temp.path().join("nested").join("new-repo");
+    assert!(!target.exists());
+
+    let info = zync_git_core::init_repo(&target).expect("init repo");
+
+    assert!(target.join(".git").is_dir());
+    assert_eq!(
+        info.path.canonicalize().expect("canonicalize info path"),
+        target.canonicalize().expect("canonicalize target"),
+    );
+    assert!(!info.is_bare);
+    assert_eq!(info.head, None);
+    assert_eq!(info.current_branch, None);
+
+    let status = zync_git_core::status(&target).expect("status of fresh repo");
+    assert!(status.is_empty());
+}
+
+#[test]
+fn init_repo_does_not_delete_preexisting_directory_on_failure() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    // A regular file named `.git` blocks `Repository::init` from creating the `.git`
+    // *directory* it needs, forcing a failure inside an already-existing target directory.
+    fs::write(temp.path().join(".git"), "not a repo").expect("seed conflicting .git file");
+
+    let err = zync_git_core::init_repo(temp.path()).expect_err("init should fail");
+    assert!(!format!("{err}").is_empty());
+
+    // The pre-existing directory (and the marker file proving it wasn't touched) must survive
+    // the failed init — init_repo must only ever delete directories it created itself.
+    assert!(temp.path().is_dir());
+    assert_eq!(
+        fs::read_to_string(temp.path().join(".git")).expect("marker file survives"),
+        "not a repo",
+    );
+}
+
+#[test]
+fn init_repo_leaves_existing_conflicting_file_untouched() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let target = temp.path().join("leaf");
+    fs::write(&target, "i am a file, not a directory").expect("seed conflicting file");
+
+    zync_git_core::init_repo(&target).expect_err("init should fail on a non-directory target");
+
+    assert!(target.is_file());
+    assert_eq!(
+        fs::read_to_string(&target).expect("file survives"),
+        "i am a file, not a directory",
+    );
+}
+
+#[test]
 fn unstage_discard_and_interactive_rebase_flow() {
     let temp = tempfile::tempdir().expect("tempdir");
     Repository::init(temp.path()).expect("init repo");

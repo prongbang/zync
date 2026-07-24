@@ -220,6 +220,9 @@ export interface CreateRepositoryRequest {
   path: string | null
   remote_url: string | null
   clone_to: string | null
+  /** `#[serde(default)]` -> key may be absent, defaults to `false` server-side. When `true`,
+   * `path` is initialized as a brand-new repository instead of opened as an existing one. */
+  init?: boolean
 }
 
 export interface FavoriteRepositoryRequest {

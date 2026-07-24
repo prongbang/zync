@@ -8,14 +8,16 @@ const API_TARGET = process.env.ZYNC_API_URL ?? "http://127.0.0.1:58271"
 
 // Backend route prefixes proxied to the Axum server in dev. Everything else is
 // served by Vite (the React app + its assets). Keep in sync with the route
-// modules merged in crates/server/src/main.rs.
+// modules merged in crates/server/src/main.rs. Note: `files::routes()` and
+// `collaboration::routes()` only register nested `/workspace/:id/...` paths
+// (no top-level `/files` or `/collaboration` route exists), so those two
+// modules ride on the `/workspace` prefix below rather than needing their own.
 const API_PREFIXES = [
   "/repositories",
   "/workspace",
-  "/files",
   "/auth",
-  "/collaboration",
   "/credentials",
+  "/directories",
   "/health",
 ]
 

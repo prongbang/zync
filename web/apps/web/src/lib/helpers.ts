@@ -660,6 +660,33 @@ export function isImagePath(path: string): boolean {
   ].includes(ext)
 }
 
+// ---------------------------------------------------------------------------
+// Add / Clone / Init repository dialog helpers.
+// ---------------------------------------------------------------------------
+
+/** Last path segment, for deriving a default repo display name from a directory path. */
+export function pathBasename(path: string): string {
+  const trimmed = path.trim().replace(/[/\\]+$/, "")
+  const segments = trimmed.split(/[/\\]/)
+  return segments[segments.length - 1] ?? ""
+}
+
+/** Derives a repo folder name from a clone URL, e.g. `git@host:org/repo.git` -> `repo`. */
+export function repoNameFromCloneUrl(url: string): string {
+  const trimmed = url.trim().replace(/[/\\]+$/, "")
+  const lastSegment = trimmed.split(/[/\\:]/).pop() ?? ""
+  return lastSegment.replace(/\.git$/i, "")
+}
+
+/** Joins a directory path and a folder name, tolerating a trailing slash on `dir`. */
+export function joinRepoPath(dir: string, name: string): string {
+  const trimmedDir = dir.trim().replace(/\/+$/, "")
+  const trimmedName = name.trim().replace(/^\/+/, "")
+  if (trimmedDir === "") return trimmedName
+  if (trimmedName === "") return trimmedDir
+  return `${trimmedDir}/${trimmedName}`
+}
+
 export function githubRepoUrl(remoteUrl: string): string | null {
   const trimmed = remoteUrl.trim().replace(/\.git$/, "")
   if (trimmed.startsWith("git@github.com:"))

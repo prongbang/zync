@@ -254,6 +254,50 @@ pub fn open_repo(path: impl AsRef<Path>) -> anyhow::Result<RepoInfo> {
     repo_info(&repo)
 }
 
+/// Initializes a new, empty repository at `path` (creating the directory if needed) — no
+/// initial commit, matching plain `git init`. `repo_info` handles the resulting headless state
+/// gracefully (`head`/`current_branch` come back `None`).
+///
+/// On failure (either the directory creation or `git init` itself), any directories this call
+/// created are removed again — `first_uncreated_ancestor` is captured before touching the
+/// filesystem so a pre-existing directory is never deleted.
+pub fn init_repo(path: impl AsRef<Path>) -> anyhow::Result<RepoInfo> {
+    let path = path.as_ref();
+    let created_root = first_uncreated_ancestor(path);
+
+    let result = fs::create_dir_all(path)
+        .map_err(anyhow::Error::from)
+        .and_then(|()| Repository::init(path).map_err(anyhow::Error::from))
+        .and_then(|repo| repo_info(&repo));
+
+    if result.is_err() {
+        if let Some(root) = created_root {
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+    result
+}
+
+/// Returns the topmost ancestor of `path` that does not currently exist on disk — i.e. the
+/// directory `fs::create_dir_all(path)` would actually create (removing it removes every nested
+/// directory created alongside it). `None` when `path` already exists, so callers know not to
+/// remove anything on a later failure.
+fn first_uncreated_ancestor(path: &Path) -> Option<PathBuf> {
+    if path.exists() {
+        return None;
+    }
+    let mut highest = path.to_path_buf();
+    let mut cursor = path;
+    while let Some(parent) = cursor.parent() {
+        if parent.exists() {
+            break;
+        }
+        highest = parent.to_path_buf();
+        cursor = parent;
+    }
+    Some(highest)
+}
+
 pub fn clone_repo(url: &str, destination: impl AsRef<Path>) -> anyhow::Result<RepoInfo> {
     clone_repo_with_credentials(url, destination, None)
 }
