@@ -30,6 +30,7 @@ import type {
   LfsRequest,
   LfsSummary,
   PatchRequest,
+  PullMode,
   ReflogEntrySummary,
   RemoteRequest,
   RemoteSummary,
@@ -572,6 +573,14 @@ export class ZyncApi {
     )
   }
 
+  /** Fetches every configured remote in turn; stops at the first failure. */
+  async fetchAll(repositoryId: string): Promise<string> {
+    return postText(
+      this.url(`/repositories/${repositoryId}/git/fetch-all`),
+      undefined
+    )
+  }
+
   async pull(repositoryId: string): Promise<string> {
     return this.pullRemote(repositoryId, "origin", null)
   }
@@ -579,9 +588,15 @@ export class ZyncApi {
   async pullRemote(
     repositoryId: string,
     remote: string,
-    branch?: string | null
+    branch?: string | null,
+    mode?: PullMode | null
   ): Promise<string> {
-    const request: RemoteRequest = { remote, branch: branch ?? null, url: null }
+    const request: RemoteRequest = {
+      remote,
+      branch: branch ?? null,
+      url: null,
+      mode: mode ?? null,
+    }
     return postText(
       this.url(`/repositories/${repositoryId}/git/pull`),
       request
@@ -595,9 +610,16 @@ export class ZyncApi {
   async pushRemote(
     repositoryId: string,
     remote: string,
-    branch?: string | null
+    branch?: string | null,
+    options?: { forceWithLease?: boolean; setUpstream?: boolean }
   ): Promise<string> {
-    const request: RemoteRequest = { remote, branch: branch ?? null, url: null }
+    const request: RemoteRequest = {
+      remote,
+      branch: branch ?? null,
+      url: null,
+      force_with_lease: options?.forceWithLease ?? null,
+      set_upstream: options?.setUpstream ?? null,
+    }
     return postText(
       this.url(`/repositories/${repositoryId}/git/push`),
       request

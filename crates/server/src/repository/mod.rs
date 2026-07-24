@@ -1,4 +1,4 @@
-use crate::{websocket::WorkspaceEvent, AppState};
+use crate::{credentials, git::map_git_error, websocket::WorkspaceEvent, AppState};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -122,7 +122,13 @@ async fn create_repository(
 ) -> Result<Json<RepositoryWithWorkspace>, (StatusCode, String)> {
     let path = if let (Some(remote_url), Some(clone_to)) = (&request.remote_url, &request.clone_to)
     {
-        zync_git_core::clone_repo(remote_url, clone_to).map_err(internal_error)?;
+        let spec = credentials::resolve_credential_spec_for_url(
+            &state,
+            credentials::DEFAULT_USER_ID,
+            remote_url,
+        )?;
+        zync_git_core::clone_repo_with_credentials(remote_url, clone_to, Some(&spec))
+            .map_err(map_git_error)?;
         clone_to.clone()
     } else {
         request.path.clone().ok_or_else(|| {

@@ -456,3 +456,34 @@ fn fetch_from_unreachable_host_fails_fast() {
         .downcast_ref::<zync_git_core::GitCommandError>()
         .expect("error should be a GitCommandError");
 }
+
+#[test]
+fn clone_with_userinfo_url_does_not_leak_token_on_failure() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let destination = temp.path().join("clone-dest");
+
+    // Port 1 on localhost refuses immediately; the URL below carries a fake token as HTTPS
+    // userinfo, exactly the shape a user-registered credentialed remote URL would have
+    // (`https://x-access-token:TOKEN@host/...`).
+    let url = "https://x-access-token:SUPERSECRETTOKEN@127.0.0.1:1/nonexistent.git";
+
+    let error = zync_git_core::clone_repo(url, &destination)
+        .expect_err("clone from an unreachable host should fail");
+
+    // Check both the full anyhow chain (what an HTTP error body would show, via
+    // `crate::git::map_git_error`'s `error.to_string()`) and the underlying
+    // `GitCommandError::command` field specifically, since that's exactly what P0.5's
+    // `clone_repo_with_credentials` used to interpolate the raw URL into.
+    let message = error.to_string();
+    assert!(
+        !message.contains("SUPERSECRETTOKEN"),
+        "error must not leak the URL's inline credential: {message}"
+    );
+    if let Some(git_error) = error.downcast_ref::<zync_git_core::GitCommandError>() {
+        assert!(
+            !git_error.command.contains("SUPERSECRETTOKEN"),
+            "GitCommandError::command must not leak the URL's inline credential: {}",
+            git_error.command
+        );
+    }
+}

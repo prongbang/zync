@@ -1,3 +1,4 @@
+use crate::credentials;
 use crate::websocket::WorkspaceEvent;
 use crate::AppState;
 use axum::{
@@ -29,6 +30,7 @@ pub fn routes() -> Router<Arc<AppState>> {
             get(diff_compare_commit),
         )
         .route("/repositories/:id/git/fetch", post(fetch))
+        .route("/repositories/:id/git/fetch-all", post(fetch_all))
         .route("/repositories/:id/git/pull", post(pull))
         .route("/repositories/:id/git/push", post(push))
         .route(
@@ -148,6 +150,18 @@ struct RemoteRequest {
     remote: Option<String>,
     branch: Option<String>,
     url: Option<String>,
+    /// Pull only: `"ff-only"` (default) | `"merge"` | `"rebase"`. See `zync_git_core::PullMode`.
+    #[serde(default)]
+    mode: Option<String>,
+    /// Push only: use `push_force_with_lease_with_credentials` instead of a plain push.
+    #[serde(default)]
+    force_with_lease: Option<bool>,
+    /// Push only, force-with-lease path: a plain push always attempts to set upstream
+    /// tracking (matching `git push -u`), but a force-with-lease push does not touch it by
+    /// default — pass `true` to additionally set it after a successful lease push (e.g. a
+    /// "publish branch" flow that force-pushed once already).
+    #[serde(default)]
+    set_upstream: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -402,10 +416,64 @@ async fn fetch(
     Json(request): Json<RemoteRequest>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    let result = zync_git_core::fetch(repository.path, request.remote.as_deref())
-        .map_err(internal_error)?;
+    let remote_name = request.remote.as_deref().unwrap_or("origin");
+    let spec = credentials::resolve_credential_spec(
+        &state,
+        credentials::DEFAULT_USER_ID,
+        &repository.path,
+        remote_name,
+    )?;
+    let result = zync_git_core::fetch_with_credentials(
+        &repository.path,
+        request.remote.as_deref(),
+        Some(&spec),
+    )
+    .map_err(map_git_error)?;
     broadcast_git_change(&state, &id, &["branches", "commits"]);
     Ok(result)
+}
+
+/// Fetches every configured remote in turn. Stops at the first failure (its mapped status/body
+/// is returned) rather than partially succeeding silently.
+async fn fetch_all(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let remotes = zync_git_core::remotes(&repository.path).map_err(internal_error)?;
+    if remotes.is_empty() {
+        return Ok("no remotes configured".to_string());
+    }
+
+    let mut results = Vec::with_capacity(remotes.len());
+    for remote in &remotes {
+        let spec = credentials::resolve_credential_spec(
+            &state,
+            credentials::DEFAULT_USER_ID,
+            &repository.path,
+            &remote.name,
+        )?;
+        let fetch_result = zync_git_core::fetch_with_credentials(
+            &repository.path,
+            Some(remote.name.as_str()),
+            Some(&spec),
+        );
+        let result = match fetch_result {
+            Ok(result) => result,
+            Err(err) => {
+                // A later remote can fail after an earlier one already fetched successfully —
+                // broadcast now so clients pick up whatever landed instead of missing it because
+                // the request as a whole errored out.
+                if !results.is_empty() {
+                    broadcast_git_change(&state, &id, &["branches", "commits"]);
+                }
+                return Err(map_git_error(err));
+            }
+        };
+        results.push(result);
+    }
+    broadcast_git_change(&state, &id, &["branches", "commits"]);
+    Ok(results.join("\n"))
 }
 
 async fn pull(
@@ -414,12 +482,22 @@ async fn pull(
     Json(request): Json<RemoteRequest>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    let result = zync_git_core::pull(
-        repository.path,
+    let remote_name = request.remote.as_deref().unwrap_or("origin");
+    let mode = parse_pull_mode(request.mode.as_deref())?;
+    let spec = credentials::resolve_credential_spec(
+        &state,
+        credentials::DEFAULT_USER_ID,
+        &repository.path,
+        remote_name,
+    )?;
+    let result = zync_git_core::pull_with_credentials(
+        &repository.path,
         request.remote.as_deref(),
         request.branch.as_deref(),
+        mode,
+        Some(&spec),
     )
-    .map_err(internal_error)?;
+    .map_err(map_git_error)?;
     broadcast_git_change(
         &state,
         &id,
@@ -428,20 +506,82 @@ async fn pull(
     Ok(result)
 }
 
+fn parse_pull_mode(mode: Option<&str>) -> Result<zync_git_core::PullMode, (StatusCode, String)> {
+    match mode {
+        None | Some("ff-only") => Ok(zync_git_core::PullMode::FfOnly),
+        Some("merge") => Ok(zync_git_core::PullMode::Merge),
+        Some("rebase") => Ok(zync_git_core::PullMode::Rebase),
+        Some(other) => Err((
+            StatusCode::BAD_REQUEST,
+            format!("mode must be 'ff-only', 'merge', or 'rebase', got '{other}'"),
+        )),
+    }
+}
+
 async fn push(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(request): Json<RemoteRequest>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    let result = zync_git_core::push(
-        repository.path,
-        request.remote.as_deref(),
-        request.branch.as_deref(),
-    )
-    .map_err(internal_error)?;
+    let remote_name = request.remote.as_deref().unwrap_or("origin");
+    let spec = credentials::resolve_credential_spec(
+        &state,
+        credentials::DEFAULT_USER_ID,
+        &repository.path,
+        remote_name,
+    )?;
+
+    let result = if request.force_with_lease.unwrap_or(false) {
+        let branch = resolve_push_branch(&repository.path, request.branch.as_deref())?;
+        let result = zync_git_core::push_force_with_lease_with_credentials(
+            &repository.path,
+            remote_name,
+            &branch,
+            Some(&spec),
+        )
+        .map_err(map_git_error)?;
+        if request.set_upstream.unwrap_or(false) {
+            match zync_git_core::set_upstream(&repository.path, &branch, remote_name, &branch) {
+                Ok(_) => result,
+                Err(err) => format!("{result} (warning: failed to set upstream tracking: {err})"),
+            }
+        } else {
+            result
+        }
+    } else {
+        zync_git_core::push_with_credentials(
+            &repository.path,
+            Some(remote_name),
+            request.branch.as_deref(),
+            Some(&spec),
+        )
+        .map_err(map_git_error)?
+    };
+
     broadcast_git_change(&state, &id, &["branches", "commits"]);
     Ok(result)
+}
+
+/// Resolves an explicit branch or falls back to the repo's current branch — used by the
+/// force-with-lease push path, whose git-core fn requires a concrete branch name rather than
+/// resolving `None` itself the way `push_with_credentials` does.
+fn resolve_push_branch(
+    repo_path: &str,
+    branch: Option<&str>,
+) -> Result<String, (StatusCode, String)> {
+    if let Some(branch) = branch {
+        return Ok(branch.to_string());
+    }
+    zync_git_core::open_repo(repo_path)
+        .ok()
+        .and_then(|info| info.current_branch)
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "branch is required: repository has no current branch".to_string(),
+            )
+        })
 }
 
 async fn remotes(
@@ -489,7 +629,11 @@ async fn prune_remote(
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     let name = request.remote.as_deref().unwrap_or("origin");
-    let result = zync_git_core::prune_remote(repository.path, name).map_err(internal_error)?;
+    // `prune_remote` is a `run_git` CLI shellout (no credentialed variant exists in git-core —
+    // it doesn't push/fetch objects, just prunes stale remote-tracking refs), but it still
+    // contacts the remote and can fail with Auth/Network/Timeout, so it gets the same kind→status
+    // mapping as the credentialed ops for a consistent error shape.
+    let result = zync_git_core::prune_remote(repository.path, name).map_err(map_git_error)?;
     broadcast_git_change(&state, &id, &["branches"]);
     Ok(result)
 }
@@ -505,7 +649,14 @@ async fn delete_remote_branch(
         .branch
         .as_deref()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "branch is required".to_string()))?;
-    zync_git_core::delete_remote_branch(repository.path, remote, branch).map_err(internal_error)?;
+    let spec = credentials::resolve_credential_spec(
+        &state,
+        credentials::DEFAULT_USER_ID,
+        &repository.path,
+        remote,
+    )?;
+    zync_git_core::delete_remote_branch_with_credentials(&repository.path, remote, branch, Some(&spec))
+        .map_err(map_git_error)?;
     broadcast_git_change(&state, &id, &["branches"]);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -521,8 +672,19 @@ async fn push_force_with_lease(
         .branch
         .as_deref()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "branch is required".to_string()))?;
-    let result = zync_git_core::push_force_with_lease(repository.path, remote, branch)
-        .map_err(internal_error)?;
+    let spec = credentials::resolve_credential_spec(
+        &state,
+        credentials::DEFAULT_USER_ID,
+        &repository.path,
+        remote,
+    )?;
+    let result = zync_git_core::push_force_with_lease_with_credentials(
+        &repository.path,
+        remote,
+        branch,
+        Some(&spec),
+    )
+    .map_err(map_git_error)?;
     broadcast_git_change(&state, &id, &["branches", "commits"]);
     Ok(result)
 }
@@ -1259,6 +1421,37 @@ fn internal_error(error: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
 
+/// Maps a failed remote-op (fetch/pull/push/clone) error to an HTTP status. Every credentialed
+/// git-core network fn returns a `zync_git_core::GitCommandError` on failure — for both the
+/// libgit2 and CLI-shellout transports (ADR-001) — so downcasting it classifies the failure by
+/// `GitErrorKind` regardless of which transport handled the call; anything else (e.g. a repo-open
+/// failure before the network call even starts) falls back to the same 500 as `internal_error`.
+/// The raw, readable error string is always kept as the response body, matching the existing
+/// repo convention — this is safe because `GitCommandError` never carries secret material (see
+/// ADR-001 "Secrets never enter errors").
+pub(crate) fn map_git_error(error: anyhow::Error) -> (StatusCode, String) {
+    (git_error_status(&error), error.to_string())
+}
+
+fn git_error_status(error: &anyhow::Error) -> StatusCode {
+    match error.downcast_ref::<zync_git_core::GitCommandError>() {
+        Some(git_error) => git_error_kind_status(git_error.kind),
+        None => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn git_error_kind_status(kind: zync_git_core::GitErrorKind) -> StatusCode {
+    match kind {
+        zync_git_core::GitErrorKind::Auth => StatusCode::UNAUTHORIZED,
+        zync_git_core::GitErrorKind::Network => StatusCode::BAD_GATEWAY,
+        zync_git_core::GitErrorKind::NonFastForward | zync_git_core::GitErrorKind::Conflict => {
+            StatusCode::CONFLICT
+        }
+        zync_git_core::GitErrorKind::Timeout => StatusCode::GATEWAY_TIMEOUT,
+        zync_git_core::GitErrorKind::Other => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
 fn content_type_for_path(path: &str) -> &'static str {
     match path
         .rsplit('.')
@@ -1275,5 +1468,105 @@ fn content_type_for_path(path: &str) -> &'static str {
         "svg" => "image/svg+xml",
         "webp" => "image/webp",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git_error(kind: zync_git_core::GitErrorKind) -> anyhow::Error {
+        zync_git_core::GitCommandError {
+            command: "git fetch origin".to_string(),
+            stderr: "boom".to_string(),
+            kind,
+        }
+        .into()
+    }
+
+    #[test]
+    fn auth_maps_to_401() {
+        assert_eq!(
+            git_error_status(&git_error(zync_git_core::GitErrorKind::Auth)),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[test]
+    fn network_maps_to_502() {
+        assert_eq!(
+            git_error_status(&git_error(zync_git_core::GitErrorKind::Network)),
+            StatusCode::BAD_GATEWAY
+        );
+    }
+
+    #[test]
+    fn non_fast_forward_maps_to_409() {
+        assert_eq!(
+            git_error_status(&git_error(zync_git_core::GitErrorKind::NonFastForward)),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn conflict_maps_to_409() {
+        assert_eq!(
+            git_error_status(&git_error(zync_git_core::GitErrorKind::Conflict)),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn timeout_maps_to_504() {
+        assert_eq!(
+            git_error_status(&git_error(zync_git_core::GitErrorKind::Timeout)),
+            StatusCode::GATEWAY_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn other_maps_to_500() {
+        assert_eq!(
+            git_error_status(&git_error(zync_git_core::GitErrorKind::Other)),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn non_git_command_error_falls_back_to_500() {
+        assert_eq!(
+            git_error_status(&anyhow::anyhow!("repository not found")),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn map_git_error_preserves_readable_body() {
+        let (status, body) = map_git_error(git_error(zync_git_core::GitErrorKind::Auth));
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body.contains("boom"), "body should keep the raw detail: {body}");
+    }
+
+    #[test]
+    fn parse_pull_mode_defaults_to_ff_only() {
+        assert_eq!(parse_pull_mode(None).unwrap(), zync_git_core::PullMode::FfOnly);
+        assert_eq!(
+            parse_pull_mode(Some("ff-only")).unwrap(),
+            zync_git_core::PullMode::FfOnly
+        );
+        assert_eq!(
+            parse_pull_mode(Some("merge")).unwrap(),
+            zync_git_core::PullMode::Merge
+        );
+        assert_eq!(
+            parse_pull_mode(Some("rebase")).unwrap(),
+            zync_git_core::PullMode::Rebase
+        );
+    }
+
+    #[test]
+    fn parse_pull_mode_rejects_unknown_value() {
+        let (status, _) = parse_pull_mode(Some("squash")).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

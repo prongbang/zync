@@ -1,11 +1,8 @@
 //! Server-side credentials store + API — DESIGN.md ADR-001. Owns the
 //! `credentials` table CRUD routes, at-rest encryption (via `crate::crypto`),
-//! and the host-pattern selection function that later remote-op wiring
-//! (fetch/pull/push) will call to pick a credential for a given remote URL.
-//!
-//! Scope note: this module does NOT wire credentials into the git routes —
-//! that lands once `CredentialSpec` plumbing (P0.3, git-core) is in place.
-//! `select_credential` below is the seam that task will call.
+//! the host-pattern selection function, and `resolve_credential_spec[_for_url]`
+//! — the seam the remote-op handlers (`crate::git`, `crate::repository`) call
+//! to turn a remote URL into a `zync_git_core::CredentialSpec`.
 
 use crate::{
     crypto::{self, CryptoError},
@@ -25,7 +22,7 @@ use zeroize::Zeroizing;
 /// Single-user server today — every route acts as this seeded user.
 /// TODO(P3): resolve the authenticated user from the request instead once
 /// real auth lands (see `crate::auth`).
-const DEFAULT_USER_ID: &str = "owner";
+pub(crate) const DEFAULT_USER_ID: &str = "owner";
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -218,11 +215,9 @@ fn crypto_error(error: CryptoError) -> (StatusCode, String) {
 // ---- Host-pattern parsing & credential selection (ADR-001 Decision 3) ----
 //
 // `select_credential`, `parse_remote_host`, and `decrypt_secret_bundle` are
-// public seams for the follow-up task that wires credentials into
-// fetch/pull/push (crates/git-core `CredentialSpec`, ADR-001 Decision 4).
-// Nothing in this crate calls them yet, hence `#[allow(dead_code)]` below.
+// the building blocks `resolve_credential_spec[_for_url]` (below) composes
+// into the seam the remote-op handlers call.
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchemeClass {
     Https,
@@ -230,7 +225,6 @@ pub enum SchemeClass {
 }
 
 impl SchemeClass {
-    #[allow(dead_code)]
     fn compatible_kind(self) -> &'static str {
         match self {
             SchemeClass::Https => "https_token",
@@ -243,7 +237,6 @@ impl SchemeClass {
 /// `https://host[:port]/...`, `ssh://[user@]host[:port]/...`, and the
 /// scp-like `[user@]host:path` form. Returns `None` for anything else
 /// (e.g. a local filesystem path, which never needs credentials).
-#[allow(dead_code)]
 pub fn parse_remote_host(remote_url: &str) -> Option<(String, SchemeClass)> {
     let url = remote_url.trim();
     if let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) {
@@ -274,7 +267,6 @@ pub fn parse_remote_host(remote_url: &str) -> Option<(String, SchemeClass)> {
     None
 }
 
-#[allow(dead_code)]
 fn host_from_authority(rest: &str) -> Option<String> {
     let rest = rest.rsplit('@').next()?; // strip userinfo, if any
     let authority = rest.split('/').next()?; // strip path
@@ -296,7 +288,6 @@ fn host_from_authority(rest: &str) -> Option<String> {
 /// never matches unless the host is literally that string. `validate_host_pattern`
 /// rejects those forms at write time; this is the read-time half of the
 /// same contract, kept strict independently of what's already in the DB.
-#[allow(dead_code)]
 fn host_match_score(pattern: &str, host: &str) -> Option<usize> {
     let pattern = pattern.trim().to_lowercase();
     let host = host.trim().to_lowercase();
@@ -324,7 +315,6 @@ fn host_match_score(pattern: &str, host: &str) -> Option<usize> {
 /// Step 1 of the ADR order ("explicit per-remote assignment") has no
 /// storage yet — remotes don't carry a `credential_id` — so it's a no-op
 /// here; wire it in once the remotes UI (PLAN.md P0.4 dep) adds that column.
-#[allow(dead_code)]
 pub fn select_credential(
     db: &Database,
     user_id: &str,
@@ -334,7 +324,6 @@ pub fn select_credential(
     Ok(select_from_candidates(&candidates, remote_url))
 }
 
-#[allow(dead_code)]
 fn select_from_candidates(
     candidates: &[CredentialSummary],
     remote_url: &str,
@@ -359,17 +348,120 @@ fn select_from_candidates(
     scored.into_iter().next().map(|(_, credential)| credential.clone())
 }
 
-/// Decrypt a stored credential's secret bundle into a JSON `Value`.
-/// Used by the later remote-op wiring task to build a `CredentialSpec`
+/// Decrypt a stored credential's secret bundle into a JSON `Value`. Used by
+/// `resolve_credential_spec[_for_url]` below to build a `CredentialSpec`
 /// (git-core). Decrypts just-in-time; the caller is responsible for
 /// dropping the plaintext promptly (see ADR-001 "Just-in-time decrypt").
-#[allow(dead_code)]
 pub fn decrypt_secret_bundle(
     key: &crypto::SecretKey,
     row: &CredentialSecretRow,
 ) -> Result<serde_json::Value, CryptoError> {
     let plaintext = crypto::decrypt(key, &row.secret_cipher, &row.secret_nonce)?;
     serde_json::from_slice(&plaintext).map_err(|_| CryptoError::Decrypt)
+}
+
+// ---- Remote-op seam (ADR-001 Decision 4) ----
+//
+// `resolve_credential_spec`/`resolve_credential_spec_for_url` are what
+// `crate::git` and `crate::repository`'s remote-op handlers call: given a
+// remote (by name, looked up in the repo) or a bare URL (clone-on-register,
+// which has no repo yet to look a remote up in), pick the best-matching
+// stored credential for `user_id`, decrypt it just-in-time, and build the
+// `zync_git_core::CredentialSpec` the network call needs. No match (or no
+// such remote) falls back to `CredentialSpec::Default`, preserving today's
+// ambient-credential behavior exactly. The decrypted plaintext bundle never
+// leaves this function — it's consumed into the spec's `Zeroizing` fields
+// and dropped.
+
+/// Resolve the credential spec for `remote_name` in the repo at `repo_path`.
+pub fn resolve_credential_spec(
+    state: &AppState,
+    user_id: &str,
+    repo_path: impl AsRef<std::path::Path>,
+    remote_name: &str,
+) -> Result<zync_git_core::CredentialSpec, (StatusCode, String)> {
+    let remote_url = zync_git_core::remotes(repo_path)
+        .map_err(internal_error)?
+        .into_iter()
+        .find(|remote| remote.name == remote_name)
+        .and_then(|remote| remote.url);
+
+    match remote_url {
+        Some(remote_url) => resolve_credential_spec_for_url(state, user_id, &remote_url),
+        None => Ok(zync_git_core::CredentialSpec::Default),
+    }
+}
+
+/// Resolve the credential spec for a bare remote URL — used by the
+/// clone-on-register path, which has a URL but no repo (yet) to inspect.
+pub fn resolve_credential_spec_for_url(
+    state: &AppState,
+    user_id: &str,
+    remote_url: &str,
+) -> Result<zync_git_core::CredentialSpec, (StatusCode, String)> {
+    let Some(summary) =
+        select_credential(&state.db, user_id, remote_url).map_err(internal_error)?
+    else {
+        return Ok(zync_git_core::CredentialSpec::Default);
+    };
+
+    let key = state.secrets.key().map_err(crypto_error)?;
+    let row = state
+        .db
+        .get_decryptable(&summary.id, user_id)
+        .map_err(internal_error)?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "credential not found".to_string()))?;
+    let bundle = decrypt_secret_bundle(key, &row).map_err(crypto_error)?;
+
+    build_credential_spec(&row, bundle)
+}
+
+/// Interpret a decrypted secret bundle (per `kind`) into a `CredentialSpec`.
+/// `username` defaults to `"git"` when the row didn't record one, matching
+/// `CredentialSpec::Default`'s own fallback for an unauthenticated ssh URL.
+fn build_credential_spec(
+    row: &CredentialSecretRow,
+    bundle: serde_json::Value,
+) -> Result<zync_git_core::CredentialSpec, (StatusCode, String)> {
+    let username = || row.username.clone().unwrap_or_else(|| "git".to_string());
+    match row.kind.as_str() {
+        "https_token" => {
+            let token = bundle.get("token").and_then(|value| value.as_str()).ok_or_else(|| {
+                internal_error(anyhow::anyhow!(
+                    "credential '{}' bundle is missing 'token'",
+                    row.id
+                ))
+            })?;
+            Ok(zync_git_core::CredentialSpec::UserpassPlaintext {
+                username: username(),
+                secret: Zeroizing::new(token.to_string()),
+            })
+        }
+        "ssh_key" => {
+            let private_key = bundle
+                .get("private_key")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| {
+                    internal_error(anyhow::anyhow!(
+                        "credential '{}' bundle is missing 'private_key'",
+                        row.id
+                    ))
+                })?;
+            let passphrase = bundle
+                .get("passphrase")
+                .and_then(|value| value.as_str())
+                .map(|value| Zeroizing::new(value.to_string()));
+            Ok(zync_git_core::CredentialSpec::SshKey {
+                username: username(),
+                private_key: Zeroizing::new(private_key.to_string()),
+                passphrase,
+            })
+        }
+        other => Err(internal_error(anyhow::anyhow!(
+            "credential '{}' has unsupported kind '{other}'",
+            row.id
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -544,5 +636,91 @@ mod tests {
         };
         let decrypted = decrypt_secret_bundle(&key, &row).unwrap();
         assert_eq!(decrypted["token"], "ghp_example");
+    }
+
+    fn secret_row(kind: &str, username: Option<&str>) -> CredentialSecretRow {
+        CredentialSecretRow {
+            id: "row-id".into(),
+            user_id: "owner".into(),
+            label: "label".into(),
+            host_pattern: "github.com".into(),
+            kind: kind.into(),
+            username: username.map(ToOwned::to_owned),
+            secret_cipher: Vec::new(),
+            secret_nonce: Vec::new(),
+            created_at: Utc::now().to_rfc3339(),
+        }
+    }
+
+    #[test]
+    fn build_credential_spec_https_token_uses_stored_username() {
+        let row = secret_row("https_token", Some("x-access-token"));
+        let bundle = serde_json::json!({ "token": "ghp_example" });
+        let spec = build_credential_spec(&row, bundle).unwrap();
+        match spec {
+            zync_git_core::CredentialSpec::UserpassPlaintext { username, secret } => {
+                assert_eq!(username, "x-access-token");
+                assert_eq!(secret.as_str(), "ghp_example");
+            }
+            other => panic!("expected UserpassPlaintext, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_credential_spec_https_token_defaults_username_to_git() {
+        let row = secret_row("https_token", None);
+        let bundle = serde_json::json!({ "token": "ghp_example" });
+        let spec = build_credential_spec(&row, bundle).unwrap();
+        match spec {
+            zync_git_core::CredentialSpec::UserpassPlaintext { username, .. } => {
+                assert_eq!(username, "git");
+            }
+            other => panic!("expected UserpassPlaintext, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_credential_spec_https_token_missing_token_errors() {
+        let row = secret_row("https_token", None);
+        let bundle = serde_json::json!({});
+        assert!(build_credential_spec(&row, bundle).is_err());
+    }
+
+    #[test]
+    fn build_credential_spec_ssh_key_carries_passphrase() {
+        let row = secret_row("ssh_key", Some("git"));
+        let bundle = serde_json::json!({ "private_key": "-----BEGIN KEY-----", "passphrase": "hunter2" });
+        let spec = build_credential_spec(&row, bundle).unwrap();
+        match spec {
+            zync_git_core::CredentialSpec::SshKey {
+                username,
+                private_key,
+                passphrase,
+            } => {
+                assert_eq!(username, "git");
+                assert_eq!(private_key.as_str(), "-----BEGIN KEY-----");
+                assert_eq!(passphrase.unwrap().as_str(), "hunter2");
+            }
+            other => panic!("expected SshKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_credential_spec_ssh_key_without_passphrase() {
+        let row = secret_row("ssh_key", None);
+        let bundle = serde_json::json!({ "private_key": "-----BEGIN KEY-----", "passphrase": null });
+        let spec = build_credential_spec(&row, bundle).unwrap();
+        match spec {
+            zync_git_core::CredentialSpec::SshKey { passphrase, .. } => {
+                assert!(passphrase.is_none());
+            }
+            other => panic!("expected SshKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_credential_spec_unknown_kind_errors() {
+        let row = secret_row("carrier-pigeon", None);
+        assert!(build_credential_spec(&row, serde_json::json!({})).is_err());
     }
 }

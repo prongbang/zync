@@ -122,10 +122,9 @@ pub fn encrypt(key: &SecretKey, plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>), 
 }
 
 /// Decrypt a `(ciphertext, nonce)` pair produced by [`encrypt`]. Consumed by
-/// `crate::credentials::decrypt_secret_bundle` and, later, the remote-op
-/// wiring task — not yet called elsewhere, hence the crate not treating it
-/// as dead by default outside `cfg(test)`.
-#[allow(dead_code)]
+/// `crate::credentials::decrypt_secret_bundle`, which the remote-op handlers
+/// (`crate::git`, `crate::repository`) call just-in-time to build a
+/// `CredentialSpec`.
 pub fn decrypt(key: &SecretKey, ciphertext: &[u8], nonce: &[u8]) -> Result<Vec<u8>, CryptoError> {
     if nonce.len() != NONCE_LEN {
         return Err(CryptoError::Decrypt);

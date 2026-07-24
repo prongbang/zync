@@ -276,8 +276,29 @@ pub fn clone_repo_with_credentials(
     let repo = git2::build::RepoBuilder::new()
         .fetch_options(fetch_options)
         .clone(url, destination.as_ref())
-        .map_err(|err| map_git2_error(&format!("git clone {url}"), &host, err))?;
+        .map_err(|err| {
+            map_git2_error(&format!("git clone {}", redact_url_userinfo(url)), &host, err)
+        })?;
     repo_info(&repo)
+}
+
+/// Strips any inline `user[:pass]@` userinfo out of a URL before it's embedded in a command
+/// string used for error text (see ADR-001 "Secrets never enter errors") — a user-registered
+/// `https://x-access-token:TOKEN@host/...` remote URL must never leak into
+/// `GitCommandError::command` (and from there, `map_git_error`'s HTTP body). Keeps the scheme,
+/// host, and path; the scp-like `user@host:path` form is left untouched — that `user` is just
+/// the ssh login name, never a secret. Every other network op builds its command string from an
+/// already-configured `remote_name`/branch instead of a raw URL, so this is only needed here.
+fn redact_url_userinfo(url: &str) -> String {
+    for scheme in ["https://", "http://", "ssh://"] {
+        if let Some(rest) = url.strip_prefix(scheme) {
+            return match rest.find('@') {
+                Some(idx) => format!("{scheme}{}", &rest[idx + 1..]),
+                None => url.to_string(),
+            };
+        }
+    }
+    url.to_string()
 }
 
 pub fn fetch(path: impl AsRef<Path>, remote_name: Option<&str>) -> anyhow::Result<String> {
@@ -2339,6 +2360,44 @@ fn temp_file_suffix() -> String {
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
     format!("{}-{nanos}-{count}", std::process::id())
+}
+
+#[cfg(test)]
+mod url_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn redact_url_userinfo_strips_https_token() {
+        assert_eq!(
+            redact_url_userinfo("https://x-access-token:SUPERSECRET@github.com/org/repo.git"),
+            "https://github.com/org/repo.git"
+        );
+    }
+
+    #[test]
+    fn redact_url_userinfo_strips_bare_username() {
+        assert_eq!(
+            redact_url_userinfo("https://oauth2@github.com/org/repo.git"),
+            "https://github.com/org/repo.git"
+        );
+    }
+
+    #[test]
+    fn redact_url_userinfo_leaves_url_without_userinfo_unchanged() {
+        assert_eq!(
+            redact_url_userinfo("https://github.com/org/repo.git"),
+            "https://github.com/org/repo.git"
+        );
+    }
+
+    #[test]
+    fn redact_url_userinfo_leaves_scp_like_url_unchanged() {
+        // The `user` in `git@host:path` is an ssh login name, never a secret — nothing to strip.
+        assert_eq!(
+            redact_url_userinfo("git@github.com:org/repo.git"),
+            "git@github.com:org/repo.git"
+        );
+    }
 }
 
 #[cfg(all(test, unix))]

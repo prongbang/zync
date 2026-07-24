@@ -277,10 +277,21 @@ export interface BranchRequest {
   revision: string | null
 }
 
+// Pull strategy — mirrors `zync_git_core::PullMode`. Omitted/undefined = "ff-only" (old
+// default behavior, preserved).
+export type PullMode = "ff-only" | "merge" | "rebase"
+
 export interface RemoteRequest {
   remote: string | null
   branch: string | null
   url: string | null
+  // Pull only.
+  mode?: PullMode | null
+  // Push only: use force-with-lease semantics instead of a plain push.
+  force_with_lease?: boolean | null
+  // Push only, force-with-lease path: also set upstream tracking after a successful lease
+  // push (a plain push always does this already; force-with-lease does not by default).
+  set_upstream?: boolean | null
 }
 
 export interface LfsRequest {
