@@ -13,8 +13,6 @@ workspace with an Axum API and SQLite-backed repository registry, and a React
   React 19 + TypeScript + Tailwind v4 + shadcn/ui) for repository management,
   local changes, commit history, branch actions, and Git tools. Shared shadcn/ui
   primitives live in `web/packages/ui` (`@workspace/ui`).
-- `crates/ui`: legacy Dioxus web UI. Excluded from the Cargo workspace; kept on
-  disk for reference pending removal.
 
 ## Features
 

@@ -3,12 +3,7 @@ members = [
     "crates/git-core",
     "crates/server",
 ]
-# The UI is now the React app in web/ (served by the server from ZYNC_STATIC_DIR).
-# The legacy Dioxus UI is excluded from the build but kept on disk for reference
-# until it is removed in a dedicated commit.
-exclude = [
-    "crates/ui",
-]
+# The UI is the React app in web/ (served by the server from ZYNC_STATIC_DIR).
 resolver = "2"
 
 [workspace.package]
