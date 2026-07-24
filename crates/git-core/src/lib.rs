@@ -1,18 +1,22 @@
 use git2::{
-    ApplyLocation, BranchType, Cred, DiffFormat, DiffOptions, IndexAddOption, MergeOptions, Oid,
-    PushOptions, RemoteCallbacks, Repository, ResetType, Signature, StatusOptions, TreeWalkMode,
+    ApplyLocation, AutotagOption, BranchType, Cred, CredentialType, DiffFormat, DiffOptions,
+    FetchOptions, FetchPrune, IndexAddOption, MergeOptions, Oid, PushOptions, Remote,
+    RemoteCallbacks, Repository, ResetType, Signature, StatusOptions, TreeWalkMode,
     TreeWalkResult,
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    cell::{Cell, RefCell},
     collections::HashMap,
     fs,
     io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    rc::Rc,
     thread,
     time::{Duration, Instant},
 };
+use zeroize::Zeroizing;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoInfo {
@@ -78,6 +82,56 @@ pub struct RemoteSummary {
     pub name: String,
     pub url: Option<String>,
     pub push_url: Option<String>,
+}
+
+/// Credentials for a network Git operation (fetch/pull/push/clone). Callers (the server) decrypt
+/// a stored credential just-in-time, build one of these, pass it by reference into a
+/// `*_with_credentials` fn, and let it drop at the end of the call — see DESIGN.md ADR-001.
+/// Every secret-bearing field is `Zeroizing<String>` so it is wiped from memory on drop.
+pub enum CredentialSpec {
+    /// HTTPS token/password auth. `username` is the token user (e.g. `"x-access-token"`,
+    /// `"oauth2"`, or the account name); `secret` is the PAT/OAuth token/password.
+    UserpassPlaintext {
+        username: String,
+        secret: Zeroizing<String>,
+    },
+    /// SSH private key held in memory (never written to disk on the libgit2 network paths; only
+    /// the CLI-only pull merge/rebase path writes it to a 0600 temp file, per ADR-001).
+    SshKey {
+        username: String,
+        private_key: Zeroizing<String>,
+        passphrase: Option<Zeroizing<String>>,
+    },
+    /// Explicit ssh-agent use (username optional; falls back to the URL's username, then "git").
+    SshAgent { username: Option<String> },
+    /// Ambient: current behavior — ssh-agent (when the URL carries a username) then
+    /// `Cred::default()`. The default when no spec is supplied.
+    Default,
+}
+
+/// Manual `Debug` so secrets never end up in a log line or panic message: every secret-bearing
+/// field prints as `"<redacted>"` regardless of formatter flags.
+impl std::fmt::Debug for CredentialSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CredentialSpec::UserpassPlaintext { username, .. } => f
+                .debug_struct("UserpassPlaintext")
+                .field("username", username)
+                .field("secret", &"<redacted>")
+                .finish(),
+            CredentialSpec::SshKey { username, .. } => f
+                .debug_struct("SshKey")
+                .field("username", username)
+                .field("private_key", &"<redacted>")
+                .field("passphrase", &"<redacted>")
+                .finish(),
+            CredentialSpec::SshAgent { username } => f
+                .debug_struct("SshAgent")
+                .field("username", username)
+                .finish(),
+            CredentialSpec::Default => write!(f, "Default"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,13 +255,74 @@ pub fn open_repo(path: impl AsRef<Path>) -> anyhow::Result<RepoInfo> {
 }
 
 pub fn clone_repo(url: &str, destination: impl AsRef<Path>) -> anyhow::Result<RepoInfo> {
-    let repo = Repository::clone(url, destination.as_ref())?;
+    clone_repo_with_credentials(url, destination, None)
+}
+
+/// Clones over libgit2 (`RepoBuilder` + `FetchOptions`) so credentials stay in memory and the
+/// caller gets real transfer progress for free. `spec: None` behaves like today (ambient
+/// ssh-agent / `Cred::default()`).
+pub fn clone_repo_with_credentials(
+    url: &str,
+    destination: impl AsRef<Path>,
+    spec: Option<&CredentialSpec>,
+) -> anyhow::Result<RepoInfo> {
+    let host = remote_host(url);
+    let default_spec = CredentialSpec::Default;
+    let spec = spec.unwrap_or(&default_spec);
+
+    let mut fetch_options = FetchOptions::new();
+    fetch_options.remote_callbacks(callbacks(spec));
+
+    let repo = git2::build::RepoBuilder::new()
+        .fetch_options(fetch_options)
+        .clone(url, destination.as_ref())
+        .map_err(|err| map_git2_error(&format!("git clone {url}"), &host, err))?;
     repo_info(&repo)
 }
 
 pub fn fetch(path: impl AsRef<Path>, remote_name: Option<&str>) -> anyhow::Result<String> {
+    fetch_with_credentials(path, remote_name, None)
+}
+
+/// Fetches over libgit2 `Remote::fetch` (download tags auto, prune off — pruning stays a
+/// separate explicit `prune_remote` op). Updates `FETCH_HEAD` the same way `git fetch` does
+/// (libgit2's default). `spec: None` behaves like today.
+pub fn fetch_with_credentials(
+    path: impl AsRef<Path>,
+    remote_name: Option<&str>,
+    spec: Option<&CredentialSpec>,
+) -> anyhow::Result<String> {
+    let repo = Repository::open(path.as_ref())?;
     let remote_name = remote_name.unwrap_or("origin");
-    run_git(path.as_ref(), &["fetch", "--prune", remote_name])
+    let mut remote = repo.find_remote(remote_name)?;
+    let host = remote_host(remote.url().unwrap_or(""));
+    let default_spec = CredentialSpec::Default;
+    let spec = spec.unwrap_or(&default_spec);
+
+    let mut fetch_options = FetchOptions::new();
+    fetch_options.remote_callbacks(callbacks(spec));
+    fetch_options.download_tags(AutotagOption::Auto);
+    fetch_options.prune(FetchPrune::Off);
+
+    remote
+        .fetch(&[] as &[&str], Some(&mut fetch_options), None)
+        .map_err(|err| map_git2_error(&format!("git fetch {remote_name}"), &host, err))?;
+
+    let stats = remote.stats();
+    Ok(format!(
+        "fetched {} object(s) from {remote_name}",
+        stats.total_objects()
+    ))
+}
+
+/// Pull strategy. `FfOnly` runs over libgit2 (fetch + fast-forward the local branch). `Merge`
+/// and `Rebase` stay on the `git` CLI — reimplementing merge/rebase conflict resolution on top
+/// of libgit2's plumbing is exactly the error-prone logic the CLI already gets right (ADR-001).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullMode {
+    FfOnly,
+    Merge,
+    Rebase,
 }
 
 pub fn pull(
@@ -215,17 +330,171 @@ pub fn pull(
     remote_name: Option<&str>,
     branch: Option<&str>,
 ) -> anyhow::Result<String> {
-    let repo = Repository::open(path.as_ref())?;
+    pull_with_credentials(path, remote_name, branch, PullMode::FfOnly, None)
+}
+
+/// `mode` selects the strategy (see [`PullMode`]); `spec: None` behaves like today. `FfOnly`
+/// runs entirely over libgit2 (credentials stay in memory). `Merge`/`Rebase` shell out to `git
+/// pull` with credentials injected via environment only, never argv:
+/// - HTTPS (`UserpassPlaintext`): a one-shot `GIT_ASKPASS` shim script (0700 temp file, removed
+///   after) echoes the secret from an env var set on the child process.
+/// - SSH (`SshKey`): the private key is written to a 0600 temp file for the duration of the
+///   call (`GIT_SSH_COMMAND` points at it) and removed immediately after — the only place an
+///   in-memory key ever touches disk.
+pub fn pull_with_credentials(
+    path: impl AsRef<Path>,
+    remote_name: Option<&str>,
+    branch: Option<&str>,
+    mode: PullMode,
+    spec: Option<&CredentialSpec>,
+) -> anyhow::Result<String> {
+    let path = path.as_ref();
+    let repo = Repository::open(path)?;
     let remote_name = remote_name.unwrap_or("origin");
     let branch_name = branch
         .map(ToOwned::to_owned)
         .or_else(|| upstream_branch(&repo).ok().flatten())
         .or_else(|| current_branch(&repo).ok().flatten())
         .ok_or_else(|| anyhow::anyhow!("cannot pull without a current branch"))?;
-    run_git(
-        path.as_ref(),
-        &["pull", "--ff-only", remote_name, &branch_name],
-    )
+
+    let default_spec = CredentialSpec::Default;
+    let spec = spec.unwrap_or(&default_spec);
+
+    match mode {
+        PullMode::FfOnly => pull_ff_only(&repo, remote_name, &branch_name, spec),
+        PullMode::Merge | PullMode::Rebase => {
+            pull_via_cli(path, remote_name, &branch_name, mode, spec)
+        }
+    }
+}
+
+/// `git fetch` + fast-forward of the local branch, entirely over libgit2.
+fn pull_ff_only(
+    repo: &Repository,
+    remote_name: &str,
+    branch_name: &str,
+    spec: &CredentialSpec,
+) -> anyhow::Result<String> {
+    // Refuse to silently switch branches: a plain `git pull` only ever fast-forwards whatever
+    // is currently checked out. If the caller resolved a different branch (e.g. an explicit
+    // `branch` argument that isn't HEAD), bail instead of quietly moving/checking out a branch
+    // the user didn't ask to touch.
+    let head_branch = current_branch(repo)?;
+    if head_branch.as_deref() != Some(branch_name) {
+        return Err(anyhow::anyhow!(
+            "cannot ff-only pull '{branch_name}': the checked-out branch is {}",
+            head_branch
+                .map(|name| format!("'{name}'"))
+                .unwrap_or_else(|| "detached (no current branch)".to_string())
+        ));
+    }
+
+    let mut remote = repo.find_remote(remote_name)?;
+    let host = remote_host(remote.url().unwrap_or(""));
+
+    let mut fetch_options = FetchOptions::new();
+    fetch_options.remote_callbacks(callbacks(spec));
+    fetch_options.download_tags(AutotagOption::Auto);
+    fetch_options.prune(FetchPrune::Off);
+    // Empty refspecs = the remote's configured fetch refspecs, same as `fetch_with_credentials`
+    // uses. A bare branch-name refspec (e.g. just `"main"`) isn't guaranteed to update
+    // refs/remotes/<remote>/<branch> the way the configured mapping does, and that
+    // remote-tracking ref is exactly what we (and push_force_with_lease's freshness check)
+    // read next — so it needs to be reliably current.
+    remote
+        .fetch(&[] as &[&str], Some(&mut fetch_options), None)
+        .map_err(|err| {
+            map_git2_error(
+                &format!("git pull --ff-only {remote_name} {branch_name}"),
+                &host,
+                err,
+            )
+        })?;
+
+    let tracking_ref_name = format!("refs/remotes/{remote_name}/{branch_name}");
+    let tracking_ref = repo.find_reference(&tracking_ref_name).map_err(|_| {
+        anyhow::anyhow!("remote '{remote_name}' has no branch '{branch_name}' after fetch")
+    })?;
+    let fetch_commit = repo.reference_to_annotated_commit(&tracking_ref)?;
+    let analysis = repo.merge_analysis(&[&fetch_commit])?;
+
+    if analysis.0.is_up_to_date() {
+        return Ok("Already up to date.".to_string());
+    }
+    if !analysis.0.is_fast_forward() {
+        return Err(GitCommandError {
+            command: format!("git pull --ff-only {remote_name} {branch_name}"),
+            stderr: "not possible to fast-forward, aborting (local and remote history have diverged)"
+                .to_string(),
+            kind: GitErrorKind::NonFastForward,
+        }
+        .into());
+    }
+
+    let target = fetch_commit.id();
+    let target_commit = repo.find_commit(target)?;
+    // Check out the target tree BEFORE moving any ref. git2's "safe" checkout aborts cleanly on
+    // a dirty/conflicting working tree instead of clobbering uncommitted local changes, which a
+    // set_target/set_head-first ordering (followed by a *forced* checkout_head) would silently
+    // overwrite — real `git pull --ff-only` aborts in that situation rather than losing data.
+    repo.checkout_tree(
+        target_commit.as_object(),
+        Some(git2::build::CheckoutBuilder::default().safe()),
+    )?;
+
+    let refname = format!("refs/heads/{branch_name}");
+    match repo.find_reference(&refname) {
+        Ok(mut reference) => {
+            reference.set_target(target, "zync: fast-forward pull")?;
+        }
+        Err(_) => {
+            repo.reference(&refname, target, true, "zync: fast-forward pull")?;
+        }
+    }
+    repo.set_head(&refname)?;
+
+    Ok(format!("Fast-forwarded {branch_name} to {target}"))
+}
+
+/// `git pull`/`git pull --rebase` via the hardened `run_git` shellout, with credentials injected
+/// through environment variables only (see [`pull_with_credentials`] doc for the mechanism).
+fn pull_via_cli(
+    path: &Path,
+    remote_name: &str,
+    branch_name: &str,
+    mode: PullMode,
+    spec: &CredentialSpec,
+) -> anyhow::Result<String> {
+    let args: Vec<&str> = match mode {
+        PullMode::Merge => vec!["pull", remote_name, branch_name],
+        PullMode::Rebase => vec!["pull", "--rebase", remote_name, branch_name],
+        PullMode::FfOnly => unreachable!("ff-only pulls run over libgit2, see pull_ff_only"),
+    };
+
+    match spec {
+        CredentialSpec::UserpassPlaintext { secret, .. } => {
+            // `shim` (a `TempSecretFile`) deletes itself on drop at the end of this arm,
+            // regardless of whether run_git_with_env returns Ok or Err (or panics).
+            let shim = write_askpass_shim()?;
+            run_git_with_env(
+                path,
+                &args,
+                &[
+                    ("GIT_ASKPASS", shim.path().to_string_lossy().as_ref()),
+                    ("ZYNC_ASKPASS_TOKEN", secret.as_str()),
+                ],
+            )
+        }
+        CredentialSpec::SshKey { private_key, .. } => {
+            let key_file = write_temp_secret_file("zync-ssh-key", private_key, 0o600)?;
+            let ssh_command = format!(
+                "ssh -i {} -oBatchMode=yes -oIdentitiesOnly=yes",
+                key_file.path().display()
+            );
+            run_git_with_env(path, &args, &[("GIT_SSH_COMMAND", &ssh_command)])
+        }
+        CredentialSpec::SshAgent { .. } | CredentialSpec::Default => run_git(path, &args),
+    }
 }
 
 pub fn push(
@@ -233,13 +502,44 @@ pub fn push(
     remote_name: Option<&str>,
     branch: Option<&str>,
 ) -> anyhow::Result<String> {
+    push_with_credentials(path, remote_name, branch, None)
+}
+
+/// Pushes over libgit2 `Remote::push` (current refspec semantics preserved: pushes the current
+/// branch when `branch` is `None`, and sets it as upstream on success — matching the old `git
+/// push -u` behavior). `spec: None` behaves like today.
+pub fn push_with_credentials(
+    path: impl AsRef<Path>,
+    remote_name: Option<&str>,
+    branch: Option<&str>,
+    spec: Option<&CredentialSpec>,
+) -> anyhow::Result<String> {
     let repo = Repository::open(path.as_ref())?;
     let remote_name = remote_name.unwrap_or("origin");
     let branch_name = branch
         .map(ToOwned::to_owned)
         .or_else(|| current_branch(&repo).ok().flatten())
         .ok_or_else(|| anyhow::anyhow!("cannot push without a current branch"))?;
-    run_git(path.as_ref(), &["push", "-u", remote_name, &branch_name])
+
+    let mut remote = repo.find_remote(remote_name)?;
+    let host = remote_host(remote.url().unwrap_or(""));
+    let default_spec = CredentialSpec::Default;
+    let spec = spec.unwrap_or(&default_spec);
+
+    let refspec = format!("refs/heads/{branch_name}:refs/heads/{branch_name}");
+    let command = format!("git push -u {remote_name} {branch_name}");
+    push_refspecs(&mut remote, &[refspec], spec, &host, &command)?;
+
+    // The push already landed on the remote at this point — a failure to record the local
+    // upstream-tracking config (a purely local, non-network op) shouldn't be reported as the
+    // push itself having failed. Degrade to a note in the success message instead.
+    let message = format!("pushed {branch_name} to {remote_name}");
+    match set_upstream(path.as_ref(), &branch_name, remote_name, &branch_name) {
+        Ok(_) => Ok(message),
+        Err(err) => Ok(format!(
+            "{message} (warning: failed to set upstream tracking: {err})"
+        )),
+    }
 }
 
 pub fn remotes(path: impl AsRef<Path>) -> anyhow::Result<Vec<RemoteSummary>> {
@@ -278,12 +578,24 @@ pub fn delete_remote_branch(
     remote_name: &str,
     branch: &str,
 ) -> anyhow::Result<()> {
+    delete_remote_branch_with_credentials(path, remote_name, branch, None)
+}
+
+pub fn delete_remote_branch_with_credentials(
+    path: impl AsRef<Path>,
+    remote_name: &str,
+    branch: &str,
+    spec: Option<&CredentialSpec>,
+) -> anyhow::Result<()> {
     let repo = Repository::open(path.as_ref())?;
     let mut remote = repo.find_remote(remote_name)?;
+    let host = remote_host(remote.url().unwrap_or(""));
+    let default_spec = CredentialSpec::Default;
+    let spec = spec.unwrap_or(&default_spec);
+
     let refspec = format!(":refs/heads/{branch}");
-    let mut options = PushOptions::new();
-    options.remote_callbacks(callbacks());
-    remote.push(&[refspec], Some(&mut options))?;
+    let command = format!("git push {remote_name} :{branch}");
+    push_refspecs(&mut remote, &[refspec], spec, &host, &command)?;
     Ok(())
 }
 
@@ -305,10 +617,65 @@ pub fn push_force_with_lease(
     remote_name: &str,
     branch: &str,
 ) -> anyhow::Result<String> {
-    run_git(
-        path.as_ref(),
-        &["push", "--force-with-lease", remote_name, branch],
-    )
+    push_force_with_lease_with_credentials(path, remote_name, branch, None)
+}
+
+/// libgit2 has no native "force-with-lease" (its push refspec expresses force but carries no
+/// expected-old-oid check), so the lease is implemented client-side per ADR-001: connect and
+/// list the remote's current oid for `branch`, compare it against our locally cached
+/// remote-tracking ref (`refs/remotes/<remote>/<branch>`), and only proceed with a forced push
+/// if they match — i.e. nothing has landed on the remote since our last fetch of it. A mismatch
+/// (or the remote having a branch we don't know about at all) is rejected as a stale lease.
+pub fn push_force_with_lease_with_credentials(
+    path: impl AsRef<Path>,
+    remote_name: &str,
+    branch: &str,
+    spec: Option<&CredentialSpec>,
+) -> anyhow::Result<String> {
+    let repo = Repository::open(path.as_ref())?;
+    let mut remote = repo.find_remote(remote_name)?;
+    let host = remote_host(remote.url().unwrap_or(""));
+    let default_spec = CredentialSpec::Default;
+    let spec = spec.unwrap_or(&default_spec);
+    let command = format!("git push --force-with-lease {remote_name} {branch}");
+
+    let tracking_ref = format!("refs/remotes/{remote_name}/{branch}");
+    let expected_oid = repo
+        .find_reference(&tracking_ref)
+        .ok()
+        .and_then(|reference| reference.target());
+
+    let remote_branch_ref = format!("refs/heads/{branch}");
+    let actual_oid = {
+        let connection = remote
+            .connect_auth(git2::Direction::Fetch, Some(callbacks(spec)), None)
+            .map_err(|err| map_git2_error(&command, &host, err))?;
+        let heads = connection
+            .list()
+            .map_err(|err| map_git2_error(&command, &host, err))?;
+        heads
+            .iter()
+            .find(|head| head.name() == remote_branch_ref)
+            .map(|head| head.oid())
+    };
+
+    if expected_oid != actual_oid {
+        return Err(GitCommandError {
+            command,
+            stderr: format!(
+                "stale info: {remote_name}/{branch} has moved since the last fetch; fetch before forcing"
+            ),
+            kind: GitErrorKind::NonFastForward,
+        }
+        .into());
+    }
+
+    let refspec = format!("+refs/heads/{branch}:refs/heads/{branch}");
+    push_refspecs(&mut remote, &[refspec], spec, &host, &command)?;
+
+    Ok(format!(
+        "force-pushed {branch} to {remote_name} (lease verified)"
+    ))
 }
 
 pub fn status(path: impl AsRef<Path>) -> anyhow::Result<Vec<FileStatus>> {
@@ -1600,13 +1967,27 @@ pub fn classify_git_stderr(stderr: &str) -> GitErrorKind {
 }
 
 fn run_git(repo_path: &Path, args: &[&str]) -> anyhow::Result<String> {
-    run_git_with_timeout(repo_path, args, DEFAULT_GIT_TIMEOUT)
+    run_git_with_timeout(repo_path, args, DEFAULT_GIT_TIMEOUT, &[])
+}
+
+/// `run_git`, but with additional environment variables set on the child process. Used to
+/// inject credentials into the CLI-only pull merge/rebase path (per ADR-001) without ever
+/// putting a secret in argv, where it would end up embedded in `GitCommandError::command`. The
+/// public `run_git`-equivalent surface (`fetch`/`push`/etc.) is unaffected; this is only reached
+/// from `pull_via_cli`.
+fn run_git_with_env(
+    repo_path: &Path,
+    args: &[&str],
+    extra_env: &[(&str, &str)],
+) -> anyhow::Result<String> {
+    run_git_with_timeout(repo_path, args, DEFAULT_GIT_TIMEOUT, extra_env)
 }
 
 fn run_git_with_timeout(
     repo_path: &Path,
     args: &[&str],
     timeout: Duration,
+    extra_env: &[(&str, &str)],
 ) -> anyhow::Result<String> {
     let command_str = format!("git {}", args.join(" "));
 
@@ -1624,6 +2005,11 @@ fn run_git_with_timeout(
     command.env("GIT_TERMINAL_PROMPT", "0");
     if std::env::var_os("GIT_SSH_COMMAND").is_none() {
         command.env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes");
+    }
+    // Applied last so a credentialed caller's GIT_SSH_COMMAND/GIT_ASKPASS always wins over the
+    // defaults above.
+    for (key, value) in extra_env {
+        command.env(key, value);
     }
 
     let mut child = command.spawn()?;
@@ -1693,14 +2079,313 @@ fn run_git_with_timeout(
     }
 }
 
-fn callbacks<'a>() -> RemoteCallbacks<'a> {
+/// Ceiling on how many times the credentials callback below will be invoked for a single
+/// network operation. libgit2 retries the callback (sometimes with a narrower `allowed_types`
+/// bitmask) when a returned credential is rejected; without a cap, a persistently-wrong
+/// credential — or a server that never accepts any type we offer — could make the callback spin
+/// indefinitely instead of surfacing a clean auth error.
+const MAX_CREDENTIAL_ATTEMPTS: u32 = 5;
+
+/// Builds the `RemoteCallbacks` credential closure for a given [`CredentialSpec`]. Every
+/// libgit2 network op (fetch/push/force-with-lease/clone/delete-remote-branch) goes through
+/// this so credential handling stays in one place.
+fn callbacks<'a>(spec: &'a CredentialSpec) -> RemoteCallbacks<'a> {
     let mut callbacks = RemoteCallbacks::new();
-    callbacks.credentials(|_, username, _| {
-        if let Some(username) = username {
-            Cred::ssh_key_from_agent(username)
-        } else {
-            Cred::default()
+    let attempts = Cell::new(0u32);
+    callbacks.credentials(move |_url, username_from_url, allowed_types| {
+        let attempt = attempts.get();
+        attempts.set(attempt + 1);
+        if attempt >= MAX_CREDENTIAL_ATTEMPTS {
+            return Err(git2::Error::from_str(
+                "authentication failed: exceeded maximum credential attempts",
+            ));
+        }
+
+        // SSH's two-step negotiation asks for a bare username before it asks for the actual key
+        // (this is what `allowed_types == USERNAME` means, distinct from `SSH_KEY`). Without
+        // this branch, `ssh://host/path` URLs that carry no inline user fail outright for
+        // `SshKey`/`SshAgent` even with otherwise-correct credentials.
+        if allowed_types.contains(CredentialType::USERNAME) {
+            let user = match spec {
+                CredentialSpec::UserpassPlaintext { username, .. } => username.as_str(),
+                CredentialSpec::SshKey { username, .. } => username.as_str(),
+                CredentialSpec::SshAgent { username } => {
+                    username.as_deref().or(username_from_url).unwrap_or("git")
+                }
+                CredentialSpec::Default => username_from_url.unwrap_or("git"),
+            };
+            return Cred::username(user);
+        }
+
+        match spec {
+            CredentialSpec::UserpassPlaintext { username, secret } => {
+                if allowed_types.contains(CredentialType::USER_PASS_PLAINTEXT) {
+                    Cred::userpass_plaintext(username, secret)
+                } else {
+                    Err(git2::Error::from_str(
+                        "authentication failed: remote does not accept username/password credentials",
+                    ))
+                }
+            }
+            CredentialSpec::SshKey {
+                username,
+                private_key,
+                passphrase,
+            } => {
+                if allowed_types.contains(CredentialType::SSH_KEY) {
+                    let passphrase = passphrase.as_ref().map(|value| value.as_str());
+                    Cred::ssh_key_from_memory(username, None, private_key, passphrase)
+                } else {
+                    Err(git2::Error::from_str(
+                        "authentication failed: remote does not accept SSH key credentials",
+                    ))
+                }
+            }
+            CredentialSpec::SshAgent { username } => {
+                let user = username.as_deref().or(username_from_url).unwrap_or("git");
+                if attempt == 0 && allowed_types.contains(CredentialType::SSH_KEY) {
+                    Cred::ssh_key_from_agent(user)
+                } else {
+                    Cred::default()
+                }
+            }
+            CredentialSpec::Default => {
+                // Preserves the pre-credentials behavior exactly on the first attempt: try the
+                // ssh-agent when the URL carries a username, otherwise Cred::default(). Later
+                // attempts fall back to Cred::default() so a failing agent can't loop forever.
+                if attempt == 0 {
+                    if let Some(username) = username_from_url {
+                        return Cred::ssh_key_from_agent(username);
+                    }
+                }
+                Cred::default()
+            }
         }
     });
     callbacks
+}
+
+/// Best-effort host extraction from a remote URL, used only to build user-facing error text
+/// (never logged or returned with credentials). Handles `https://`/`http://`, `ssh://`, and the
+/// scp-like `user@host:path` form; falls back to the raw URL if none match.
+fn remote_host(url: &str) -> String {
+    fn strip_userinfo(rest: &str) -> &str {
+        rest.rsplit('@').next().unwrap_or(rest)
+    }
+
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    {
+        let rest = strip_userinfo(rest);
+        rest.split('/').next().unwrap_or(rest).to_string()
+    } else if let Some(rest) = url.strip_prefix("ssh://") {
+        let rest = strip_userinfo(rest);
+        rest.split('/').next().unwrap_or(rest).to_string()
+    } else if let Some(idx) = url.find('@') {
+        // scp-like `git@host:path`.
+        let rest = &url[idx + 1..];
+        rest.split(':').next().unwrap_or(rest).to_string()
+    } else {
+        url.split('/').next().unwrap_or(url).to_string()
+    }
+}
+
+/// Maps a `git2::Error` from a network operation into the same [`GitCommandError`] used by the
+/// `run_git` CLI path, so callers can `downcast_ref::<GitCommandError>()` uniformly regardless
+/// of which transport handled the operation. Per ADR-001, an auth failure never carries the
+/// underlying libgit2 message (which can echo back URL/username detail) — it gets a fixed,
+/// secret-free message instead. Every other kind is classified the same way CLI stderr is,
+/// since libgit2's own error text also never contains credentials (they're never embedded in
+/// the URL on these paths).
+fn map_git2_error(command: &str, host: &str, err: git2::Error) -> anyhow::Error {
+    let raw = err.message();
+    let kind = if err.code() == git2::ErrorCode::Auth {
+        GitErrorKind::Auth
+    } else {
+        classify_git_stderr(raw)
+    };
+    let stderr = if kind == GitErrorKind::Auth {
+        format!("authentication failed for {host}")
+    } else {
+        raw.to_string()
+    };
+    GitCommandError {
+        command: command.to_string(),
+        stderr,
+        kind,
+    }
+    .into()
+}
+
+/// Pushes `refspecs` and turns a server-side rejection into an `Err`. `Remote::push` alone
+/// returns `Ok(())` even when the remote rejects a ref update (a well-known libgit2 gotcha), so
+/// this always installs a `push_update_reference` callback and checks it after the call.
+fn push_refspecs(
+    remote: &mut Remote<'_>,
+    refspecs: &[String],
+    spec: &CredentialSpec,
+    host: &str,
+    command: &str,
+) -> anyhow::Result<()> {
+    let rejected: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let rejected_writer = Rc::clone(&rejected);
+
+    let mut push_callbacks = callbacks(spec);
+    push_callbacks.push_update_reference(move |refname, status| {
+        if let Some(message) = status {
+            *rejected_writer.borrow_mut() = Some(format!("{refname}: {message}"));
+        }
+        Ok(())
+    });
+
+    let mut options = PushOptions::new();
+    options.remote_callbacks(push_callbacks);
+
+    remote
+        .push(refspecs, Some(&mut options))
+        .map_err(|err| map_git2_error(command, host, err))?;
+
+    if let Some(message) = rejected.borrow_mut().take() {
+        return Err(GitCommandError {
+            command: command.to_string(),
+            kind: classify_git_stderr(&message),
+            stderr: message,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// A temp file created with owner-only permissions that deletes itself on drop — including
+/// during panic unwinding — so a credentialed pull's key/token temp file is never orphaned on
+/// disk.
+struct TempSecretFile(PathBuf);
+
+impl TempSecretFile {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempSecretFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Writes a one-shot `GIT_ASKPASS` shim: a tiny shell script that prints `ZYNC_ASKPASS_TOKEN`
+/// (set on the same child process, never argv) whenever git prompts for a credential. Created
+/// atomically with its final (0700, executable) permission bits — see `create_owner_only_file`.
+fn write_askpass_shim() -> anyhow::Result<TempSecretFile> {
+    let path = std::env::temp_dir().join(format!("zync-askpass-{}.sh", temp_file_suffix()));
+    create_owner_only_file(
+        &path,
+        b"#!/bin/sh\nprintf '%s' \"$ZYNC_ASKPASS_TOKEN\"\n",
+        0o700,
+    )?;
+    Ok(TempSecretFile(path))
+}
+
+/// Writes `contents` to a fresh temp file with owner-only permissions (`mode`), for the
+/// CLI-only SSH pull path: the private key touches disk only for the duration of that one `git`
+/// invocation and the returned guard removes it as soon as it's dropped.
+fn write_temp_secret_file(
+    prefix: &str,
+    contents: &str,
+    mode: u32,
+) -> anyhow::Result<TempSecretFile> {
+    let path = std::env::temp_dir().join(format!("{prefix}-{}", temp_file_suffix()));
+    create_owner_only_file(&path, contents.as_bytes(), mode)?;
+    Ok(TempSecretFile(path))
+}
+
+/// Creates `path` atomically with `mode` already in effect at creation time — no `write` then
+/// `chmod` window during which the file briefly exists with the process umask's permissive
+/// default (e.g. world-readable) — and refuses to write through a pre-existing path, including
+/// a pre-planted symlink: `create_new` maps to `O_CREAT | O_EXCL`, which fails rather than
+/// following a symlink already at that path.
+#[cfg(unix)]
+fn create_owner_only_file(path: &Path, contents: &[u8], mode: u32) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(path)?;
+    file.write_all(contents)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_owner_only_file(path: &Path, contents: &[u8], _mode: u32) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(contents)?;
+    Ok(())
+}
+
+/// A unique-enough suffix for temp file names: process id + monotonic-ish nanosecond timestamp
+/// + a per-process counter, avoiding a dependency on `rand`/`uuid` in this crate.
+fn temp_file_suffix() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{nanos}-{count}", std::process::id())
+}
+
+#[cfg(all(test, unix))]
+mod credential_temp_file_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn create_owner_only_file_sets_mode_atomically_and_rejects_existing_path() {
+        let path = std::env::temp_dir().join(format!("zync-test-{}", temp_file_suffix()));
+
+        create_owner_only_file(&path, b"sekrit", 0o600).expect("creates a fresh file");
+        let metadata = fs::metadata(&path).expect("stat temp file");
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read_to_string(&path).expect("read back"), "sekrit");
+
+        // A second create at the same path must fail (create_new = O_CREAT | O_EXCL) rather
+        // than silently overwriting or following a pre-existing path/symlink.
+        let result = create_owner_only_file(&path, b"other", 0o600);
+        assert!(result.is_err(), "must refuse a pre-existing path");
+        assert_eq!(
+            fs::read_to_string(&path).expect("original untouched"),
+            "sekrit",
+            "a rejected create must not modify the pre-existing file"
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_temp_secret_file_produces_owner_only_mode_0600_and_self_deletes() {
+        let path = {
+            let guard = write_temp_secret_file("zync-test-secret", "sekrit", 0o600)
+                .expect("creates a fresh temp file");
+            let metadata = fs::metadata(guard.path()).expect("stat temp file");
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+            guard.path().to_path_buf()
+        };
+        // `guard` (a TempSecretFile) drops at the end of the block above; its Drop impl must
+        // have removed the file, including on the panic-unwind path (N4).
+        assert!(!path.exists(), "TempSecretFile must delete itself on drop");
+    }
+
+    #[test]
+    fn write_askpass_shim_is_owner_only_and_executable() {
+        let guard = write_askpass_shim().expect("creates the askpass shim");
+        let metadata = fs::metadata(guard.path()).expect("stat shim");
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+    }
 }

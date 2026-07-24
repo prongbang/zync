@@ -130,7 +130,7 @@ fn commit_graph_cursor_pagination() {
 }
 
 #[test]
-fn push_to_bare_remote_via_hardened_run_git() {
+fn push_to_bare_remote_via_libgit2() {
     let bare = tempfile::tempdir().expect("bare tempdir");
     Repository::init_bare(bare.path()).expect("init bare repo");
 
@@ -156,8 +156,9 @@ fn push_to_bare_remote_via_hardened_run_git() {
     let remote_url = format!("file://{}", bare.path().display());
     zync_git_core::add_remote(temp.path(), "origin", &remote_url).expect("add remote");
 
-    // Exercises the hardened `run_git` shellout (GIT_TERMINAL_PROMPT=0 / batch-mode SSH env,
-    // background-drained pipes, timeout guard) against a real file:// remote end to end.
+    // Exercises the libgit2 Remote::push path (CredentialSpec::Default via the `None` spec,
+    // plus the push-rejection check and post-push set_upstream that replace the old CLI `git
+    // push -u`) against a real file:// remote end to end.
     let output = zync_git_core::push(temp.path(), Some("origin"), None).expect("push succeeds");
     assert!(!output.is_empty());
 
@@ -171,6 +172,211 @@ fn push_to_bare_remote_via_hardened_run_git() {
         .expect("bare repo has pushed branch");
     let pushed_commit = bare_ref.peel_to_commit().expect("peel to commit");
     assert_eq!(pushed_commit.message(), Some("Initial commit"));
+
+    // set_upstream ran as part of push_with_credentials, matching the old `git push -u`.
+    let repo = Repository::open(temp.path()).expect("reopen repo");
+    let local_branch = repo
+        .find_branch(&branch, git2::BranchType::Local)
+        .expect("local branch");
+    let upstream = local_branch.upstream().expect("upstream is set");
+    assert_eq!(
+        upstream.name().expect("upstream name"),
+        Some(format!("origin/{branch}").as_str())
+    );
+}
+
+/// Creates an initialized (non-bare) repo at `path` with a single commit containing one file,
+/// returning the commit oid as a string. Shared setup for the credentialed-transport tests
+/// below, all of which exercise the new libgit2 network paths (`spec: None` = `CredentialSpec::
+/// Default`, exactly what `file://` transport needs — see P0.3 test plan).
+fn init_repo_with_commit(path: &std::path::Path, file_name: &str, contents: &str) -> String {
+    let repo = Repository::init(path).expect("init repo");
+    let signature = Signature::now("Zync Test", "zync@test.local").expect("signature");
+    fs::write(path.join(file_name), contents).expect("write file");
+    zync_git_core::add(path, &[file_name.to_string()]).expect("add file");
+    let mut index = repo.index().expect("index");
+    let tree_id = index.write_tree().expect("tree");
+    let tree = repo.find_tree(tree_id).expect("tree");
+    let oid = repo
+        .commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "Initial commit",
+            &tree,
+            &[],
+        )
+        .expect("initial commit");
+    oid.to_string()
+}
+
+#[test]
+fn clone_repo_round_trip_via_libgit2_file_url() {
+    let origin = tempfile::tempdir().expect("origin tempdir");
+    init_repo_with_commit(origin.path(), "README.md", "hello");
+    let origin_info = zync_git_core::open_repo(origin.path()).expect("open origin");
+
+    let dest = tempfile::tempdir().expect("dest tempdir");
+    let dest_path = dest.path().join("clone");
+    let url = format!("file://{}", origin.path().display());
+
+    // Exercises the libgit2 RepoBuilder + FetchOptions clone path (CredentialSpec::Default via
+    // the `None` spec) end to end against a real file:// remote.
+    let cloned_info = zync_git_core::clone_repo(&url, &dest_path).expect("clone via libgit2");
+
+    assert!(dest_path.join("README.md").exists());
+    assert_eq!(cloned_info.current_branch, origin_info.current_branch);
+    assert_eq!(cloned_info.head, origin_info.head);
+}
+
+#[test]
+fn fetch_and_push_round_trip_via_libgit2() {
+    let bare = tempfile::tempdir().expect("bare tempdir");
+    Repository::init_bare(bare.path()).expect("init bare repo");
+    let bare_url = format!("file://{}", bare.path().display());
+
+    let origin = tempfile::tempdir().expect("origin tempdir");
+    init_repo_with_commit(origin.path(), "a.txt", "a");
+    zync_git_core::add_remote(origin.path(), "origin", &bare_url).expect("add remote");
+    zync_git_core::push(origin.path(), Some("origin"), None).expect("initial push");
+    let branch = zync_git_core::open_repo(origin.path())
+        .expect("open origin")
+        .current_branch
+        .expect("origin has a current branch");
+
+    let clone_dir = tempfile::tempdir().expect("clone tempdir");
+    let clone_path = clone_dir.path().join("clone");
+    zync_git_core::clone_repo(&bare_url, &clone_path).expect("clone");
+
+    fs::write(origin.path().join("b.txt"), "b").expect("write b");
+    zync_git_core::add(origin.path(), &["b.txt".to_string()]).expect("add b");
+    let second_commit =
+        zync_git_core::commit(origin.path(), "Second", "Zync Test", "zync@test.local")
+            .expect("commit b");
+    // Exercises the libgit2 Remote::push path a second time (upstream already set from the
+    // initial push above).
+    zync_git_core::push(origin.path(), Some("origin"), None).expect("second push");
+
+    // Exercises the libgit2 Remote::fetch path: the clone picks up the new commit and its
+    // remote-tracking ref (and FETCH_HEAD) get updated exactly like a real `git fetch` would.
+    let output = zync_git_core::fetch(&clone_path, Some("origin")).expect("fetch");
+    assert!(!output.is_empty());
+
+    let clone_repo = Repository::open(&clone_path).expect("open clone");
+    let tracking_ref = clone_repo
+        .find_reference(&format!("refs/remotes/origin/{branch}"))
+        .expect("tracking ref updated by fetch");
+    let tracking_commit = tracking_ref.peel_to_commit().expect("peel to commit");
+    assert_eq!(tracking_commit.id().to_string(), second_commit);
+
+    let fetch_head = clone_repo
+        .find_reference("FETCH_HEAD")
+        .expect("FETCH_HEAD written by fetch");
+    assert_eq!(
+        fetch_head.target().expect("FETCH_HEAD has a target").to_string(),
+        second_commit
+    );
+}
+
+#[test]
+fn push_force_with_lease_rejects_stale_and_accepts_current() {
+    let bare = tempfile::tempdir().expect("bare tempdir");
+    Repository::init_bare(bare.path()).expect("init bare repo");
+    let bare_url = format!("file://{}", bare.path().display());
+
+    let repo_a = tempfile::tempdir().expect("repo a tempdir");
+    init_repo_with_commit(repo_a.path(), "a.txt", "a");
+    zync_git_core::add_remote(repo_a.path(), "origin", &bare_url).expect("add remote a");
+    zync_git_core::push(repo_a.path(), Some("origin"), None).expect("initial push");
+    let branch = zync_git_core::open_repo(repo_a.path())
+        .expect("open a")
+        .current_branch
+        .expect("repo a has a current branch");
+
+    // repo B clones the same remote and pushes an extra commit repo A doesn't know about.
+    let repo_b = tempfile::tempdir().expect("repo b tempdir");
+    let repo_b_path = repo_b.path().join("clone");
+    zync_git_core::clone_repo(&bare_url, &repo_b_path).expect("clone b");
+    fs::write(repo_b_path.join("b.txt"), "b").expect("write b");
+    zync_git_core::add(&repo_b_path, &["b.txt".to_string()]).expect("add b");
+    zync_git_core::commit(&repo_b_path, "From B", "Zync Test", "zync@test.local")
+        .expect("commit b");
+    zync_git_core::push(&repo_b_path, Some("origin"), None).expect("push from b");
+
+    // repo A hasn't fetched since, so its cached remote-tracking ref no longer matches the
+    // bare remote's actual current oid: the manual lease check must reject the force push.
+    let stale = zync_git_core::push_force_with_lease(repo_a.path(), "origin", &branch)
+        .expect_err("stale lease should be rejected");
+    let stale_err = stale
+        .downcast_ref::<zync_git_core::GitCommandError>()
+        .expect("stale rejection is a GitCommandError");
+    assert_eq!(stale_err.kind, GitErrorKind::NonFastForward);
+
+    // The bare remote must be unaffected by the rejected attempt.
+    let bare_repo = Repository::open(bare.path()).expect("open bare");
+    let bare_ref = bare_repo
+        .find_reference(&format!("refs/heads/{branch}"))
+        .expect("bare has branch");
+    assert_eq!(
+        bare_ref.peel_to_commit().expect("peel").message(),
+        Some("From B")
+    );
+
+    // Fetching refreshes repo A's remote-tracking ref to match the bare remote's actual state...
+    zync_git_core::fetch(repo_a.path(), Some("origin")).expect("fetch updates tracking ref");
+
+    // ...so the lease now matches and a force push of repo A's own divergent history succeeds.
+    fs::write(repo_a.path().join("c.txt"), "c").expect("write c");
+    zync_git_core::add(repo_a.path(), &["c.txt".to_string()]).expect("add c");
+    zync_git_core::commit(repo_a.path(), "From A", "Zync Test", "zync@test.local")
+        .expect("commit c");
+
+    let output = zync_git_core::push_force_with_lease(repo_a.path(), "origin", &branch)
+        .expect("lease-verified force push succeeds");
+    assert!(!output.is_empty());
+
+    let bare_ref = bare_repo
+        .find_reference(&format!("refs/heads/{branch}"))
+        .expect("bare has branch");
+    assert_eq!(
+        bare_ref.peel_to_commit().expect("peel").message(),
+        Some("From A")
+    );
+}
+
+#[test]
+fn pull_ff_only_fast_forwards_after_remote_advances() {
+    let bare = tempfile::tempdir().expect("bare tempdir");
+    Repository::init_bare(bare.path()).expect("init bare repo");
+    let bare_url = format!("file://{}", bare.path().display());
+
+    let origin = tempfile::tempdir().expect("origin tempdir");
+    init_repo_with_commit(origin.path(), "a.txt", "a");
+    zync_git_core::add_remote(origin.path(), "origin", &bare_url).expect("add remote");
+    zync_git_core::push(origin.path(), Some("origin"), None).expect("initial push");
+    let branch = zync_git_core::open_repo(origin.path())
+        .expect("open origin")
+        .current_branch
+        .expect("origin has a current branch");
+
+    let clone_dir = tempfile::tempdir().expect("clone tempdir");
+    let clone_path = clone_dir.path().join("clone");
+    zync_git_core::clone_repo(&bare_url, &clone_path).expect("clone");
+
+    // origin advances and pushes; the clone hasn't fetched yet.
+    fs::write(origin.path().join("b.txt"), "b").expect("write b");
+    zync_git_core::add(origin.path(), &["b.txt".to_string()]).expect("add b");
+    let advanced_commit =
+        zync_git_core::commit(origin.path(), "Advance", "Zync Test", "zync@test.local")
+            .expect("commit b");
+    zync_git_core::push(origin.path(), Some("origin"), None).expect("push advance");
+
+    // Exercises the libgit2 ff-only pull path: fetch + fast-forward of the local branch.
+    zync_git_core::pull(&clone_path, Some("origin"), Some(&branch)).expect("ff-only pull");
+
+    let clone_info = zync_git_core::open_repo(&clone_path).expect("open clone");
+    assert_eq!(clone_info.head, Some(advanced_commit));
+    assert!(clone_path.join("b.txt").exists());
 }
 
 #[test]

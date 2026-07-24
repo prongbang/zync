@@ -9,6 +9,7 @@ anyhow.workspace = true
 git2.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
