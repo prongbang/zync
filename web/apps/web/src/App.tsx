@@ -21,6 +21,7 @@ import { CommitGraph } from "./components/CommitGraph"
 import { ConflictResolver } from "./components/ConflictResolver"
 import { DiffPanel } from "./components/DiffPanel"
 import { GitToolsPanel } from "./components/GitToolsPanel"
+import { RepoMinibar } from "./components/RepoMinibar"
 import { RepoStatsPanel } from "./components/RepoStatsPanel"
 import { Toolbar } from "./components/Toolbar"
 import {
@@ -105,7 +106,13 @@ export function App() {
   }
 
   return (
-    <div className="bg-background text-foreground flex h-svh flex-col">
+    <div className="bg-background text-foreground flex h-svh">
+      <RepoMinibar
+        repos={ws.repositories}
+        activeId={currentRepoId}
+        onSelect={(id) => void ws.openRepository(id)}
+      />
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="border-border flex h-12 shrink-0 items-center gap-2 border-b px-3">
         <span className="bg-primary size-2 rounded-full" />
         <span className="text-sm font-semibold">Zync</span>
@@ -116,26 +123,6 @@ export function App() {
             else void ws.remoteAction(kind)
           }}
         />
-        {ws.repositories.length > 1 && (
-          <div className="ml-auto flex items-stretch overflow-x-auto">
-            {ws.repositories.map((repo) => (
-              <button
-                key={repo.id}
-                data-testid="repo-tab"
-                data-repo-id={repo.id}
-                onClick={() => void ws.openRepository(repo.id)}
-                className={cn(
-                  "border-border shrink-0 border-l border-b-2 border-b-transparent px-3 text-xs font-medium whitespace-nowrap",
-                  repo.id === currentRepoId
-                    ? "border-b-primary text-foreground"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                {repo.name}
-              </button>
-            ))}
-          </div>
-        )}
       </header>
 
       <div className="grid min-h-0 flex-1 grid-cols-[260px_minmax(0,1fr)_380px]">
@@ -374,6 +361,7 @@ export function App() {
           {ws.notice}
         </span>
       </footer>
+      </div>
 
       {/* Dialogs */}
       {dialog?.kind === "newBranch" && (
