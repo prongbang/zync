@@ -15,6 +15,7 @@ const API_PREFIXES = [
   "/files",
   "/auth",
   "/collaboration",
+  "/credentials",
   "/health",
 ]
 

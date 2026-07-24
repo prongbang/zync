@@ -46,6 +46,53 @@ pub struct SessionRecord {
     pub created_at: String,
 }
 
+/// Masked credential projection — the only shape ever returned over HTTP.
+/// Never carries `secret_cipher`/`secret_nonce`; see ADR-001 "Write-only
+/// secrets".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialSummary {
+    pub id: String,
+    pub user_id: String,
+    pub label: String,
+    pub host_pattern: String,
+    pub kind: String,
+    pub username: Option<String>,
+    pub created_at: String,
+}
+
+/// Full credential row, including the encrypted secret bundle. Only ever
+/// read internally (just-in-time decrypt in a remote-op handler) — never
+/// serialized to a response and never logged. `Debug` is hand-written to
+/// redact the secret columns even if something accidentally `{:?}`s this.
+#[derive(Clone)]
+pub struct CredentialSecretRow {
+    pub id: String,
+    pub user_id: String,
+    pub label: String,
+    pub host_pattern: String,
+    pub kind: String,
+    pub username: Option<String>,
+    pub secret_cipher: Vec<u8>,
+    pub secret_nonce: Vec<u8>,
+    pub created_at: String,
+}
+
+impl std::fmt::Debug for CredentialSecretRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialSecretRow")
+            .field("id", &self.id)
+            .field("user_id", &self.user_id)
+            .field("label", &self.label)
+            .field("host_pattern", &self.host_pattern)
+            .field("kind", &self.kind)
+            .field("username", &self.username)
+            .field("secret_cipher", &"<redacted>")
+            .field("secret_nonce", &"<redacted>")
+            .field("created_at", &self.created_at)
+            .finish()
+    }
+}
+
 impl Database {
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let conn = Connection::open(path)?;
@@ -99,6 +146,19 @@ impl Database {
                 refresh_token TEXT NOT NULL,
                 user_id TEXT NOT NULL,
                 created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS credentials (
+                id            TEXT PRIMARY KEY,
+                user_id       TEXT NOT NULL,
+                label         TEXT NOT NULL,
+                host_pattern  TEXT NOT NULL,
+                kind          TEXT NOT NULL CHECK (kind IN ('https_token', 'ssh_key')),
+                username      TEXT,
+                secret_cipher BLOB NOT NULL,
+                secret_nonce  BLOB NOT NULL,
+                created_at    TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
             "#,
@@ -295,6 +355,114 @@ impl Database {
         )?;
         Ok(workspace)
     }
+
+    /// Insert a new credential row. `secret_cipher`/`secret_nonce` must
+    /// already be encrypted (see `crate::crypto`) — this method never sees
+    /// plaintext.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_credential(
+        &self,
+        user_id: &str,
+        label: &str,
+        host_pattern: &str,
+        kind: &str,
+        username: Option<&str>,
+        secret_cipher: &[u8],
+        secret_nonce: &[u8],
+    ) -> anyhow::Result<CredentialSummary> {
+        let record = CredentialSummary {
+            id: Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            label: label.to_string(),
+            host_pattern: host_pattern.to_string(),
+            kind: kind.to_string(),
+            username: username.map(ToOwned::to_owned),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        let conn = self.conn.lock().expect("database lock");
+        conn.execute(
+            "INSERT INTO credentials (id, user_id, label, host_pattern, kind, username, secret_cipher, secret_nonce, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                record.id,
+                record.user_id,
+                record.label,
+                record.host_pattern,
+                record.kind,
+                record.username,
+                secret_cipher,
+                secret_nonce,
+                record.created_at,
+            ],
+        )?;
+        Ok(record)
+    }
+
+    /// Masked projection for a user's credentials — never includes secret
+    /// columns. This is the only shape the list/read API may return.
+    pub fn list_credentials_by_user(&self, user_id: &str) -> anyhow::Result<Vec<CredentialSummary>> {
+        let conn = self.conn.lock().expect("database lock");
+        let mut stmt = conn.prepare(
+            "SELECT id, user_id, label, host_pattern, kind, username, created_at \
+             FROM credentials WHERE user_id = ?1 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![user_id], |row| {
+            Ok(CredentialSummary {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                label: row.get(2)?,
+                host_pattern: row.get(3)?,
+                kind: row.get(4)?,
+                username: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Full row including the encrypted secret bundle. Callers must decrypt
+    /// just-in-time and drop the plaintext immediately — never cache or log
+    /// it (see ADR-001 "Just-in-time decrypt, immediate drop"). Scoped by
+    /// `user_id` so one user can never read another's row by guessing an id.
+    pub fn get_decryptable(
+        &self,
+        id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<CredentialSecretRow>> {
+        let conn = self.conn.lock().expect("database lock");
+        conn.query_row(
+            "SELECT id, user_id, label, host_pattern, kind, username, secret_cipher, secret_nonce, created_at \
+             FROM credentials WHERE id = ?1 AND user_id = ?2",
+            params![id, user_id],
+            |row| {
+                Ok(CredentialSecretRow {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    label: row.get(2)?,
+                    host_pattern: row.get(3)?,
+                    kind: row.get(4)?,
+                    username: row.get(5)?,
+                    secret_cipher: row.get(6)?,
+                    secret_nonce: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Scoped by `user_id` so a delete for another user's credential id is a
+    /// silent no-op rather than an IDOR (matters once real per-user auth
+    /// lands — see ADR-001 / `credentials::DEFAULT_USER_ID` TODO).
+    pub fn delete_credential(&self, id: &str, user_id: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().expect("database lock");
+        conn.execute(
+            "DELETE FROM credentials WHERE id = ?1 AND user_id = ?2",
+            params![id, user_id],
+        )?;
+        Ok(())
+    }
 }
 
 fn repository_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepositoryRecord> {
@@ -306,4 +474,74 @@ fn repository_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepositoryRe
         favorite: row.get::<_, i64>(4)? != 0,
         created_at: row.get(5)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_db() -> Database {
+        Database::open(":memory:").expect("open in-memory db")
+    }
+
+    #[test]
+    fn delete_credential_is_scoped_by_user() {
+        let db = test_db();
+        let record = db
+            .insert_credential(
+                "owner",
+                "GitHub PAT",
+                "github.com",
+                "https_token",
+                None,
+                b"cipher",
+                b"nonce",
+            )
+            .expect("insert");
+
+        // A delete issued as a different user must be a silent no-op — the
+        // row must survive (this is the IDOR guard: an attacker who guesses
+        // another user's credential id can't delete it).
+        db.delete_credential(&record.id, "someone-else")
+            .expect("delete as wrong user should not error");
+        assert!(
+            db.get_decryptable(&record.id, "owner")
+                .expect("get_decryptable")
+                .is_some(),
+            "row must survive a delete issued by a different user_id"
+        );
+
+        // The owning user's delete actually removes it.
+        db.delete_credential(&record.id, "owner")
+            .expect("delete as owner");
+        assert!(db
+            .get_decryptable(&record.id, "owner")
+            .expect("get_decryptable")
+            .is_none());
+    }
+
+    #[test]
+    fn get_decryptable_is_scoped_by_user() {
+        let db = test_db();
+        let record = db
+            .insert_credential(
+                "owner",
+                "GitHub PAT",
+                "github.com",
+                "https_token",
+                None,
+                b"cipher",
+                b"nonce",
+            )
+            .expect("insert");
+
+        assert!(db
+            .get_decryptable(&record.id, "someone-else")
+            .expect("get_decryptable")
+            .is_none());
+        assert!(db
+            .get_decryptable(&record.id, "owner")
+            .expect("get_decryptable")
+            .is_some());
+    }
 }

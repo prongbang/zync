@@ -201,6 +201,18 @@ export interface WorkspaceResponse {
   online_users: PresenceUser[]
 }
 
+// Masked credential projection — never carries secret material (see
+// crates/server/src/db/mod.rs CredentialSummary / credentials::mod.rs
+// CredentialResponse). There is no "reveal" endpoint; update = delete + recreate.
+export interface CredentialRecord {
+  id: string
+  label: string
+  host_pattern: string
+  kind: string
+  username: string | null
+  created_at: string
+}
+
 // ---- Request bodies (mirrors the `Serialize`-only structs in api.rs) ----
 
 export interface CreateRepositoryRequest {
@@ -212,6 +224,19 @@ export interface CreateRepositoryRequest {
 
 export interface FavoriteRepositoryRequest {
   favorite: boolean
+}
+
+// `kind` is 'https_token' | 'ssh_key'. For 'https_token' send `token`; for
+// 'ssh_key' send `private_key` (and optionally `passphrase`/`public_key`).
+export interface CreateCredentialRequest {
+  label: string
+  host_pattern: string
+  kind: string
+  username: string | null
+  token: string | null
+  private_key: string | null
+  passphrase: string | null
+  public_key: string | null
 }
 
 export interface CommitRequest {

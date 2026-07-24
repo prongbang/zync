@@ -1,5 +1,7 @@
 mod auth;
 mod collaboration;
+mod credentials;
+mod crypto;
 mod db;
 mod files;
 mod git;
@@ -24,6 +26,7 @@ pub struct AppState {
     pub hub: websocket::WorkspaceHub,
     pub sync: sync::WorkspaceSync,
     pub collaboration: collaboration::CollaborationState,
+    pub secrets: crypto::KeyState,
 }
 
 #[tokio::main]
@@ -42,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
         hub: websocket::WorkspaceHub::default(),
         sync: sync::WorkspaceSync::default(),
         collaboration: collaboration::CollaborationState::default(),
+        secrets: crypto::KeyState::load(),
     });
 
     // Serve the built React app (Vite emits index.html + /assets/*). Unmatched
@@ -63,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(git::routes())
         .merge(websocket::routes())
         .merge(collaboration::routes())
+        .merge(credentials::routes())
         .fallback_service(spa)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())

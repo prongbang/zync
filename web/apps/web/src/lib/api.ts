@@ -16,8 +16,10 @@ import type {
   ConflictDetail,
   ConflictResolveRequest,
   ConflictSummary,
+  CreateCredentialRequest,
   CreateFileRequest,
   CreateRepositoryRequest,
+  CredentialRecord,
   DirectoryList,
   FavoriteRepositoryRequest,
   FileContent,
@@ -160,6 +162,24 @@ export class ZyncApi {
 
   async workspace(id: string): Promise<WorkspaceResponse> {
     return getJson(this.url(`/workspace/${id}`))
+  }
+
+  // ---- Credentials ----
+  // List/read is always the masked projection — secret material never
+  // round-trips back to the client. There is no update; delete + recreate.
+
+  async listCredentials(): Promise<CredentialRecord[]> {
+    return getJson(this.url("/credentials"))
+  }
+
+  async createCredential(
+    request: CreateCredentialRequest
+  ): Promise<CredentialRecord> {
+    return postJson(this.url("/credentials"), request)
+  }
+
+  async deleteCredential(id: string): Promise<void> {
+    return del(this.url(`/credentials/${id}`))
   }
 
   // ---- Status / branches / graph / stats ----
