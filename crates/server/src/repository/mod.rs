@@ -188,13 +188,21 @@ async fn create_repository(
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "Repository".to_string())
     });
+    // Scrub any inline `user[:pass]@` userinfo before persisting: the clone above still used
+    // `request.remote_url` verbatim (so a one-shot credentialed URL works), but `RepositoryRecord`
+    // is `Serialize` and listed back to every client — a token embedded in the URL must never be
+    // stored or echoed (P0.11 security review, W3).
+    let stored_remote_url = request
+        .remote_url
+        .as_deref()
+        .map(zync_git_core::redact_url_userinfo);
     let repository =
         if let Some(existing) = state.db.repository_by_path(&path).map_err(internal_error)? {
             existing
         } else {
             state
                 .db
-                .create_repository(&name, &path, request.remote_url.as_deref())
+                .create_repository(&name, &path, stored_remote_url.as_deref())
                 .map_err(internal_error)?
         };
     let workspace = state
@@ -267,4 +275,48 @@ async fn open_repository(
 
 fn internal_error(error: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::db::Database;
+
+    // P0.11 security review, W3: `create_repository`'s clone-on-register path used to store
+    // `request.remote_url` verbatim, so a credentialed URL's inline `user:token@` userinfo
+    // ended up in the `repositories` table and got echoed straight back out again (the row is
+    // `Serialize` and returned/listed to every client). This exercises the exact
+    // redact-then-store pipeline the handler runs — `zync_git_core::redact_url_userinfo` over
+    // the URL before it ever reaches `Database::create_repository` — and asserts the stored (and
+    // therefore echoed) record carries no token.
+    #[test]
+    fn stores_remote_url_with_userinfo_stripped() {
+        let db = Database::open(":memory:").expect("open in-memory db");
+        let remote_url = "https://x-access-token:SUPERSECRETTOKEN@github.com/org/repo.git";
+
+        let stored_remote_url = Some(remote_url).map(zync_git_core::redact_url_userinfo);
+        let record = db
+            .create_repository("repo", "/tmp/repo", stored_remote_url.as_deref())
+            .expect("create_repository");
+
+        assert_eq!(
+            record.remote_url.as_deref(),
+            Some("https://github.com/org/repo.git")
+        );
+        let stored = record.remote_url.expect("remote_url stored");
+        assert!(
+            !stored.contains("SUPERSECRETTOKEN"),
+            "stored/echoed remote_url must not contain the token: {stored}"
+        );
+
+        // The record round-tripped through the DB (what a list/get response would return) is
+        // equally clean.
+        let fetched = db
+            .repository(&record.id)
+            .expect("repository lookup")
+            .expect("repository exists");
+        assert!(!fetched
+            .remote_url
+            .expect("remote_url stored")
+            .contains("SUPERSECRETTOKEN"));
+    }
 }

@@ -11,7 +11,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     Key, XChaCha20Poly1305, XNonce,
 };
-use rand::RngCore;
+use rand::{rngs::OsRng, RngCore};
 use zeroize::Zeroizing;
 
 pub const KEY_LEN: usize = 32;
@@ -112,8 +112,11 @@ pub enum CryptoError {
 /// nonce space — see ADR-001).
 pub fn encrypt(key: &SecretKey, plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
     let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key.0));
+    // `OsRng` per ADR-001 — a direct OS-CSPRNG read, rather than `rand::thread_rng()`'s
+    // thread-local (also OS-seeded, but reseeded periodically rather than read fresh
+    // per call).
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = XNonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
         .encrypt(nonce, plaintext)
@@ -125,7 +128,18 @@ pub fn encrypt(key: &SecretKey, plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>), 
 /// `crate::credentials::decrypt_secret_bundle`, which the remote-op handlers
 /// (`crate::git`, `crate::repository`) call just-in-time to build a
 /// `CredentialSpec`.
-pub fn decrypt(key: &SecretKey, ciphertext: &[u8], nonce: &[u8]) -> Result<Vec<u8>, CryptoError> {
+///
+/// Returns `Zeroizing<Vec<u8>>` rather than a bare `Vec<u8>` — the plaintext
+/// is the decrypted secret bundle (token / private key / passphrase), and
+/// per ADR-001 it must not sit in an un-wiped heap allocation after the
+/// caller is done with it. Callers still owe the *parsed* form (e.g. a
+/// deserialized struct) its own zeroize-on-drop handling; this only covers
+/// the raw bytes.
+pub fn decrypt(
+    key: &SecretKey,
+    ciphertext: &[u8],
+    nonce: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
     if nonce.len() != NONCE_LEN {
         return Err(CryptoError::Decrypt);
     }
@@ -133,6 +147,7 @@ pub fn decrypt(key: &SecretKey, ciphertext: &[u8], nonce: &[u8]) -> Result<Vec<u
     let nonce = XNonce::from_slice(nonce);
     cipher
         .decrypt(nonce, ciphertext)
+        .map(Zeroizing::new)
         .map_err(|_| CryptoError::Decrypt)
 }
 
@@ -160,7 +175,7 @@ mod tests {
         assert_ne!(ciphertext, plaintext, "ciphertext must not equal plaintext");
         assert_eq!(nonce.len(), NONCE_LEN);
         let decrypted = decrypt(&key, &ciphertext, &nonce).expect("decrypt");
-        assert_eq!(decrypted, plaintext);
+        assert_eq!(decrypted.as_slice(), plaintext);
     }
 
     #[test]

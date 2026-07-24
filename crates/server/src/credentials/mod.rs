@@ -17,7 +17,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Single-user server today — every route acts as this seeded user.
 /// TODO(P3): resolve the authenticated user from the request instead once
@@ -348,14 +348,60 @@ fn select_from_candidates(
     scored.into_iter().next().map(|(_, credential)| credential.clone())
 }
 
-/// Decrypt a stored credential's secret bundle into a JSON `Value`. Used by
-/// `resolve_credential_spec[_for_url]` below to build a `CredentialSpec`
-/// (git-core). Decrypts just-in-time; the caller is responsible for
-/// dropping the plaintext promptly (see ADR-001 "Just-in-time decrypt").
+/// A decrypted credential secret bundle, interpreted per `kind` by
+/// `build_credential_spec`. Deliberately *not* a `serde_json::Value` — per
+/// ADR-001 "Secrets never enter errors" (and the P0.11 security review, W1),
+/// a `Value` parsed from the decrypted plaintext is itself an un-wiped heap
+/// allocation holding the token/private key/passphrase. Every field here is
+/// zeroized on drop instead.
+#[derive(Deserialize, Default)]
+pub struct SecretBundle {
+    token: Option<String>,
+    private_key: Option<String>,
+    passphrase: Option<String>,
+    public_key: Option<String>,
+}
+
+/// Hand-written so a stray `{:?}` (log line, panic message) can never print a
+/// secret — mirrors `CreateCredentialRequest`'s manual `Debug` above.
+impl std::fmt::Debug for SecretBundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretBundle")
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("private_key", &self.private_key.as_ref().map(|_| "<redacted>"))
+            .field("passphrase", &self.passphrase.as_ref().map(|_| "<redacted>"))
+            .field("public_key", &self.public_key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+impl SecretBundle {
+    /// Wipe every field's contents in place. Called from `Drop`; also exercised directly by
+    /// `secret_bundle_zeroizes_fields_on_drop` below (calling `Drop::drop` explicitly isn't
+    /// something the compiler allows).
+    fn zeroize_fields(&mut self) {
+        self.token.zeroize();
+        self.private_key.zeroize();
+        self.passphrase.zeroize();
+        self.public_key.zeroize();
+    }
+}
+
+impl Drop for SecretBundle {
+    fn drop(&mut self) {
+        self.zeroize_fields();
+    }
+}
+
+/// Decrypt a stored credential's secret bundle into a [`SecretBundle`]. Used
+/// by `resolve_credential_spec[_for_url]` below to build a `CredentialSpec`
+/// (git-core). Decrypts just-in-time; both the raw decrypted bytes
+/// (`crypto::decrypt`'s `Zeroizing<Vec<u8>>`) and the parsed bundle are
+/// zeroized on drop (see ADR-001 "Just-in-time decrypt").
 pub fn decrypt_secret_bundle(
     key: &crypto::SecretKey,
     row: &CredentialSecretRow,
-) -> Result<serde_json::Value, CryptoError> {
+) -> Result<SecretBundle, CryptoError> {
     let plaintext = crypto::decrypt(key, &row.secret_cipher, &row.secret_nonce)?;
     serde_json::from_slice(&plaintext).map_err(|_| CryptoError::Decrypt)
 }
@@ -421,12 +467,12 @@ pub fn resolve_credential_spec_for_url(
 /// `CredentialSpec::Default`'s own fallback for an unauthenticated ssh URL.
 fn build_credential_spec(
     row: &CredentialSecretRow,
-    bundle: serde_json::Value,
+    mut bundle: SecretBundle,
 ) -> Result<zync_git_core::CredentialSpec, (StatusCode, String)> {
     let username = || row.username.clone().unwrap_or_else(|| "git".to_string());
     match row.kind.as_str() {
         "https_token" => {
-            let token = bundle.get("token").and_then(|value| value.as_str()).ok_or_else(|| {
+            let token = bundle.token.take().ok_or_else(|| {
                 internal_error(anyhow::anyhow!(
                     "credential '{}' bundle is missing 'token'",
                     row.id
@@ -434,26 +480,20 @@ fn build_credential_spec(
             })?;
             Ok(zync_git_core::CredentialSpec::UserpassPlaintext {
                 username: username(),
-                secret: Zeroizing::new(token.to_string()),
+                secret: Zeroizing::new(token),
             })
         }
         "ssh_key" => {
-            let private_key = bundle
-                .get("private_key")
-                .and_then(|value| value.as_str())
-                .ok_or_else(|| {
-                    internal_error(anyhow::anyhow!(
-                        "credential '{}' bundle is missing 'private_key'",
-                        row.id
-                    ))
-                })?;
-            let passphrase = bundle
-                .get("passphrase")
-                .and_then(|value| value.as_str())
-                .map(|value| Zeroizing::new(value.to_string()));
+            let private_key = bundle.private_key.take().ok_or_else(|| {
+                internal_error(anyhow::anyhow!(
+                    "credential '{}' bundle is missing 'private_key'",
+                    row.id
+                ))
+            })?;
+            let passphrase = bundle.passphrase.take().map(Zeroizing::new);
             Ok(zync_git_core::CredentialSpec::SshKey {
                 username: username(),
-                private_key: Zeroizing::new(private_key.to_string()),
+                private_key: Zeroizing::new(private_key),
                 passphrase,
             })
         }
@@ -635,7 +675,7 @@ mod tests {
             created_at: Utc::now().to_rfc3339(),
         };
         let decrypted = decrypt_secret_bundle(&key, &row).unwrap();
-        assert_eq!(decrypted["token"], "ghp_example");
+        assert_eq!(decrypted.token.as_deref(), Some("ghp_example"));
     }
 
     fn secret_row(kind: &str, username: Option<&str>) -> CredentialSecretRow {
@@ -652,10 +692,32 @@ mod tests {
         }
     }
 
+    // `SecretBundle` implements `Drop`, so `SecretBundle { field, ..Default::default() }` struct
+    // update syntax doesn't compile (moving the remaining fields out of the `Default::default()`
+    // temporary is a partial move out of a `Drop` type) — these helpers build fully-specified
+    // literals instead.
+    fn token_bundle(token: &str) -> SecretBundle {
+        SecretBundle {
+            token: Some(token.to_string()),
+            private_key: None,
+            passphrase: None,
+            public_key: None,
+        }
+    }
+
+    fn ssh_bundle(private_key: &str, passphrase: Option<&str>) -> SecretBundle {
+        SecretBundle {
+            token: None,
+            private_key: Some(private_key.to_string()),
+            passphrase: passphrase.map(ToOwned::to_owned),
+            public_key: None,
+        }
+    }
+
     #[test]
     fn build_credential_spec_https_token_uses_stored_username() {
         let row = secret_row("https_token", Some("x-access-token"));
-        let bundle = serde_json::json!({ "token": "ghp_example" });
+        let bundle = token_bundle("ghp_example");
         let spec = build_credential_spec(&row, bundle).unwrap();
         match spec {
             zync_git_core::CredentialSpec::UserpassPlaintext { username, secret } => {
@@ -669,7 +731,7 @@ mod tests {
     #[test]
     fn build_credential_spec_https_token_defaults_username_to_git() {
         let row = secret_row("https_token", None);
-        let bundle = serde_json::json!({ "token": "ghp_example" });
+        let bundle = token_bundle("ghp_example");
         let spec = build_credential_spec(&row, bundle).unwrap();
         match spec {
             zync_git_core::CredentialSpec::UserpassPlaintext { username, .. } => {
@@ -682,14 +744,14 @@ mod tests {
     #[test]
     fn build_credential_spec_https_token_missing_token_errors() {
         let row = secret_row("https_token", None);
-        let bundle = serde_json::json!({});
+        let bundle = SecretBundle::default();
         assert!(build_credential_spec(&row, bundle).is_err());
     }
 
     #[test]
     fn build_credential_spec_ssh_key_carries_passphrase() {
         let row = secret_row("ssh_key", Some("git"));
-        let bundle = serde_json::json!({ "private_key": "-----BEGIN KEY-----", "passphrase": "hunter2" });
+        let bundle = ssh_bundle("-----BEGIN KEY-----", Some("hunter2"));
         let spec = build_credential_spec(&row, bundle).unwrap();
         match spec {
             zync_git_core::CredentialSpec::SshKey {
@@ -708,7 +770,7 @@ mod tests {
     #[test]
     fn build_credential_spec_ssh_key_without_passphrase() {
         let row = secret_row("ssh_key", None);
-        let bundle = serde_json::json!({ "private_key": "-----BEGIN KEY-----", "passphrase": null });
+        let bundle = ssh_bundle("-----BEGIN KEY-----", None);
         let spec = build_credential_spec(&row, bundle).unwrap();
         match spec {
             zync_git_core::CredentialSpec::SshKey { passphrase, .. } => {
@@ -721,6 +783,29 @@ mod tests {
     #[test]
     fn build_credential_spec_unknown_kind_errors() {
         let row = secret_row("carrier-pigeon", None);
-        assert!(build_credential_spec(&row, serde_json::json!({})).is_err());
+        assert!(build_credential_spec(&row, SecretBundle::default()).is_err());
+    }
+
+    #[test]
+    fn secret_bundle_zeroizes_fields_on_drop() {
+        // Regression test for W1 (P0.11 security review): the decrypted bundle used to be a
+        // `serde_json::Value`, an un-wiped heap allocation holding the plaintext secret after
+        // use. `SecretBundle` must actually wipe its fields' contents when dropped, not just
+        // move the secret elsewhere. `Drop::drop` can't be called explicitly, so this exercises
+        // the same `zeroize_fields` helper `Drop` delegates to. `Option<Z>::zeroize()` wipes the
+        // inner value's bytes and then takes it, leaving `None` — that's the strongest possible
+        // observable signal here (there's no safe way to peek at bytes that used to back a
+        // freed `String`'s allocation).
+        let mut bundle = SecretBundle {
+            token: Some("ghp_example".to_string()),
+            private_key: Some("-----BEGIN KEY-----".to_string()),
+            passphrase: Some("hunter2".to_string()),
+            public_key: Some("ssh-ed25519 AAAA".to_string()),
+        };
+        bundle.zeroize_fields();
+        assert_eq!(bundle.token, None);
+        assert_eq!(bundle.private_key, None);
+        assert_eq!(bundle.passphrase, None);
+        assert_eq!(bundle.public_key, None);
     }
 }

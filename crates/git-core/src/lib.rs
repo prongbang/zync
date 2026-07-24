@@ -326,23 +326,44 @@ pub fn clone_repo_with_credentials(
     repo_info(&repo)
 }
 
-/// Strips any inline `user[:pass]@` userinfo out of a URL before it's embedded in a command
-/// string used for error text (see ADR-001 "Secrets never enter errors") — a user-registered
-/// `https://x-access-token:TOKEN@host/...` remote URL must never leak into
-/// `GitCommandError::command` (and from there, `map_git_error`'s HTTP body). Keeps the scheme,
-/// host, and path; the scp-like `user@host:path` form is left untouched — that `user` is just
-/// the ssh login name, never a secret. Every other network op builds its command string from an
-/// already-configured `remote_name`/branch instead of a raw URL, so this is only needed here.
-fn redact_url_userinfo(url: &str) -> String {
-    for scheme in ["https://", "http://", "ssh://"] {
-        if let Some(rest) = url.strip_prefix(scheme) {
-            return match rest.find('@') {
-                Some(idx) => format!("{scheme}{}", &rest[idx + 1..]),
-                None => url.to_string(),
-            };
+/// Strips any inline `scheme://user[:pass]@` userinfo out of every `https://`/`http://`/`ssh://`
+/// URL occurring anywhere inside `message` — not just when `message` is itself a bare URL (see
+/// ADR-001 "Secrets never enter errors"). A user-registered `https://x-access-token:TOKEN@host/...`
+/// remote URL must never leak into `GitCommandError::command`/`stderr` (and from there,
+/// `map_git_error`'s HTTP body) or into a persisted `RepositoryRecord`. Keeps the scheme, host,
+/// and path; the scp-like `user@host:path` form is left untouched — that `user` is just the ssh
+/// login name, never a secret.
+///
+/// Scanning the *whole message* (rather than assuming it's nothing but a URL) matters because
+/// libgit2 error text isn't always just the URL — a DNS/TLS failure on the clone path can echo
+/// the full request URL, userinfo included, embedded in a longer sentence.
+pub fn redact_url_userinfo(message: &str) -> String {
+    const SCHEMES: [&str; 3] = ["https://", "http://", "ssh://"];
+    let mut out = String::with_capacity(message.len());
+    let mut rest = message;
+    while !rest.is_empty() {
+        let Some(scheme) = SCHEMES.iter().find(|scheme| rest.starts_with(**scheme)) else {
+            // Advance by one char (not one byte) to stay on a UTF-8 boundary.
+            let ch = rest.chars().next().expect("rest is non-empty");
+            out.push(ch);
+            rest = &rest[ch.len_utf8()..];
+            continue;
+        };
+        out.push_str(scheme);
+        let after_scheme = &rest[scheme.len()..];
+        // The authority (where userinfo can live) ends at the first `/` or whitespace, or at
+        // the end of the string — never past the host/port section.
+        let authority_end = after_scheme
+            .find(|c: char| c == '/' || c.is_whitespace())
+            .unwrap_or(after_scheme.len());
+        let authority = &after_scheme[..authority_end];
+        match authority.find('@') {
+            Some(idx) => out.push_str(&authority[idx + 1..]),
+            None => out.push_str(authority),
         }
+        rest = &after_scheme[authority_end..];
     }
-    url.to_string()
+    out
 }
 
 pub fn fetch(path: impl AsRef<Path>, remote_name: Option<&str>) -> anyhow::Result<String> {
@@ -2260,9 +2281,10 @@ fn remote_host(url: &str) -> String {
 /// `run_git` CLI path, so callers can `downcast_ref::<GitCommandError>()` uniformly regardless
 /// of which transport handled the operation. Per ADR-001, an auth failure never carries the
 /// underlying libgit2 message (which can echo back URL/username detail) — it gets a fixed,
-/// secret-free message instead. Every other kind is classified the same way CLI stderr is,
-/// since libgit2's own error text also never contains credentials (they're never embedded in
-/// the URL on these paths).
+/// secret-free message instead. Every other kind is classified the same way CLI stderr is, and
+/// is still run through [`redact_url_userinfo`] before being kept: libgit2's own error text
+/// normally doesn't embed credentials, but a non-auth failure class (DNS/TLS) can echo the raw
+/// request URL — including inline userinfo — back in its message (P0.11 security review, W2).
 fn map_git2_error(command: &str, host: &str, err: git2::Error) -> anyhow::Error {
     let raw = err.message();
     let kind = if err.code() == git2::ErrorCode::Auth {
@@ -2273,7 +2295,7 @@ fn map_git2_error(command: &str, host: &str, err: git2::Error) -> anyhow::Error 
     let stderr = if kind == GitErrorKind::Auth {
         format!("authentication failed for {host}")
     } else {
-        raw.to_string()
+        redact_url_userinfo(raw)
     };
     GitCommandError {
         command: command.to_string(),
@@ -2440,6 +2462,48 @@ mod url_redaction_tests {
         assert_eq!(
             redact_url_userinfo("git@github.com:org/repo.git"),
             "git@github.com:org/repo.git"
+        );
+    }
+
+    // P0.11 security review, W2: a non-auth libgit2 error (DNS/TLS failure) can echo the raw
+    // request URL — inline userinfo included — somewhere inside a longer sentence, not as the
+    // entire message. `redact_url_userinfo` must scrub it wherever it appears.
+
+    #[test]
+    fn redact_url_userinfo_strips_url_embedded_in_a_longer_message() {
+        assert_eq!(
+            redact_url_userinfo(
+                "failed to resolve address for https://x-access-token:SUPERSECRET@github.com/org/repo.git: nodename nor servname provided, or not known"
+            ),
+            "failed to resolve address for https://github.com/org/repo.git: nodename nor servname provided, or not known"
+        );
+    }
+
+    #[test]
+    fn redact_url_userinfo_strips_ssh_scheme_url_embedded_in_a_longer_message() {
+        assert_eq!(
+            redact_url_userinfo(
+                "unable to connect to ssh://git:SUPERSECRET@example.com:22/org/repo.git: connection refused"
+            ),
+            "unable to connect to ssh://example.com:22/org/repo.git: connection refused"
+        );
+    }
+
+    #[test]
+    fn redact_url_userinfo_strips_multiple_urls_in_one_message() {
+        assert_eq!(
+            redact_url_userinfo(
+                "redirected from https://a:SECRET1@github.com/x.git to https://b:SECRET2@github.com/y.git"
+            ),
+            "redirected from https://github.com/x.git to https://github.com/y.git"
+        );
+    }
+
+    #[test]
+    fn redact_url_userinfo_leaves_message_without_a_url_unchanged() {
+        assert_eq!(
+            redact_url_userinfo("connection refused"),
+            "connection refused"
         );
     }
 }
