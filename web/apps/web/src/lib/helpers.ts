@@ -392,6 +392,17 @@ export function splitPatchByFile(patch: string): PatchFile[] {
   return files
 }
 
+/** Extracts one file's sub-patch from a full commit patch, for the file-history
+ * "diff at this commit" view (P1.2). Matches on new or old path since a commit
+ * could add, modify, delete, or rename the file. Returns "" if the commit's
+ * patch didn't touch the path (also its natural "nothing changed" state). */
+export function patchForPath(patch: string, path: string): string {
+  const file = splitPatchByFile(patch).find(
+    (f) => f.newPath === path || f.oldPath === path,
+  )
+  return file ? file.patch : ""
+}
+
 function plainSegments(text: string): DiffSegment[] {
   return [{ text, changed: false }]
 }

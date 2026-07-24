@@ -5,6 +5,7 @@ import {
   FilePen,
   FilePlus2,
   FileSymlink,
+  History,
 } from "lucide-react"
 
 import { Button } from "@workspace/ui/components/button"
@@ -64,6 +65,18 @@ export interface DiffPanelProps {
    * "before" and new path for "after". Omit to fall back to the text renderer.
    */
   imageSrc?: (path: string, side: ImageDiffSide) => string | null
+  /**
+   * Opens the per-file History view (P1.2) for the currently-displayed file
+   * (single-file diff's `path`, or the diff-file-tree's active file). Omit to
+   * hide the History button, e.g. when there is no file context to key off of.
+   */
+  onOpenFileHistory?: (path: string) => void
+  /**
+   * Jumps to a commit from the Blame view's commit/author gutter (P1.2) —
+   * drives the same selected-commit state as clicking a row in the graph.
+   * Omit to render blame rows' commit column as plain (non-interactive) text.
+   */
+  onSelectBlameCommit?: (commitId: string) => void
 }
 
 // A multi-file patch (whole-commit / whole-workdir diff) is split per
@@ -81,6 +94,8 @@ export function DiffPanel({
   onRequestBlame,
   onCloseBlame,
   imageSrc,
+  onOpenFileHistory,
+  onSelectBlameCommit,
 }: DiffPanelProps): ReactElement {
   const [viewMode, setViewMode] = useState<DiffViewMode>("inline")
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
@@ -126,6 +141,19 @@ export function DiffPanel({
         <code className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
           {headerPath === "" ? "Select a file" : headerPath}
         </code>
+        {headerPath !== "" && onOpenFileHistory && (
+          <Button
+            type="button"
+            data-testid="open-file-history"
+            variant="ghost"
+            size="xs"
+            className="shrink-0"
+            onClick={() => onOpenFileHistory(headerPath)}
+          >
+            <History data-icon="inline-start" />
+            History
+          </Button>
+        )}
         {!isImage && (
           <ToggleGroup
             size="sm"
@@ -155,7 +183,7 @@ export function DiffPanel({
       ) : (
         <div className="min-h-0 flex-1 overflow-auto font-mono text-[12px] leading-5">
           {showBlame ? (
-            <BlameView rows={blame} />
+            <BlameView rows={blame} onSelectCommit={onSelectBlameCommit} />
           ) : activeDiff.trim() === "" ? (
             <EmptyDiffState />
           ) : viewMode === "split" ? (
@@ -356,12 +384,15 @@ function ImagePane({
 // Inline view — one hunk per block, "Stage hunk" button, +/- line coloring.
 // ---------------------------------------------------------------------------
 
-function InlineDiffView({
+// Exported for reuse by FileHistorySheet (P1.2), which shows a historical
+// commit's per-file diff read-only — same hunk parser/renderer, just without a
+// stage action (`onStageHunk` omitted hides the "Stage hunk" button).
+export function InlineDiffView({
   diff,
   onStageHunk,
 }: {
   diff: string
-  onStageHunk: (patch: string) => void
+  onStageHunk?: (patch: string) => void
 }) {
   const hunks = diffHunks(diff)
   if (hunks.length === 0) {
@@ -383,24 +414,26 @@ function HunkBlock({
   onStageHunk,
 }: {
   hunk: DiffHunk
-  onStageHunk: (patch: string) => void
+  onStageHunk?: (patch: string) => void
 }) {
   const canStage = diffIsPatch(hunk.patch)
   return (
     <article>
       <div className="border-border bg-muted sticky top-0 z-10 flex items-center justify-between gap-2 border-b px-2.5 py-1">
         <code className="min-w-0 truncate text-[11px] text-muted-foreground">{hunk.title}</code>
-        <Button
-          data-testid="stage-hunk"
-          type="button"
-          variant="outline"
-          size="xs"
-          className="h-5 shrink-0 px-2 text-[10px] font-semibold"
-          disabled={!canStage}
-          onClick={() => onStageHunk(hunk.patch)}
-        >
-          Stage hunk
-        </Button>
+        {onStageHunk && (
+          <Button
+            data-testid="stage-hunk"
+            type="button"
+            variant="outline"
+            size="xs"
+            className="h-5 shrink-0 px-2 text-[10px] font-semibold"
+            disabled={!canStage}
+            onClick={() => onStageHunk(hunk.patch)}
+          >
+            Stage hunk
+          </Button>
+        )}
       </div>
       <div className="px-1 py-0.5">
         {hunk.lines.map((line) => (
@@ -523,7 +556,13 @@ function SplitDiffCell({
 // Blame view.
 // ---------------------------------------------------------------------------
 
-function BlameView({ rows }: { rows: BlameRow[] }) {
+function BlameView({
+  rows,
+  onSelectCommit,
+}: {
+  rows: BlameRow[]
+  onSelectCommit?: (commitId: string) => void
+}) {
   if (rows.length === 0) {
     return <div className="text-muted-foreground p-3">No blame data available.</div>
   }
@@ -535,9 +574,23 @@ function BlameView({ rows }: { rows: BlameRow[] }) {
           className="hover:bg-accent grid grid-cols-[44px_70px_110px_minmax(0,1fr)] gap-2 px-3 py-0.5"
         >
           <span className="text-muted-foreground text-right select-none">{row.line}</span>
-          <code className="text-muted-foreground">
-            {row.commit === "" ? "" : shortId(row.commit)}
-          </code>
+          {row.commit !== "" && onSelectCommit ? (
+            <Button
+              type="button"
+              data-testid="blame-commit-link"
+              variant="link"
+              size="xs"
+              className="h-auto justify-start p-0 font-mono"
+              title={`Jump to commit ${row.commit}`}
+              onClick={() => onSelectCommit(row.commit)}
+            >
+              {shortId(row.commit)}
+            </Button>
+          ) : (
+            <code className="text-muted-foreground">
+              {row.commit === "" ? "" : shortId(row.commit)}
+            </code>
+          )}
           <span className="text-muted-foreground truncate">{row.author}</span>
           <pre className="text-foreground/90 min-w-0 overflow-hidden text-ellipsis whitespace-pre">
             {row.code}

@@ -52,6 +52,7 @@ import {
 import { CommitGraph } from "./components/CommitGraph"
 import { ConflictResolver } from "./components/ConflictResolver"
 import { DiffPanel } from "./components/DiffPanel"
+import { FileHistorySheet } from "./components/FileHistorySheet"
 import { GitToolsPanel } from "./components/GitToolsPanel"
 import { RepoMinibar } from "./components/RepoMinibar"
 import { RepoStatsPanel } from "./components/RepoStatsPanel"
@@ -115,6 +116,15 @@ export function App() {
     null,
   )
   const [searchingHistory, setSearchingHistory] = useState(false)
+  // File History view (P1.2) — non-null path opens the sheet for that file.
+  const [fileHistoryTarget, setFileHistoryTarget] = useState<string | null>(
+    null,
+  )
+  // Jump-to-commit (P1.2, from a blame row or a file-history entry) can target
+  // a commit outside the loaded graph window / historyResults; this holds a
+  // one-off lookup for that case so `selected` below can still resolve it
+  // without disturbing the full-history search UI in CommitGraph.
+  const [jumpCommit, setJumpCommit] = useState<CommitSummary | null>(null)
 
   const isMobile = useIsMobile()
   const [branchSheetOpen, setBranchSheetOpen] = useState(false)
@@ -210,8 +220,37 @@ export function App() {
   const selected =
     ws.commits.find((c) => c.id === selectedCommit) ??
     historyResults?.find((c) => c.id === selectedCommit) ??
+    (jumpCommit?.id === selectedCommit ? jumpCommit : undefined) ??
     ws.commits[0] ??
     null
+
+  // Blame gutter / file-history "View commit" -> select that commit in the
+  // graph and switch to its detail (P1.2). The target may be outside the
+  // loaded graph window/historyResults, so fall back to a one-off search-by-sha
+  // lookup (search_commits matches a full SHA substring) purely to populate
+  // CommitDetail — this intentionally does not touch historyResults/CommitGraph's
+  // search-results view.
+  function handleJumpToCommit(commitId: string) {
+    setSelectedCommit(commitId)
+    setMode("commits")
+    if (isMobile) setDetailSheetOpen(true)
+    const known =
+      ws.commits.some((c) => c.id === commitId) ||
+      historyResults?.some((c) => c.id === commitId)
+    if (known) {
+      setJumpCommit(null)
+      return
+    }
+    void ws
+      .searchCommits(commitId)
+      .then((results) => setJumpCommit(results.find((c) => c.id === commitId) ?? null))
+      .catch(() => setJumpCommit(null))
+  }
+
+  function openFileHistory(path: string) {
+    if (path === "") return
+    setFileHistoryTarget(path)
+  }
   const changedPaths = ws.gitStatus
     .filter((f) => f.staged || f.unstaged || f.untracked || f.conflicted)
     .map((f) => f.path)
@@ -328,6 +367,17 @@ export function App() {
                       </span>
                       <code className="min-w-0 truncate">{file.path}</code>
                     </button>
+                    {!file.untracked && (
+                      <Button
+                        data-testid="file-history-btn"
+                        variant="ghost"
+                        size="xs"
+                        className="shrink-0"
+                        onClick={() => openFileHistory(file.path)}
+                      >
+                        History
+                      </Button>
+                    )}
                     {(file.unstaged || file.untracked || file.conflicted) && (
                       <Button
                         data-testid="stage-btn"
@@ -482,6 +532,8 @@ export function App() {
                     )
                   : null
               }
+              onOpenFileHistory={openFileHistory}
+              onSelectBlameCommit={handleJumpToCommit}
             />
           ) : (
             <Tabs
@@ -915,6 +967,26 @@ export function App() {
         open={addRepoOpen}
         onOpenChange={setAddRepoOpen}
         onCreate={handleCreateRepository}
+      />
+      <FileHistorySheet
+        open={fileHistoryTarget !== null}
+        onOpenChange={(open) => !open && setFileHistoryTarget(null)}
+        path={fileHistoryTarget ?? ""}
+        repositoryId={currentRepoId}
+        fileHistory={ws.fileHistory}
+        diffCommit={(repositoryId, commitId) =>
+          ws.api.diffCommit(repositoryId, commitId)
+        }
+        blobText={(repositoryId, revision, path) =>
+          ws.api.blobText(repositoryId, revision, path)
+        }
+        blobUrl={(repositoryId, revision, path) =>
+          ws.api.blobUrl(repositoryId, revision, path)
+        }
+        onJumpToCommit={(commitId) => {
+          setFileHistoryTarget(null)
+          handleJumpToCommit(commitId)
+        }}
       />
     </div>
   )

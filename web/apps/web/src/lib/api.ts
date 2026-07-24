@@ -294,6 +294,17 @@ export class ZyncApi {
     )
   }
 
+  /** Text-decodes a file's contents at a revision ("open file at revision", P1.2).
+   * For binary/image files prefer `blobUrl` with an `<img>`; this is for the
+   * text/`<pre>` fallback path. */
+  async blobText(
+    repositoryId: string,
+    revision: string,
+    path: string
+  ): Promise<string> {
+    return getText(this.blobUrl(repositoryId, revision, path))
+  }
+
   async writeFile(
     workspaceId: string,
     path: string,

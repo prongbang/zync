@@ -139,6 +139,9 @@ export type WorkspaceState = {
   /** Full-history commit search (P1.3) — for matches outside the loaded graph
    * window. Rejects if no repository is open, same as the other guarded actions. */
   searchCommits: (query: string, path?: string) => Promise<CommitSummary[]>
+  /** Commits that touched `path` (P1.2 file history). Rejects if no repository
+   * is open, same as `searchCommits`. */
+  fileHistory: (path: string) => Promise<CommitSummary[]>
 }
 
 export type LocalChangesMode = "dont-change" | "stash-reapply" | "discard"
@@ -717,6 +720,21 @@ export function useWorkspace(): WorkspaceState {
     [guard],
   )
 
+  const fileHistory = useCallback(
+    async (path: string): Promise<CommitSummary[]> => {
+      const repositoryId = guard()
+      if (!repositoryId) throw new Error("Open a repository first")
+      try {
+        return await api.fileHistory(repositoryId, path)
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error))
+        setNotice(err.message)
+        throw err
+      }
+    },
+    [guard],
+  )
+
   // Live sync: reconnect with backoff, generation-guarded so switching repos
   // retires the previous socket loop (ported from start_live_events).
   useEffect(() => {
@@ -831,5 +849,6 @@ export function useWorkspace(): WorkspaceState {
     loadStats,
     repoStats,
     searchCommits,
+    fileHistory,
   }
 }
