@@ -7,8 +7,11 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
+    io::Read,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1512,23 +1515,181 @@ fn upstream_branch(repo: &Repository) -> anyhow::Result<Option<String>> {
         .map(ToOwned::to_owned))
 }
 
+/// Default ceiling for a single `git` CLI shellout. Remote operations (fetch/pull/push/lfs)
+/// are the main reason this exists: with `GIT_TERMINAL_PROMPT=0` and batch-mode SSH a bad
+/// credential or unreachable host fails in well under a second, but a wedged network peer can
+/// otherwise leave the child process running (and the server request hanging) forever.
+const DEFAULT_GIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Coarse classification of a failed `git` invocation, derived from stderr text. Lets callers
+/// (eventually the server) react differently per failure mode instead of pattern-matching a raw
+/// error string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitErrorKind {
+    /// Missing/invalid credentials (HTTPS auth failure, SSH key rejected, prompts disabled).
+    Auth,
+    /// Host unreachable, DNS failure, connection refused/reset/timed out.
+    Network,
+    /// Push rejected because the remote has commits we don't have locally.
+    NonFastForward,
+    /// Merge/rebase/checkout produced a conflict.
+    Conflict,
+    /// The child process did not exit within the allotted timeout and was killed.
+    Timeout,
+    /// Anything else; `GitCommandError::stderr` carries the raw detail.
+    Other,
+}
+
+/// Error returned by a failed `run_git` shellout. Implements `std::error::Error` (via
+/// `thiserror`) so it can be attached as an `anyhow` error and later recovered with
+/// `error.downcast_ref::<GitCommandError>()` to map `kind` to an HTTP response.
+#[derive(Debug, thiserror::Error)]
+#[error("{command} failed: {stderr}")]
+pub struct GitCommandError {
+    /// The command that was run, e.g. `"git fetch --prune origin"`.
+    pub command: String,
+    /// stderr (or, if stderr was empty, stdout) captured from the child process.
+    pub stderr: String,
+    pub kind: GitErrorKind,
+}
+
+/// Classify a `git` stderr (or combined) string into a [`GitErrorKind`]. Pure and side-effect
+/// free so it can be unit tested directly against captured stderr fixtures.
+pub fn classify_git_stderr(stderr: &str) -> GitErrorKind {
+    let lower = stderr.to_lowercase();
+
+    let is_auth = lower.contains("authentication failed")
+        || lower.contains("could not read username")
+        || lower.contains("could not read password")
+        || lower.contains("permission denied (publickey)")
+        || lower.contains("invalid credentials")
+        || lower.contains("terminal prompts disabled")
+        || lower.contains("access denied")
+        || lower.contains("403")
+        || lower.contains("support for password authentication was removed")
+        || lower.contains("invalid username or password");
+    if is_auth {
+        return GitErrorKind::Auth;
+    }
+
+    let is_network = lower.contains("could not resolve host")
+        || lower.contains("connection timed out")
+        || lower.contains("connection refused")
+        || lower.contains("connection reset")
+        || lower.contains("network is unreachable")
+        || lower.contains("could not connect")
+        || lower.contains("failed to connect")
+        || lower.contains("no route to host")
+        || lower.contains("ssl certificate problem");
+    if is_network {
+        return GitErrorKind::Network;
+    }
+
+    let is_non_fast_forward = lower.contains("non-fast-forward")
+        || lower.contains("fetch first")
+        || lower.contains("tip of your current branch is behind");
+    if is_non_fast_forward {
+        return GitErrorKind::NonFastForward;
+    }
+
+    if lower.contains("conflict") {
+        return GitErrorKind::Conflict;
+    }
+
+    GitErrorKind::Other
+}
+
 fn run_git(repo_path: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let output = Command::new("git")
+    run_git_with_timeout(repo_path, args, DEFAULT_GIT_TIMEOUT)
+}
+
+fn run_git_with_timeout(
+    repo_path: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> anyhow::Result<String> {
+    let command_str = format!("git {}", args.join(" "));
+
+    let mut command = Command::new("git");
+    command
         .args(args)
         .current_dir(repo_path)
-        .output()?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if output.status.success() {
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Non-interactive hardening: never let git fall back to a terminal credential prompt (it
+    // would otherwise block the server process indefinitely), and put SSH in batch mode unless
+    // the caller's environment already set a custom GIT_SSH_COMMAND we shouldn't clobber.
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+        command.env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes");
+    }
+
+    let mut child = command.spawn()?;
+    let mut stdout_pipe = child.stdout.take().expect("stdout is piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr is piped");
+
+    // Drain stdout/stderr on background threads while we poll for exit, so a chatty command
+    // can't deadlock by filling the OS pipe buffer before we get around to reading it.
+    let stdout_handle = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_handle = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // Do NOT join the drain threads here: if git spawned a grandchild (e.g.
+                    // ssh) that inherited the pipe's write end, killing git alone won't make
+                    // that grandchild exit, so the pipe never EOFs and read_to_end would block
+                    // forever. Drop the handles instead — the threads detach and die on their
+                    // own once the grandchild eventually exits and the pipe closes.
+                    drop(stdout_handle);
+                    drop(stderr_handle);
+                    return Err(GitCommandError {
+                        command: command_str,
+                        stderr: format!("timed out after {}s", timeout.as_secs()),
+                        kind: GitErrorKind::Timeout,
+                    }
+                    .into());
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+        }
+    };
+
+    let stdout_bytes = stdout_handle.join().unwrap_or_default();
+    let stderr_bytes = stderr_handle.join().unwrap_or_default();
+    let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
+
+    if status.success() {
         if stdout.is_empty() {
             Ok(stderr)
         } else {
             Ok(stdout)
         }
     } else {
-        let command = format!("git {}", args.join(" "));
         let detail = if stderr.is_empty() { stdout } else { stderr };
-        anyhow::bail!("{command} failed: {detail}")
+        let kind = classify_git_stderr(&detail);
+        Err(GitCommandError {
+            command: command_str,
+            stderr: detail,
+            kind,
+        }
+        .into())
     }
 }
 

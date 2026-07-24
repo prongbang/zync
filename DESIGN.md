@@ -660,3 +660,181 @@ The UI is Fork-like enough when:
 - Interactive rebase can be completed in-app.
 - The app remains usable on mobile with one workflow visible at a time.
 - Large repositories stay responsive through virtualization and lazy loading.
+
+---
+
+## ADR-001: Credentials & remote transport
+
+Status: Accepted (2026-07-25). Scope: P0.1 decision record for P0.3 (git-core credentialed
+transports) and P0.4 (server credentials API + at-rest encryption).
+
+### Context
+
+Today every network Git op runs against the *server host's* ambient credentials:
+`fetch`/`push`/`pull`/`push_force_with_lease` shell out through `run_git` (`crates/git-core/src/lib.rs`),
+`clone_repo` calls `Repository::clone` with no callbacks at all, and the one libgit2 network path that
+exists — `delete_remote_branch` — wires `PushOptions::remote_callbacks(callbacks())`, where `callbacks()`
+only ever offers `Cred::ssh_key_from_agent` / `Cred::default`. So a private repo can only sync if the host
+happens to have an ssh-agent or a credential helper configured. Zync needs **per-user, at-rest-encrypted**
+credentials that git-core can consume without them leaking into logs, argv, or error strings.
+
+### Decision 1 — `credentials` table + at-rest encryption
+
+New table (added via the same `migrate()` batch in `crates/server/src/db/mod.rs`):
+
+```sql
+CREATE TABLE IF NOT EXISTS credentials (
+    id            TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL,
+    label         TEXT NOT NULL,                    -- human name, e.g. "GitHub PAT"
+    host_pattern  TEXT NOT NULL,                    -- "github.com" or "*.github.com"
+    kind          TEXT NOT NULL,                    -- 'https_token' | 'ssh_key'
+    username      TEXT,                             -- https token user / ssh user (default 'git')
+    secret_cipher BLOB NOT NULL,                    -- AEAD ciphertext of the secret bundle
+    secret_nonce  BLOB NOT NULL,                    -- 24-byte XChaCha20 nonce, unique per write
+    created_at    TEXT NOT NULL,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+);
+```
+
+- **The encrypted blob is a serialized bundle, not a bare string.** Plaintext is
+  `serde_json` of `{ "token": ... }` for `https_token`, or
+  `{ "private_key": ..., "passphrase": ..., "public_key": ... }` for `ssh_key`. This keeps the schema at
+  one ciphertext column while letting an SSH credential carry its (also-secret) passphrase and optional
+  public key. `kind` selects how the decrypted bundle is interpreted.
+- **AEAD: `chacha20poly1305::XChaCha20Poly1305` (RustCrypto), chosen over `aes-gcm`.** Rationale: (a) the
+  server ships as a container image that may run on ARM or on hosts without guaranteed AES-NI — the
+  pure-Rust ChaCha20 software path is constant-time and fast without hardware AES, whereas software AES-GCM
+  is both slower and a timing risk; (b) XChaCha20's **192-bit nonce** can be generated randomly per write
+  (`OsRng`) with a negligible birthday-collision bound, so we avoid the stateful counter discipline that
+  AES-GCM's 96-bit nonce demands to stay safe. Both are AEAD (confidentiality + integrity); the operational
+  nonce-safety difference is the deciding factor for a low-write-volume secret store.
+- **Key material: `ZYNC_SECRET_KEY`** — a base64-encoded 32-byte key read at startup. Decoded once into a
+  `zeroize`-wrapped `[u8; 32]` held on `AppState`.
+  - **Production (default):** if `ZYNC_SECRET_KEY` is unset or not exactly 32 bytes after base64-decode, the
+    server still boots (local, credential-less repos keep working) but **every credential create/decrypt and
+    every credentialed remote op fails fast with a clear, non-secret error** — e.g.
+    `"credentials disabled: set ZYNC_SECRET_KEY (base64, 32 bytes) to enable encrypted credential storage"`.
+    Refusing the op, not crashing the server, keeps the non-remote workflow usable.
+  - **Dev fallback:** when `ZYNC_DEV=1` (or `--dev`), a missing key falls back to a fixed all-zero dev key
+    and logs a single loud `WARN` that credentials are **not** meaningfully encrypted and the DB must not
+    leave the dev machine. This makes local clone/push work without ceremony while making the weakening
+    explicit and opt-in.
+- **Write-only secrets.** The list/read API returns `{ id, label, host_pattern, kind, username, created_at }`
+  only — never the ciphertext, nonce, or plaintext. There is no "reveal" endpoint; update = delete + recreate.
+  Secrets are decrypted **only** in the remote-op handler, just-in-time, and never enter a log line, a
+  `tracing` span, an error body, or a JSON response.
+
+### Decision 2 — Transport: libgit2 for clone/fetch/push, CLI only for pull merge/rebase
+
+**Confirmed the plan's recommendation, with two grounded refinements.**
+
+- **`clone_repo`, `fetch`, `push`, `delete_remote_branch`, force-with-lease → libgit2 `RemoteCallbacks`.**
+  This unifies with the transport `delete_remote_branch` already uses, keeps secrets **in memory only**
+  (`Cred::userpass_plaintext` for tokens, `Cred::ssh_key_from_memory` for keys — available because
+  `git2 = "0.18"` ships the `ssh_key_from_memory` default feature), and gives transfer/progress callbacks for
+  free (clone gets a real progress bar; `clone_repo`'s current no-callback `Repository::clone` gets replaced
+  by `RepoBuilder` + `FetchOptions`). The `callbacks()` fn is generalized to
+  `callbacks(spec: &CredentialSpec) -> RemoteCallbacks` and the credential closure walks the chain below.
+  - *Refinement — force-with-lease:* libgit2's push refspec expresses **force** (`+refs/...`) but has **no
+    lease** (no expected-old-oid check). So `push_force_with_lease` stays correct by doing the lease check in
+    git-core: read the remote-tracking ref, verify it equals the caller's expected oid, then issue a forced
+    libgit2 push through the same credentialed callbacks. (Falling back to CLI-with-askpass for this one op is
+    acceptable if the manual lease proves fiddly, but the libgit2 path keeps it credentialed uniformly.)
+- **`pull` → CLI shellout, kept, with an injected non-interactive credential shim.** libgit2 has no `pull`;
+  reimplementing correct `merge` and especially `rebase` resolution on top of `fetch` is exactly the kind of
+  error-prone logic the git CLI already does correctly. Pull grows a mode (`ff-only | merge | rebase`) and
+  keeps using `run_git`. Credentials are injected via **environment, never argv** (argv is what `run_git`
+  interpolates into its error string):
+  - HTTPS: `GIT_ASKPASS` points at a tiny bundled shim that echoes a token read from an env var we set on the
+    child `Command` (e.g. `ZYNC_ASKPASS_TOKEN`); plus `GIT_TERMINAL_PROMPT=0` so a missing/blank credential
+    fails fast instead of hanging on a prompt.
+  - SSH: an in-memory key can't be handed to the git CLI, so an SSH-key pull writes the key to a `0600`
+    temp file (OS temp / tmpfs), sets `GIT_SSH_COMMAND="ssh -i <tmpkey> -o BatchMode=yes -o IdentitiesOnly=yes"`,
+    and unlinks it immediately after the process exits. ssh-agent is used directly when present.
+  - *Refinement — shrink the CLI surface:* `ff-only` pull is trivially a libgit2 `fetch` + fast-forward of the
+    ref, so it can go through the in-memory libgit2 path too. That leaves **only `merge` and `rebase` modes**
+    truly on the CLI, which is the only place an SSH key ever touches disk — the smallest possible exposure.
+
+Consequence: git-core keeps its "open a fresh `Repository` per call, `impl AsRef<Path>` in, `anyhow::Result`
+out" shape; the new seam is a `&CredentialSpec` parameter threaded into the network fns and the generalized
+`callbacks()`.
+
+### Decision 3 — Host-pattern matching & credential selection order
+
+Given a remote URL, git-core reports its host; the server picks a credential for the current user:
+
+1. **Parse the host** from the URL — `https://host[:port]/...`, `ssh://[user@]host[:port]/...`, and the scp-like
+   `[user@]host:path`. Also derive the **scheme class**: `https` vs `ssh`.
+2. **Filter by compatibility:** an `https://` remote may only match `kind = 'https_token'`; an ssh remote
+   (`ssh://` or scp-like) may only match `kind = 'ssh_key'`. A kind/scheme mismatch is never selected.
+3. **Match `host_pattern` against the host:**
+   - exact, case-insensitive host equality (`github.com` == `github.com`), or
+   - a single leading-`*` glob (`*.github.com` matches `api.github.com`, `git.github.com`, but **not** the
+     apex `github.com`). No other glob syntax — keep matching total and predictable.
+4. **Selection order (first wins):**
+   1. an **explicit per-remote assignment** (a `credential_id` the user pinned to that remote) — overrides all
+      pattern logic;
+   2. **exact host** match over any wildcard;
+   3. among wildcards, the **most specific** (longest literal suffix) pattern;
+   4. tie-break by **most recently created**.
+5. **No match → attempt the ambient chain** (ssh-agent / `Cred::default`, i.e. today's behavior) so nothing
+   regresses for hosts the user hasn't registered a credential for; if that also fails, surface a structured
+   `auth` error.
+
+### Decision 4 — `CredentialSpec` (the git-core seam) and secret hygiene
+
+git-core owns this type so P0.3 can build against it before P0.4's storage lands. The server decrypts a
+`credentials` row, maps `kind` + bundle into a `CredentialSpec`, and passes it by reference into the network
+fn; the fn builds `RemoteCallbacks` from it and drops it at end of call.
+
+```rust
+// crates/git-core: secret-bearing fields wrapped so they zero on drop.
+use zeroize::Zeroizing;
+
+pub enum CredentialSpec {
+    /// HTTPS token. `username` is the token user ("x-access-token", "oauth2",
+    /// or the account name); `password` is the PAT/OAuth token.
+    UserpassPlaintext { username: String, password: Zeroizing<String> },
+    /// SSH private key held in memory (never written to disk on the libgit2 path).
+    SshKey {
+        username: String,                       // usually "git"
+        private_key: Zeroizing<String>,
+        passphrase: Option<Zeroizing<String>>,
+        public_key: Option<String>,
+    },
+    /// Explicit ssh-agent use (username optional).
+    SshAgent { username: Option<String> },
+    /// Ambient: current behavior — agent then Cred::default. The default.
+    Default,
+}
+```
+
+Secret-hygiene rules (binding on both crates, and the P4.3 audit):
+
+- **`zeroize`:** every secret-bearing field is `Zeroizing<String>`, so key/token bytes are wiped when the spec
+  drops. Add `zeroize` to `crates/git-core/Cargo.toml`.
+- **No derived `Debug` that prints secrets.** `CredentialSpec` gets a **manual `Debug`** that renders variant
+  names and `username` but prints every secret field as `"<redacted>"`. Never `{:?}` a raw token/key.
+- **Secrets never enter errors.** The libgit2 credential callback failing maps to a fixed
+  `auth`-kind error (`"authentication failed for <host>"`) with **no** secret and **no** userinfo-bearing URL.
+  For the CLI pull path, secrets go through env (`GIT_ASKPASS` shim / `GIT_SSH_COMMAND` key file), **never
+  argv**, so `run_git`'s `"git {args} failed: {detail}"` string can't contain them; the URL passed to the CLI
+  must be the plain remote URL, never a `https://user:token@host` form.
+- **Just-in-time decrypt, immediate drop.** The server decrypts inside the handler, constructs the spec, calls
+  git-core, and lets the spec drop before returning. Decrypted material is never stored on `AppState`, cached,
+  or broadcast.
+
+### Consequences
+
+- P0.3 can start immediately against the `CredentialSpec` above and the "libgit2 for clone/fetch/push, CLI for
+  pull merge/rebase" split; `callbacks()` becomes `callbacks(&CredentialSpec)` and `clone_repo` moves to
+  `RepoBuilder`.
+- P0.4 owns the `credentials` table, the `XChaCha20Poly1305` encrypt/decrypt around `ZYNC_SECRET_KEY`, and the
+  host-pattern selection fn; list responses are the masked projection only.
+- New deploy env: `ZYNC_SECRET_KEY` (base64 32 bytes) is **required in production to use credentials**; document
+  it alongside `ZYNC_REPOS_ROOT`/`ZYNC_AUTH` (P5.5). Losing the key makes stored ciphertext unrecoverable — key
+  rotation = re-enter credentials.
+- The SSH-key-on-disk exposure is confined to `merge`/`rebase` pulls (0600, tmpfs, unlinked); everything else is
+  in-memory. Force-with-lease keeps its safety via a manual remote-oid check on the libgit2 push.
+- New dependencies: `chacha20poly1305`, `base64`, `rand`/`getrandom` (server); `zeroize` (git-core).
