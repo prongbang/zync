@@ -15,8 +15,9 @@ Files:
   default it also leaves one dirty tracked file and one untracked file in the
   working clone (for `audit.cjs`'s Local Changes flows); pass
   `{ dirty: false }` for a working clone whose tree is clean and matches
-  `origin/main` exactly (used by `remote.cjs`, whose fetch/pull/push flows
-  need a tree that never blocks a fast-forward). `cleanup(fixture)` removes
+  `origin/main` exactly (used by `remote.cjs` and `features.cjs`, whose flows
+  need a tree that starts clean - fast-forwards for `remote.cjs`, interactive
+  rebase's clean-tree guard for `features.cjs`). `cleanup(fixture)` removes
   the registered repository again via `DELETE /repositories/:id`. Also
   exports `git(args, cwd)`, the small `execFileSync` wrapper it builds the
   fixture with, for reuse by other scripts. Talks only to git (CLI) and the
@@ -36,6 +37,16 @@ Files:
   flows). Kept separate from `audit.cjs` because it needs that second clone
   and deliberately exercises negative/error paths that would be noisy
   interleaved with `audit.cjs`'s happy-path run.
+- `features.cjs` - covers the P1 surfaces (P1.8 in PLAN.md): tags, commit
+  search, the diff file tree, image diff, per-file history + blame, and
+  interactive rebase (including the drop-then-squash guard). Builds its own
+  `buildFixture(baseDir, { dirty: false })` fixture (the interactive rebase
+  steps need a clean tree to start from) and extends it with plain `git`
+  calls via `fixture.cjs`'s exported `git()` - a baseline+modified image pair
+  for the image-diff flow, and a post-rebase commit so file history has more
+  than one entry to pick between. See "Known non-bugs handled deliberately"
+  below for why most of its steps call a `forceRefresh()` helper after
+  mutating the fixture's filesystem directly (outside the browser).
 
 ## Prerequisites
 
@@ -65,17 +76,18 @@ credentials flows in `remote.cjs` fail.
 ```bash
 cd tests/e2e
 npm install
-npm run audit          # audit.cjs then remote.cjs - exits 1 if either fails
+npm run audit          # audit.cjs, remote.cjs, then features.cjs - exits 1 if any fail
 npm run audit:core     # audit.cjs only
 npm run audit:remote   # remote.cjs only
+npm run audit:features # features.cjs only
 ```
 
 ## Target origin: `E2E_BASE_URL`
 
-Both `audit.cjs` and `remote.cjs` navigate to `E2E_BASE_URL` (default
-`http://127.0.0.1:5173`, the Vite dev server). Override it to point at a
-different origin, e.g. when `zync-server` is serving a production UI build
-same-origin on `58271`:
+`audit.cjs`, `remote.cjs`, and `features.cjs` all navigate to `E2E_BASE_URL`
+(default `http://127.0.0.1:5173`, the Vite dev server). Override it to point
+at a different origin, e.g. when `zync-server` is serving a production UI
+build same-origin on `58271`:
 
 ```bash
 E2E_BASE_URL=http://127.0.0.1:58271 npm run audit
@@ -137,6 +149,66 @@ change.
 - Git Tools -> Remotes tab: the `origin` remote row shows its `file://` URL;
   add a second remote, then delete it
 
+### `features.cjs`
+
+- Tags (P1.1): create a tag on `main` via the branch context menu's "New
+  Tag...", confirm its `tag-row` appears in the sidebar Tags section, open
+  its `tag-context-menu`, "Copy SHA" (verified via the footer notice), then
+  "Delete..." (confirmed) and the row is gone
+- Commit search (P1.3): typing an author query updates
+  `search-result-count` and dims (`opacity-40`) non-matching rows in-place;
+  Clear resets both; "Search all history" (shown because the fixture's match
+  count is under the few-matches threshold) swaps in `historyResults` and
+  "Back to graph" returns to the live graph
+- Interactive rebase (P1.6) - run **before** the dirty-tree steps below,
+  since it needs a clean working tree: opens `interactive-rebase-dialog`
+  from a commit, exercises the drop-then-squash guard (row 0 = Drop, a later
+  row = Squash -> `rebase-execute` stays disabled because the first
+  *kept* row, not literally row 0, can't squash/fixup into nothing), then a
+  plain squash plan is executed and the commit count drop is verified via
+  `git rev-list --count HEAD` against the real fixture on disk
+- Diff file tree (P1.4): see the note below - exercised via a multi-file
+  *workdir* diff (two dirtied tracked files), since that is the only
+  reachable multi-file diff surface today. `diff-file-tree` lists both
+  files; clicking a `diff-file-row` swaps the diff pane to that file
+- Image diff (P1.5): commits a small (real, decodable) baseline PNG, then
+  modifies it uncommitted; the DiffPanel shows `diff-image-before` (HEAD) /
+  `diff-image-after` (`:workdir` sentinel) with distinct `src` URLs, and both
+  `<img>` elements are asserted to actually decode (`naturalWidth > 0`) in
+  the browser, not just be present in the DOM. Also asserts at the API level
+  that the raw-blob route serves the PNG with `Content-Type: image/png` and
+  `X-Content-Type-Options: nosniff`
+- File history + blame (P1.2): selects a file, opens `open-file-history`
+  from the DiffPanel header, confirms `file-history-view` lists 2+
+  `file-history-row` entries (a post-rebase commit is added so this is true
+  even after the rebase step above reduces history), selects a different
+  row and confirms the diff pane's header changes; separately, toggles the
+  DiffPanel to Blame, confirms `blame-commit-link` is present, and clicking
+  it selects that commit (verified by switching to the Commit detail tab and
+  comparing the full SHA shown there)
+
+Each dirty-tree step in `features.cjs` mutates the fixture's filesystem
+directly (`fs.appendFileSync` / `git commit` in the working clone) rather
+than through the browser, then calls a local `forceRefresh(page)` helper
+(clicks Toolbar Fetch and waits for "Fetch complete") before asserting on
+the UI. This is a deliberate workaround for a real bug - see "Known non-bugs
+handled deliberately" below.
+
+**Note on diff-file-tree and "select a multi-file commit":** there is
+currently no UI path to view a *selected commit's* full multi-file diff.
+`CommitGraph` never fetches a commit's diff, and the "Commit" detail tab
+(`App.tsx`'s `CommitDetail`, shown in All Commits mode) renders only
+metadata (author/SHA/parents/message) - never a diff. `DiffPanel` (the
+component that owns `diff-file-tree`) is only ever mounted while the center
+pane is in "Local Changes" mode, fed `ws.diff`, which defaults to the whole
+*workdir* diff (`api.diffWorkdir`) - a multi-file patch once 2+ files are
+dirty. The commit-context-menu's "Compare to local changes..." action
+(`compare-local`) does fetch a commit-vs-workdir diff into `ws.diff`, but
+doesn't switch the center pane to "Local Changes" mode itself, so nothing
+visibly changes unless the user was already on that tab. `features.cjs`
+exercises the same `DiffFileTree`/`DiffFileRow` component the only way it's
+actually reachable today: a multi-file workdir diff.
+
 ### Known non-bugs handled deliberately
 
 - The commit composer is targeted via the `commit-input` / `commit-btn`
@@ -179,6 +251,31 @@ change.
   effect worth fixing upstream (no request is cancelled/ignored based on
   which repo is still selected when it resolves) - it is *worked around*
   here for a deterministic e2e run, not fixed at the source.
+- **The live-sync file watcher (`WorkspaceSync` /
+  `spawn_workspace_watcher` in `crates/server/src/sync/mod.rs`) does not
+  appear to ever deliver `workspace_batch` events for filesystem changes
+  made outside a mutating git route, at least in this environment - a real,
+  reproducible bug, not a test artifact.** Verified independently of the
+  browser: a raw `WebSocket` client subscribed to
+  `/ws/workspace/:id` receives **zero** messages for 15+ seconds after
+  creating or modifying a file directly in a freshly-opened (watcher
+  registered) workspace's working tree, even though `GET
+  /repositories/:id/git/status` reflects the change immediately (a plain
+  filesystem read, independent of the watcher) - so the server process can
+  see the files fine, it's specifically the `notify`-crate-based watch that
+  never fires or never reaches the hub. The websocket/broadcast pipeline
+  itself is not at fault: the same test, using a mutating git route (`POST
+  .../git/branches`) instead of a raw fs write, reliably delivers a
+  `git_changed` event within ~1s. Net effect: a file edited by another tool
+  while Zync's tab is open (the file watcher's entire purpose) does not
+  live-refresh the UI; the user has to trigger some other action (a git
+  mutation via the UI, a manual repo re-open, etc.) before Local
+  Changes/diff reflects it. `features.cjs`'s dirty-tree steps work around
+  this with a `forceRefresh(page)` helper (clicks Toolbar Fetch, whose
+  success handler calls `refresh(SCOPE_ALL)` client-side regardless of any
+  websocket event - see `runRemote` in `useWorkspace.ts`) rather than
+  waiting on the live-sync path the same way a real "external edit" flow
+  would. This is worth investigating upstream - not fixed here.
 
 ## Safety
 

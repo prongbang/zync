@@ -4,9 +4,10 @@
   "version": "1.0.0",
   "description": "Repeatable Playwright click-through harness for the Zync web git client.",
   "scripts": {
-    "audit": "node audit.cjs && node remote.cjs",
+    "audit": "node audit.cjs && node remote.cjs && node features.cjs",
     "audit:core": "node audit.cjs",
-    "audit:remote": "node remote.cjs"
+    "audit:remote": "node remote.cjs",
+    "audit:features": "node features.cjs"
   },
   "dependencies": {
     "playwright": "^1.61.1"
