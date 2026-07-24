@@ -16,7 +16,7 @@ import {
 import { cn } from "@workspace/ui/lib/utils"
 
 import { branchGroupRows, branchLeafLabel } from "@/lib/helpers"
-import type { BranchSummary } from "@/lib/types"
+import type { BranchSummary, TagSummary } from "@/lib/types"
 
 // Emitted intents. `rename` carries `newName` seeded to the current name — the
 // orchestrator opens RenameDialog to collect the real value before applying.
@@ -29,6 +29,15 @@ export type BranchCommand =
   | { kind: "newTag"; name: string }
   | { kind: "rebase"; name: string }
   | { kind: "interactiveRebase"; name: string }
+
+// Emitted intents for the Tags section. `checkout` reuses the same detached
+// checkout-at-revision flow commits use (`runCommitAction("checkout", ...)`
+// in App.tsx) since a tag name resolves the same way as a commit id.
+export type TagCommand =
+  | { kind: "checkout"; name: string }
+  | { kind: "push"; name: string }
+  | { kind: "copySha"; sha: string }
+  | { kind: "delete"; name: string }
 
 function AheadBehind({ branch }: { branch: BranchSummary }): ReactElement | null {
   const ahead = branch.ahead ?? 0
@@ -187,12 +196,96 @@ function BranchSection({
   )
 }
 
-export function BranchSidebar({
-  branches,
+function TagRow({
+  tag,
   onCommand,
 }: {
+  tag: TagSummary
+  onCommand: (command: TagCommand) => void
+}): ReactElement {
+  const { name, target, annotated } = tag
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger
+        data-testid="tag-row"
+        data-tag-name={name}
+        className="flex h-[26px] w-full cursor-pointer items-center gap-2 rounded px-2 text-[13px] text-foreground/90 outline-none hover:bg-accent/40 focus-visible:ring-2 focus-visible:ring-ring"
+        onClick={() => onCommand({ kind: "checkout", name })}
+      >
+        <span className="min-w-0 flex-1 truncate">{name}</span>
+        {annotated && (
+          <Badge variant="secondary" className="shrink-0">
+            annotated
+          </Badge>
+        )}
+      </ContextMenuTrigger>
+      <ContextMenuContent data-testid="tag-context-menu" className="w-60">
+        <ContextMenuGroup>
+          <ContextMenuItem onClick={() => onCommand({ kind: "checkout", name })}>
+            Checkout (detached)...
+          </ContextMenuItem>
+        </ContextMenuGroup>
+        <ContextMenuSeparator />
+        <ContextMenuGroup>
+          <ContextMenuItem onClick={() => onCommand({ kind: "push", name })}>
+            Push to origin
+          </ContextMenuItem>
+          <ContextMenuItem
+            disabled={!target}
+            onClick={() => target && onCommand({ kind: "copySha", sha: target })}
+          >
+            Copy SHA
+          </ContextMenuItem>
+        </ContextMenuGroup>
+        <ContextMenuSeparator />
+        <ContextMenuGroup>
+          <ContextMenuItem
+            variant="destructive"
+            onClick={() => onCommand({ kind: "delete", name })}
+          >
+            Delete...
+          </ContextMenuItem>
+        </ContextMenuGroup>
+      </ContextMenuContent>
+    </ContextMenu>
+  )
+}
+
+function TagSection({
+  tags,
+  onCommand,
+}: {
+  tags: TagSummary[]
+  onCommand: (command: TagCommand) => void
+}): ReactElement {
+  return (
+    <section className="flex flex-col gap-0.5">
+      <div className="px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
+        Tags
+      </div>
+      {tags.length === 0 ? (
+        <div className="px-2 py-1 text-[12px] text-muted-foreground">
+          No tags
+        </div>
+      ) : (
+        tags.map((tag) => (
+          <TagRow key={tag.name} tag={tag} onCommand={onCommand} />
+        ))
+      )}
+    </section>
+  )
+}
+
+export function BranchSidebar({
+  branches,
+  tags,
+  onCommand,
+  onTagCommand,
+}: {
   branches: BranchSummary[]
+  tags: TagSummary[]
   onCommand: (command: BranchCommand) => void
+  onTagCommand: (command: TagCommand) => void
 }): ReactElement {
   const locals = branches.filter((branch) => branch.kind === "local")
   const remotes = branches.filter((branch) => branch.kind !== "local")
@@ -200,10 +293,11 @@ export function BranchSidebar({
   return (
     <nav
       className="flex h-full min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-2"
-      aria-label="Branches"
+      aria-label="Branches and tags"
     >
       <BranchSection title="Branches" rows={locals} onCommand={onCommand} />
       <BranchSection title="Remotes" rows={remotes} onCommand={onCommand} />
+      <TagSection tags={tags} onCommand={onTagCommand} />
     </nav>
   )
 }
