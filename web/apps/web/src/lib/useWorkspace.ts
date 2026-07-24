@@ -54,6 +54,10 @@ export type WorkspaceState = {
   notice: string
   liveSyncOk: boolean
   selectedFile: string
+  /** True while an `openRepository()` call is in flight (from either the auto-open effect or an
+   * explicit repo switch). Lets callers avoid kicking off a redundant/competing open while one is
+   * already resolving — see the generation guard in `openRepository`. */
+  openingRepository: boolean
   loadRepositories: () => Promise<void>
   openRepository: (repositoryId: string) => Promise<void>
   // Repository registry actions (RepoMinibar context menu / Add Repository dialog).
@@ -144,6 +148,7 @@ export function useWorkspace(): WorkspaceState {
   const [liveSyncOk, setLiveSyncOk] = useState(false)
   const [selectedFile, setSelectedFile] = useState("")
   const [repoStats, setRepoStats] = useState<RepoStats | null>(null)
+  const [openingRepository, setOpeningRepository] = useState(false)
 
   // Identifiers + graph limit read inside async callbacks — keep in refs so the
   // callbacks stay stable and always see the latest values.
@@ -152,6 +157,13 @@ export function useWorkspace(): WorkspaceState {
   const graphLimitRef = useRef(500)
   const commitsCountRef = useRef(0)
   commitsCountRef.current = commits.length
+
+  // Bumped at the START (synchronously, before any await) of every openRepository()
+  // call. Lets a call detect — after its await resolves — that a later call has since
+  // started, and bail out without writing any state, so a slow-resolving open (e.g. the
+  // default-repository auto-open racing an explicit repo switch) can never clobber a
+  // faster one that started after it. See tests/e2e/README.md "Known non-bugs" section.
+  const openGenerationRef = useRef(0)
 
   const loadRepositories = useCallback(async () => {
     try {
@@ -200,8 +212,16 @@ export function useWorkspace(): WorkspaceState {
 
   const openRepository = useCallback(
     async (repositoryId: string) => {
+      const myGeneration = ++openGenerationRef.current
+      const isStale = () => openGenerationRef.current !== myGeneration
+      setOpeningRepository(true)
       try {
         const opened = await api.openRepository(repositoryId)
+        // A later openRepository() call started while this one was awaiting the
+        // server — that call owns the workspace now. Discard this result outright:
+        // no ref/state writes, no WS (re)bind, no refresh, so a slow-resolving open
+        // can never rebind live-sync or refetch onto a repo the user already left.
+        if (isStale()) return
         repoIdRef.current = opened.repository.id
         workspaceIdRef.current = opened.workspace.id
         graphLimitRef.current = 500
@@ -209,9 +229,26 @@ export function useWorkspace(): WorkspaceState {
         setCommits([])
         setDiff("")
         setNotice("Workspace opened and watcher attached")
-        refresh(SCOPE_ALL)
+        // Fetch + set `workspace` inline (awaited here) rather than through the
+        // fire-and-forget `refresh` below — `workspace` is what the auto-open effect
+        // and the live-sync WS effect both key off, so it must land, generation-checked,
+        // before `openingRepository` is allowed to clear in `finally`. Otherwise there is
+        // a window where `!workspace && !openingRepository` is briefly true and the
+        // auto-open effect fires again, starting a redundant/competing open (this was the
+        // actual bug in the first pass at this fix — see tests/e2e/README.md).
+        const workspaceResponse = await api.workspace(opened.workspace.id)
+        if (isStale()) return
+        setWorkspace(workspaceResponse)
+        // The remaining scopes don't gate `workspace`/`openingRepository`, so a plain
+        // fire-and-forget refresh is fine for them: repoIdRef/workspaceIdRef already
+        // point at this call's repo (a stale call would have returned above instead of
+        // reaching here), so this can't clobber a newer switch.
+        refresh(SCOPE_ALL & ~SCOPE_WORKSPACE)
       } catch (error) {
+        if (isStale()) return
         setNotice(error instanceof Error ? error.message : String(error))
+      } finally {
+        if (!isStale()) setOpeningRepository(false)
       }
     },
     [refresh],
@@ -693,6 +730,7 @@ export function useWorkspace(): WorkspaceState {
     notice,
     liveSyncOk,
     selectedFile,
+    openingRepository,
     loadRepositories,
     openRepository,
     setRepositoryFavorite,

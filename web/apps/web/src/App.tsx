@@ -101,11 +101,16 @@ export function App() {
   const currentRepoId = ws.workspace?.repository.id ?? null
 
   useEffect(() => {
-    if (!ws.workspace && ws.repositories.length > 0) {
+    // Skip while an open is already in flight (auto-open or an explicit switch) —
+    // otherwise this effect can re-fire (e.g. ws.repositories getting a new
+    // reference) before that open resolves and start a second, competing default-repo
+    // open that races the one already running. See useWorkspace's openRepository
+    // generation guard and tests/e2e/README.md "Known non-bugs" for the race this avoids.
+    if (!ws.workspace && !ws.openingRepository && ws.repositories.length > 0) {
       void ws.openRepository(ws.repositories[0].id)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ws.repositories, ws.workspace])
+  }, [ws.repositories, ws.workspace, ws.openingRepository])
 
   async function handleCreateRepository(
     request: CreateRepositoryRequest,
