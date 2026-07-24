@@ -273,11 +273,17 @@ export interface RenameFileRequest {
   new_path: string
 }
 
+// Merge strategy — mirrors `zync_git_core::MergeStrategy`. Omitted/undefined = "no-ff" (old
+// default behavior, preserved).
+export type MergeStrategy = "ff-only" | "no-ff" | "squash"
+
 export interface BranchRequest {
   name: string
   new_name: string | null
   checkout: boolean | null
   revision: string | null
+  /** Merge only. `#[serde(default)]` -> key may be absent, or null. */
+  strategy?: MergeStrategy | null
 }
 
 // Pull strategy — mirrors `zync_git_core::PullMode`. Omitted/undefined = "ff-only" (old
@@ -315,6 +321,9 @@ export interface TagRequest {
 
 export interface CommitIdRequest {
   commit: string
+  /** Revert only: 1-based mainline parent, required when `commit` is a merge commit.
+   * `#[serde(default)]` -> key may be absent, or null. */
+  mainline?: number | null
 }
 
 export interface CherryPickRequest {

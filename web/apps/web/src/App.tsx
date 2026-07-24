@@ -60,6 +60,7 @@ import {
   NewBranchDialog,
   RenameDialog,
   ResetDialog,
+  RevertParentDialog,
   RewordDialog,
   StashApplyDialog,
   TagDialog,
@@ -83,6 +84,7 @@ type ActiveDialog =
   | { kind: "reset"; commitId: string }
   | { kind: "drop"; commitId: string }
   | { kind: "stashApply"; index: number }
+  | { kind: "revertParent"; commitId: string; parents: string[] }
   | null
 
 export function App() {
@@ -330,9 +332,19 @@ export function App() {
                       `${action} ${shortId(commitId)}`,
                     )
                     break
+                  case "revert":
+                    if (commit && commit.parents.length >= 2) {
+                      setDialog({
+                        kind: "revertParent",
+                        commitId,
+                        parents: commit.parents,
+                      })
+                    } else {
+                      void ws.runCommitAction("revert", commitId)
+                    }
+                    break
                   case "checkout":
                   case "cherry-pick":
-                  case "revert":
                   case "copy-sha":
                   case "save-patch":
                   case "compare-local":
@@ -681,8 +693,22 @@ export function App() {
           open
           branch={dialog.name}
           onOpenChange={(o) => !o && setDialog(null)}
-          onSubmit={() => {
-            void ws.mergeBranch(dialog.name)
+          onSubmit={(p) => {
+            void ws.mergeBranch(dialog.name, p.strategy)
+            setDialog(null)
+          }}
+        />
+      )}
+      {dialog?.kind === "revertParent" && (
+        <RevertParentDialog
+          open
+          commit={shortId(dialog.commitId)}
+          parents={dialog.parents}
+          onOpenChange={(o) => !o && setDialog(null)}
+          onSubmit={(p) => {
+            void ws.runCommitAction("revert", dialog.commitId, {
+              mainline: p.mainline,
+            })
             setDialog(null)
           }}
         />

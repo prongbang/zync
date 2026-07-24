@@ -1244,12 +1244,88 @@ pub fn delete_branch(path: impl AsRef<Path>, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Merge strategy for [`merge_branch_with_strategy`]. `FfOnly` and `Squash` mirror `git merge
+/// --ff-only`/`--squash`; `NoFf` always creates a merge commit (matching `git merge --no-ff`) and
+/// is the strategy [`merge_branch`] uses, preserving the pre-existing (strategy-less) behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MergeStrategy {
+    FfOnly,
+    NoFf,
+    Squash,
+}
+
 pub fn merge_branch(path: impl AsRef<Path>, name: &str) -> anyhow::Result<()> {
+    merge_branch_with_strategy(path, name, MergeStrategy::NoFf)
+}
+
+/// Merges branch `name` into the currently checked-out branch. See [`MergeStrategy`] for the
+/// per-strategy behavior; all three read the target branch tip once up front, so which strategy
+/// runs never depends on more than the repo state at the moment this call starts.
+pub fn merge_branch_with_strategy(
+    path: impl AsRef<Path>,
+    name: &str,
+    strategy: MergeStrategy,
+) -> anyhow::Result<()> {
     let repo = Repository::open(path.as_ref())?;
     let oid = repo.refname_to_id(&format!("refs/heads/{name}"))?;
     let annotated = repo.find_annotated_commit(oid)?;
+    match strategy {
+        MergeStrategy::FfOnly => merge_ff_only(&repo, name, oid, &annotated),
+        MergeStrategy::NoFf => merge_no_ff(&repo, name, oid, &annotated),
+        MergeStrategy::Squash => merge_squash(&repo, &annotated),
+    }
+}
+
+/// Fast-forwards the current branch's ref to `target_oid` entirely over libgit2 (same shape as
+/// `pull_ff_only`): no merge commit is ever created, and diverged history is a hard error rather
+/// than silently falling back to a real merge.
+fn merge_ff_only(
+    repo: &Repository,
+    name: &str,
+    target_oid: Oid,
+    annotated: &git2::AnnotatedCommit,
+) -> anyhow::Result<()> {
+    let analysis = repo.merge_analysis(&[annotated])?;
+    if analysis.0.is_up_to_date() {
+        return Ok(());
+    }
+    if !analysis.0.is_fast_forward() {
+        return Err(GitCommandError {
+            command: format!("git merge --ff-only {name}"),
+            stderr: "not possible to fast-forward, aborting (branches have diverged)".to_string(),
+            kind: GitErrorKind::NonFastForward,
+        }
+        .into());
+    }
+
+    let target_commit = repo.find_commit(target_oid)?;
+    // Check out the target tree before moving the ref, same reasoning as `pull_ff_only`: a
+    // "safe" checkout aborts on a dirty/conflicting working tree instead of clobbering
+    // uncommitted local changes.
+    repo.checkout_tree(
+        target_commit.as_object(),
+        Some(git2::build::CheckoutBuilder::default().safe()),
+    )?;
+
+    let head_branch = current_branch(repo)?
+        .ok_or_else(|| anyhow::anyhow!("cannot fast-forward merge: HEAD is not on a branch"))?;
+    let refname = format!("refs/heads/{head_branch}");
+    let mut reference = repo.find_reference(&refname)?;
+    reference.set_target(target_oid, &format!("zync: fast-forward merge '{name}'"))?;
+    repo.set_head(&refname)?;
+    Ok(())
+}
+
+/// Always creates a merge commit, even when a fast-forward was possible — the original
+/// (strategy-less) `merge_branch` behavior, unchanged.
+fn merge_no_ff(
+    repo: &Repository,
+    name: &str,
+    oid: Oid,
+    annotated: &git2::AnnotatedCommit,
+) -> anyhow::Result<()> {
     let mut options = MergeOptions::new();
-    repo.merge(&[&annotated], Some(&mut options), None)?;
+    repo.merge(&[annotated], Some(&mut options), None)?;
     if repo.index()?.has_conflicts() {
         return Ok(());
     }
@@ -1271,14 +1347,59 @@ pub fn merge_branch(path: impl AsRef<Path>, name: &str) -> anyhow::Result<()> {
         &[&head, &other],
     )?;
     repo.checkout_head(Some(git2::build::CheckoutBuilder::default().safe()))?;
+    // The commit above already resolved the merge; clear MERGE_HEAD/MERGE_MSG so
+    // `repo.state()` reports `Clean` again, matching real `git merge` after it commits. Only
+    // reached on the conflict-free path — a conflicted merge returns early above and correctly
+    // leaves MERGE_HEAD in place for the user to resolve and finish with a normal commit.
+    repo.cleanup_state()?;
+    Ok(())
+}
+
+/// Stages the merge result (index + working directory) without committing, matching
+/// `git merge --squash`. Leaves the branch's history untouched — no merge commit, and HEAD keeps
+/// a single parent whenever the caller does eventually commit.
+fn merge_squash(repo: &Repository, annotated: &git2::AnnotatedCommit) -> anyhow::Result<()> {
+    let mut options = MergeOptions::new();
+    repo.merge(&[annotated], Some(&mut options), None)?;
+    // `git merge --squash` never sets MERGE_HEAD in real git, but libgit2's `repo.merge()` always
+    // does (it has no concept of squash). Left in place, a later plain `git commit` (e.g. from a
+    // terminal) would pick up MERGE_HEAD and produce a 2-parent merge commit — exactly what
+    // squash is supposed to avoid. `cleanup_state()` only clears MERGE_HEAD/MERGE_MSG; it never
+    // touches the staged index or any conflict entries in it, so both stay intact whether or not
+    // the merge produced conflicts.
+    repo.cleanup_state()?;
     Ok(())
 }
 
 pub fn revert_commit(path: impl AsRef<Path>, commit_id: &str) -> anyhow::Result<String> {
+    revert_commit_with_mainline(path, commit_id, None)
+}
+
+/// `mainline` is the 1-based parent number libgit2 needs to revert a merge commit (matching
+/// `git revert -m`). Required when `commit_id` has 2+ parents (a merge commit) — omitting it
+/// there is a clear error rather than an ambiguous libgit2 failure. Ignored for plain
+/// (single-parent) commits, so passing it there is harmless.
+pub fn revert_commit_with_mainline(
+    path: impl AsRef<Path>,
+    commit_id: &str,
+    mainline: Option<u32>,
+) -> anyhow::Result<String> {
     let repo = Repository::open(path.as_ref())?;
     let oid = Oid::from_str(commit_id)?;
     let commit = repo.find_commit(oid)?;
-    repo.revert(&commit, None)?;
+
+    let mut options = git2::RevertOptions::new();
+    if commit.parent_count() > 1 {
+        let mainline = mainline.ok_or_else(|| {
+            anyhow::anyhow!(
+                "commit {commit_id} is a merge commit with {} parents; specify a mainline parent number (1-based) to revert it",
+                commit.parent_count()
+            )
+        })?;
+        options.mainline(mainline);
+    }
+
+    repo.revert(&commit, Some(&mut options))?;
     if repo.index()?.has_conflicts() {
         anyhow::bail!("revert stopped on conflicts");
     }

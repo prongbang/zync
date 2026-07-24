@@ -1,4 +1,4 @@
-use git2::{Repository, Signature};
+use git2::{BranchType, Repository, Signature};
 use std::fs;
 use std::time::{Duration, Instant};
 use zync_git_core::GitErrorKind;
@@ -541,4 +541,194 @@ fn clone_with_userinfo_url_does_not_leak_token_on_failure() {
             git_error.command
         );
     }
+}
+
+/// Builds a repo with a `base` commit on `main`, then a `feature` branch (checked out from
+/// `base`) carrying one additional commit that adds `feature.txt` — `main` is left behind, so a
+/// fast-forward of `main` onto `feature` is possible. Returns (repo root, feature branch name).
+fn repo_with_ff_possible_feature_branch(path: &std::path::Path) -> String {
+    Repository::init(path).expect("init repo");
+    fs::write(path.join("base.txt"), "base").expect("write base");
+    zync_git_core::add(path, &["base.txt".to_string()]).expect("add base");
+    zync_git_core::commit(path, "Base", "Zync Test", "zync@test.local").expect("base commit");
+
+    zync_git_core::create_branch(path, "feature", true).expect("create feature branch");
+    fs::write(path.join("feature.txt"), "feature").expect("write feature file");
+    zync_git_core::add(path, &["feature.txt".to_string()]).expect("add feature file");
+    zync_git_core::commit(path, "Feature work", "Zync Test", "zync@test.local")
+        .expect("feature commit");
+
+    // Switch back to the original branch with a *forced* checkout (raw git2, not
+    // `zync_git_core::checkout_branch`'s "safe" one) so both the index and working directory are
+    // fully reset to `main`'s tree — including dropping `feature.txt`, which only exists on
+    // `feature`. A safe checkout here would leave stale index/workdir state behind and make the
+    // later merge in each test see a spurious conflict.
+    let repo = Repository::open(path).expect("reopen repo for checkout");
+    let original_branch = if repo.find_branch("main", BranchType::Local).is_ok() {
+        "main"
+    } else {
+        "master"
+    };
+    repo.set_head(&format!("refs/heads/{original_branch}"))
+        .expect("set head back to the original branch");
+    let mut checkout = git2::build::CheckoutBuilder::new();
+    checkout.force();
+    repo.checkout_head(Some(&mut checkout))
+        .expect("checkout back to the original branch");
+    "feature".to_string()
+}
+
+#[test]
+fn merge_no_ff_creates_merge_commit_even_when_ff_was_possible() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let feature = repo_with_ff_possible_feature_branch(temp.path());
+
+    zync_git_core::merge_branch_with_strategy(
+        temp.path(),
+        &feature,
+        zync_git_core::MergeStrategy::NoFf,
+    )
+    .expect("no-ff merge");
+
+    let repo = Repository::open(temp.path()).expect("reopen repo");
+    let head = repo.head().expect("head").peel_to_commit().expect("commit");
+    assert_eq!(
+        head.parent_count(),
+        2,
+        "no-ff merge must create a two-parent merge commit even though a fast-forward was possible"
+    );
+    assert!(temp.path().join("feature.txt").exists());
+}
+
+#[test]
+fn merge_squash_leaves_changes_staged_uncommitted() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let feature = repo_with_ff_possible_feature_branch(temp.path());
+
+    let repo = Repository::open(temp.path()).expect("open repo");
+    let head_before = repo.head().expect("head").target().expect("head target");
+
+    zync_git_core::merge_branch_with_strategy(
+        temp.path(),
+        &feature,
+        zync_git_core::MergeStrategy::Squash,
+    )
+    .expect("squash merge");
+
+    let repo = Repository::open(temp.path()).expect("reopen repo");
+    let head_after = repo.head().expect("head").target().expect("head target");
+    assert_eq!(
+        head_before, head_after,
+        "squash merge must not create a commit"
+    );
+
+    let status = zync_git_core::status(temp.path()).expect("status");
+    assert!(
+        status
+            .iter()
+            .any(|file| file.path == "feature.txt" && file.staged),
+        "squash merge must stage the merged changes: {status:?}"
+    );
+
+    // libgit2's `repo.merge()` always sets MERGE_HEAD, but real `git merge --squash` never does.
+    // Left in place, a later plain `git commit` would silently turn into a 2-parent merge commit
+    // instead of a normal squash commit — assert the repo is back to a clean (no in-progress
+    // merge) state.
+    assert_eq!(
+        repo.state(),
+        git2::RepositoryState::Clean,
+        "squash merge must not leave a stale MERGE_HEAD/in-progress merge state"
+    );
+}
+
+#[test]
+fn merge_ff_only_errors_on_diverged_branches() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let feature = repo_with_ff_possible_feature_branch(temp.path());
+
+    // Advance the checked-out branch too, so `feature` is no longer a fast-forward.
+    fs::write(temp.path().join("main-only.txt"), "main").expect("write main-only file");
+    zync_git_core::add(temp.path(), &["main-only.txt".to_string()]).expect("add main-only file");
+    zync_git_core::commit(temp.path(), "Diverge", "Zync Test", "zync@test.local")
+        .expect("diverging commit");
+
+    let error = zync_git_core::merge_branch_with_strategy(
+        temp.path(),
+        &feature,
+        zync_git_core::MergeStrategy::FfOnly,
+    )
+    .expect_err("ff-only merge of diverged branches must fail");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("diverged") || message.contains("fast-forward"),
+        "error should explain the fast-forward failure: {message}"
+    );
+    if let Some(git_error) = error.downcast_ref::<zync_git_core::GitCommandError>() {
+        assert_eq!(git_error.kind, GitErrorKind::NonFastForward);
+    }
+}
+
+#[test]
+fn revert_merge_commit_requires_mainline_and_succeeds_with_it() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let feature = repo_with_ff_possible_feature_branch(temp.path());
+
+    zync_git_core::merge_branch_with_strategy(
+        temp.path(),
+        &feature,
+        zync_git_core::MergeStrategy::NoFf,
+    )
+    .expect("no-ff merge");
+    assert!(temp.path().join("feature.txt").exists());
+
+    let merge_commit_id = {
+        let repo = Repository::open(temp.path()).expect("open repo");
+        let merge_commit = repo
+            .head()
+            .expect("head")
+            .peel_to_commit()
+            .expect("commit");
+        assert_eq!(merge_commit.parent_count(), 2, "sanity: is a merge commit");
+        merge_commit.id().to_string()
+    };
+
+    // Without a mainline, reverting a merge commit is an ambiguous operation that libgit2
+    // refuses to perform silently — this must surface as a clear, actionable error.
+    let error = zync_git_core::revert_commit_with_mainline(temp.path(), &merge_commit_id, None)
+        .expect_err("reverting a merge commit without a mainline must fail");
+    assert!(
+        error.to_string().contains("mainline"),
+        "error should mention the missing mainline: {error}"
+    );
+
+    // mainline=1 reverts relative to the first parent (the branch merged into, i.e. `main`),
+    // which undoes exactly the changes `feature` introduced.
+    zync_git_core::revert_commit_with_mainline(temp.path(), &merge_commit_id, Some(1))
+        .expect("revert with mainline=1 succeeds");
+    assert!(
+        !temp.path().join("feature.txt").exists(),
+        "reverting the merge with mainline=1 should undo feature.txt"
+    );
+}
+
+#[test]
+fn revert_plain_commit_ignores_mainline() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    Repository::init(temp.path()).expect("init repo");
+    fs::write(temp.path().join("a.txt"), "a").expect("write a");
+    zync_git_core::add(temp.path(), &["a.txt".to_string()]).expect("add a");
+    zync_git_core::commit(temp.path(), "Base", "Zync Test", "zync@test.local")
+        .expect("base commit");
+
+    fs::write(temp.path().join("b.txt"), "b").expect("write b");
+    zync_git_core::add(temp.path(), &["b.txt".to_string()]).expect("add b");
+    let commit_b = zync_git_core::commit(temp.path(), "Add b", "Zync Test", "zync@test.local")
+        .expect("commit b");
+
+    // A stray mainline value for a plain, single-parent commit must be silently ignored rather
+    // than erroring, matching `git revert -m 1` on a non-merge commit.
+    zync_git_core::revert_commit_with_mainline(temp.path(), &commit_b, Some(1))
+        .expect("revert of a plain commit ignores the mainline argument");
+    assert!(!temp.path().join("b.txt").exists());
 }

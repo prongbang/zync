@@ -29,6 +29,7 @@ import type {
   InteractiveRebaseRequest,
   LfsRequest,
   LfsSummary,
+  MergeStrategy,
   PatchRequest,
   PullMode,
   ReflogEntrySummary,
@@ -369,12 +370,17 @@ export class ZyncApi {
     )
   }
 
-  async mergeBranch(repositoryId: string, name: string): Promise<void> {
+  async mergeBranch(
+    repositoryId: string,
+    name: string,
+    strategy?: MergeStrategy | null
+  ): Promise<void> {
     const request: BranchRequest = {
       name,
       new_name: null,
       checkout: null,
       revision: null,
+      strategy: strategy ?? null,
     }
     return postEmpty(
       this.url(`/repositories/${repositoryId}/git/branches/merge`),
@@ -458,8 +464,12 @@ export class ZyncApi {
     )
   }
 
-  async revertCommit(repositoryId: string, commit: string): Promise<void> {
-    const request: CommitIdRequest = { commit }
+  async revertCommit(
+    repositoryId: string,
+    commit: string,
+    mainline?: number | null
+  ): Promise<void> {
+    const request: CommitIdRequest = { commit, mainline: mainline ?? null }
     return postEmpty(
       this.url(`/repositories/${repositoryId}/git/revert`),
       request

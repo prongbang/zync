@@ -177,6 +177,10 @@ struct BranchRequest {
     new_name: Option<String>,
     checkout: Option<bool>,
     revision: Option<String>,
+    /// Merge only: `"ff-only"` | `"no-ff"` (default, matches the old strategy-less behavior) |
+    /// `"squash"`. See `zync_git_core::MergeStrategy`.
+    #[serde(default)]
+    strategy: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -194,6 +198,10 @@ struct TagRequest {
 #[derive(Debug, Deserialize)]
 struct CommitIdRequest {
     commit: String,
+    /// Revert only: 1-based mainline parent number, required when `commit` is a merge commit.
+    /// See `zync_git_core::revert_commit_with_mainline`.
+    #[serde(default)]
+    mainline: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -787,13 +795,29 @@ async fn merge_branch(
     Json(request): Json<BranchRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    zync_git_core::merge_branch(repository.path, &request.name).map_err(internal_error)?;
+    let strategy = parse_merge_strategy(request.strategy.as_deref())?;
+    zync_git_core::merge_branch_with_strategy(repository.path, &request.name, strategy)
+        .map_err(internal_error)?;
     broadcast_git_change(
         &state,
         &id,
         &["status", "diff", "commits", "branches", "conflicts"],
     );
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn parse_merge_strategy(
+    strategy: Option<&str>,
+) -> Result<zync_git_core::MergeStrategy, (StatusCode, String)> {
+    match strategy {
+        None | Some("no-ff") => Ok(zync_git_core::MergeStrategy::NoFf),
+        Some("ff-only") => Ok(zync_git_core::MergeStrategy::FfOnly),
+        Some("squash") => Ok(zync_git_core::MergeStrategy::Squash),
+        Some(other) => Err((
+            StatusCode::BAD_REQUEST,
+            format!("strategy must be 'ff-only', 'no-ff', or 'squash', got '{other}'"),
+        )),
+    }
 }
 
 async fn set_upstream(
@@ -852,8 +876,12 @@ async fn revert_commit(
     Json(request): Json<CommitIdRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    let commit =
-        zync_git_core::revert_commit(repository.path, &request.commit).map_err(internal_error)?;
+    let commit = zync_git_core::revert_commit_with_mainline(
+        repository.path,
+        &request.commit,
+        request.mainline,
+    )
+    .map_err(internal_error)?;
     broadcast_git_change(
         &state,
         &id,
@@ -1567,6 +1595,32 @@ mod tests {
     #[test]
     fn parse_pull_mode_rejects_unknown_value() {
         let (status, _) = parse_pull_mode(Some("squash")).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn parse_merge_strategy_defaults_to_no_ff() {
+        assert_eq!(
+            parse_merge_strategy(None).unwrap(),
+            zync_git_core::MergeStrategy::NoFf
+        );
+        assert_eq!(
+            parse_merge_strategy(Some("no-ff")).unwrap(),
+            zync_git_core::MergeStrategy::NoFf
+        );
+        assert_eq!(
+            parse_merge_strategy(Some("ff-only")).unwrap(),
+            zync_git_core::MergeStrategy::FfOnly
+        );
+        assert_eq!(
+            parse_merge_strategy(Some("squash")).unwrap(),
+            zync_git_core::MergeStrategy::Squash
+        );
+    }
+
+    #[test]
+    fn parse_merge_strategy_rejects_unknown_value() {
+        let (status, _) = parse_merge_strategy(Some("rebase")).unwrap_err();
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

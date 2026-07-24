@@ -25,6 +25,7 @@ import type {
   CommitSummary,
   ConflictSummary,
   FileStatus,
+  MergeStrategy,
   PullMode,
   RepoStats,
   RepositoryRecord,
@@ -78,7 +79,11 @@ export type WorkspaceState = {
   commit: (message: string, opts?: CommitOptions) => Promise<void>
   requestBlame: (path: string) => Promise<BlameRow[]>
   // Commit-menu / remote actions.
-  runCommitAction: (action: CommitAction, commitId: string) => Promise<void>
+  runCommitAction: (
+    action: CommitAction,
+    commitId: string,
+    opts?: { mainline?: number },
+  ) => Promise<void>
   // Toolbar remote ops. Unlike `run`-based actions above, these resolve to
   // the server's success message and reject with the thrown error instead of
   // swallowing it, so the toolbar can drive a per-button busy state and toast
@@ -98,7 +103,7 @@ export type WorkspaceState = {
   renameBranch: (name: string, newName: string) => Promise<void>
   deleteBranch: (name: string) => Promise<void>
   checkoutBranch: (name: string) => Promise<void>
-  mergeBranch: (name: string) => Promise<void>
+  mergeBranch: (name: string, strategy?: MergeStrategy) => Promise<void>
   createTag: (name: string, target?: string) => Promise<void>
   deleteTag: (name: string) => Promise<void>
   createStash: (message: string) => Promise<void>
@@ -402,7 +407,7 @@ export function useWorkspace(): WorkspaceState {
   )
 
   const runCommitAction = useCallback(
-    async (action: CommitAction, commitId: string) => {
+    async (action: CommitAction, commitId: string, opts?: { mainline?: number }) => {
       const repositoryId = guard()
       if (!repositoryId) return
       switch (action) {
@@ -456,7 +461,7 @@ export function useWorkspace(): WorkspaceState {
           await run(
             (id) =>
               api
-                .revertCommit(id, commitId)
+                .revertCommit(id, commitId, opts?.mainline)
                 .then(() => `Reverted ${shortId(commitId)}`),
             SCOPE_ALL,
           )
@@ -573,10 +578,10 @@ export function useWorkspace(): WorkspaceState {
   )
   // Merge that surfaces "already up to date" as a friendly notice, not an error.
   const mergeBranch = useCallback(
-    (name: string) =>
+    (name: string, strategy?: MergeStrategy) =>
       run(async (id) => {
         try {
-          await api.mergeBranch(id, name)
+          await api.mergeBranch(id, name, strategy)
           return `Merged ${name}`
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error)
