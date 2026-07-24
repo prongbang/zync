@@ -9,6 +9,11 @@ import { Badge } from "@workspace/ui/components/badge"
 import { Button } from "@workspace/ui/components/button"
 import { Input } from "@workspace/ui/components/input"
 import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@workspace/ui/components/resizable"
+import {
   Tabs,
   TabsContent,
   TabsList,
@@ -125,12 +130,20 @@ export function App() {
         />
       </header>
 
-      <div className="grid min-h-0 flex-1 grid-cols-[260px_minmax(0,1fr)_380px]">
-        <aside className="border-border min-h-0 overflow-y-auto border-r">
-          <BranchSidebar branches={ws.branches} onCommand={onBranchCommand} />
-        </aside>
+      <ResizablePanelGroup
+        orientation="horizontal"
+        className="min-h-0 flex-1"
+      >
+        <ResizablePanel defaultSize={18} minSize={12} maxSize={35}>
+          <aside className="h-full min-h-0 overflow-y-auto">
+            <BranchSidebar branches={ws.branches} onCommand={onBranchCommand} />
+          </aside>
+        </ResizablePanel>
 
-        <main className="flex min-h-0 flex-col">
+        <ResizableHandle withHandle />
+
+        <ResizablePanel defaultSize={52} minSize={30}>
+        <main className="flex h-full min-h-0 flex-col">
           <div className="border-border flex h-9 shrink-0 items-center gap-3 border-b px-3">
             <button
               data-testid="changes-tab"
@@ -286,8 +299,12 @@ export function App() {
             />
           )}
         </main>
+        </ResizablePanel>
 
-        <aside className="border-border flex min-h-0 flex-col overflow-hidden border-l">
+        <ResizableHandle withHandle />
+
+        <ResizablePanel defaultSize={30} minSize={20}>
+        <aside className="flex h-full min-h-0 flex-col overflow-hidden">
           {ws.conflicts.length > 0 && (
             <div className="border-border max-h-48 overflow-y-auto border-b p-3">
               <ConflictResolver
@@ -348,7 +365,8 @@ export function App() {
             </Tabs>
           )}
         </aside>
-      </div>
+        </ResizablePanel>
+      </ResizablePanelGroup>
 
       <footer className="border-border text-muted-foreground flex h-7 shrink-0 items-center gap-2 border-t px-3 text-xs">
         <span

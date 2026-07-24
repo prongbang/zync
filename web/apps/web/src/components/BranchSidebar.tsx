@@ -70,13 +70,18 @@ function BranchRow({
         className={cn(
           "flex h-[26px] w-full cursor-pointer items-center gap-2 rounded px-2 text-[13px] text-foreground/90 outline-none focus-visible:ring-2 focus-visible:ring-ring",
           indent && "pl-5",
-          is_head
-            ? "bg-accent text-accent-foreground"
-            : "hover:bg-accent/40",
+          is_head ? "bg-accent" : "hover:bg-accent/40",
         )}
         onClick={() => onCommand({ kind: "checkout", name })}
       >
-        <span className="min-w-0 flex-1 truncate">{label}</span>
+        <span
+          className={cn(
+            "min-w-0 flex-1 truncate",
+            is_head && "text-primary font-medium",
+          )}
+        >
+          {label}
+        </span>
         <AheadBehind branch={branch} />
       </ContextMenuTrigger>
       <ContextMenuContent className="w-60">

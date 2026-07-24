@@ -187,7 +187,12 @@ function CommitRow({
               +{commit.refs.length - 4}
             </span>
           ) : null}
-          <span className="min-w-0 truncate font-medium text-foreground">
+          <span
+            className={cn(
+              "min-w-0 truncate font-medium",
+              selected ? "text-primary" : "text-foreground",
+            )}
+          >
             {commit.summary}
           </span>
         </span>
