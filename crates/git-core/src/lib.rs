@@ -1139,6 +1139,70 @@ pub fn commit_graph(
     Ok(commits)
 }
 
+/// Full-history commit search (unlike `commit_graph`, walks the whole history reachable
+/// from HEAD rather than a windowed page — commits that exist only on an unmerged branch
+/// won't be found). Case-insensitive substring match over the commit's summary,
+/// author name/email, and full SHA; an empty `query` matches every commit. When
+/// `file_path` is set, a commit only matches if it touched that path (diffed against
+/// its first parent — a simple "commit touched this path" check, not a `--follow`
+/// rename tracker).
+pub fn search_commits(
+    path: impl AsRef<Path>,
+    query: &str,
+    limit: usize,
+    file_path: Option<&str>,
+) -> anyhow::Result<Vec<CommitSummary>> {
+    let repo = Repository::open(path.as_ref())?;
+    let mut walk = repo.revwalk()?;
+    walk.push_head()?;
+    walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)?;
+
+    let needle = query.trim().to_lowercase();
+    let mut ref_map = commit_ref_map(&repo);
+    let mut commits = Vec::new();
+    for oid in walk {
+        let oid = oid?;
+        let commit = repo.find_commit(oid)?;
+
+        if !needle.is_empty() {
+            let sha = oid.to_string().to_lowercase();
+            let summary = commit.summary().unwrap_or("").to_lowercase();
+            let author_name = commit.author().name().unwrap_or("").to_lowercase();
+            let author_email = commit.author().email().unwrap_or("").to_lowercase();
+            let matched = sha.contains(&needle)
+                || summary.contains(&needle)
+                || author_name.contains(&needle)
+                || author_email.contains(&needle);
+            if !matched {
+                continue;
+            }
+        }
+
+        if let Some(file_path) = file_path {
+            let tree = commit.tree()?;
+            let parent_tree = if commit.parent_count() > 0 {
+                Some(commit.parent(0)?.tree()?)
+            } else {
+                None
+            };
+            let mut options = DiffOptions::new();
+            options.pathspec(file_path);
+            let diff =
+                repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut options))?;
+            if diff.deltas().len() == 0 {
+                continue;
+            }
+        }
+
+        let refs = ref_map.remove(&oid).unwrap_or_default();
+        commits.push(summarize_commit(&commit, refs));
+        if commits.len() >= limit {
+            break;
+        }
+    }
+    Ok(commits)
+}
+
 pub fn repo_stats(path: impl AsRef<Path>, max_commits: usize) -> anyhow::Result<RepoStats> {
     let repo = Repository::open(path.as_ref())?;
     let mut walk = match repo.revwalk() {
@@ -1813,11 +1877,29 @@ pub fn interactive_rebase(
                 result.applied.push(step.commit.clone());
             }
             RebaseAction::Squash => {
+                // Squash amends whatever HEAD currently is. If nothing has
+                // been picked yet this run (e.g. every earlier step was a
+                // Drop), HEAD is still sitting at `base` — amending it would
+                // silently fold this commit into a commit outside the
+                // requested range instead of failing like real git does
+                // ("cannot squash without a previous commit").
+                if result.applied.is_empty() {
+                    anyhow::bail!(
+                        "cannot squash {}: no preceding commit in this rebase to combine it into",
+                        step.commit
+                    );
+                }
                 replay_commit(&repo, &step.commit, ReplayMode::Squash)?;
                 result.head = head_oid(&repo);
                 result.applied.push(step.commit.clone());
             }
             RebaseAction::Fixup => {
+                if result.applied.is_empty() {
+                    anyhow::bail!(
+                        "cannot fixup {}: no preceding commit in this rebase to combine it into",
+                        step.commit
+                    );
+                }
                 replay_commit(&repo, &step.commit, ReplayMode::Fixup)?;
                 result.head = head_oid(&repo);
                 result.applied.push(step.commit.clone());

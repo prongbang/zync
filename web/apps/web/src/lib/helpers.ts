@@ -160,6 +160,24 @@ export function laneColor(lane: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// Commit search/filter (P1.3). Client-side matching over already-loaded
+// commits; mirrors the case-insensitive substring match `search_commits`
+// (crates/git-core/src/lib.rs) does server-side for full-history search, so
+// a query behaves the same whether it's filtering the loaded window or
+// hitting the network.
+// ---------------------------------------------------------------------------
+export function commitMatchesQuery(commit: CommitSummary, query: string): boolean {
+  const needle = query.trim().toLowerCase()
+  if (needle === "") return true
+  return (
+    commit.summary.toLowerCase().includes(needle) ||
+    commit.author.toLowerCase().includes(needle) ||
+    commit.author_email.toLowerCase().includes(needle) ||
+    commit.id.toLowerCase().includes(needle)
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Diff parsing (unified patch -> hunks/lines/split/word segments).
 // ---------------------------------------------------------------------------
 export type DiffLine = {
@@ -690,6 +708,35 @@ export function moveRebaseStep(
       : Math.min(index + 1, next.length - 1)
   ;[next[index], next[target]] = [next[target], next[index]]
   return next
+}
+
+// The full-todo variant of quickRebasePlan's single-target range computation
+// (same base/merge-commit rules), used by the interactive rebase todo editor
+// to seed its ordered, oldest-first row list before the user reorders/retypes
+// per-row actions. Returns commit ids only — the caller owns action/message
+// state per row.
+export function rebaseRangeForTarget(
+  commits: CommitSummary[],
+  targetId: string,
+): { base: string; ids: string[] } {
+  const index = commits.findIndex((c) => c.id === targetId)
+  if (index === -1) throw new Error("Commit is not in the loaded graph")
+  const target = commits[index]
+  if (target.parents.length !== 1)
+    throw new Error(
+      "Interactive rebase needs a base commit with exactly one parent",
+    )
+  const base = target.parents[0]
+  const ids = [targetId]
+  for (let i = index - 1; i >= 0; i--) {
+    const descendant = commits[i]
+    if (descendant.parents.length > 1)
+      throw new Error(
+        "Interactive rebase across merge commits is not supported",
+      )
+    ids.push(descendant.id)
+  }
+  return { base, ids }
 }
 
 // ---------------------------------------------------------------------------

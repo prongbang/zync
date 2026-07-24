@@ -169,6 +169,72 @@ fn unstage_discard_and_interactive_rebase_flow() {
 }
 
 #[test]
+fn interactive_rebase_squash_after_drop_only_errors_without_amending_base() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    Repository::init(temp.path()).expect("init repo");
+
+    fs::write(temp.path().join("base.txt"), "base").expect("write base");
+    zync_git_core::add(temp.path(), &["base.txt".to_string()]).expect("add base");
+    let base = zync_git_core::commit(temp.path(), "Base", "Zync Test", "zync@test.local")
+        .expect("base commit");
+
+    fs::write(temp.path().join("b.txt"), "b").expect("write b");
+    zync_git_core::add(temp.path(), &["b.txt".to_string()]).expect("add b");
+    let commit_b = zync_git_core::commit(temp.path(), "Commit B", "Zync Test", "zync@test.local")
+        .expect("commit b");
+
+    fs::write(temp.path().join("c.txt"), "c").expect("write c");
+    zync_git_core::add(temp.path(), &["c.txt".to_string()]).expect("add c");
+    let commit_c = zync_git_core::commit(temp.path(), "Commit C", "Zync Test", "zync@test.local")
+        .expect("commit c");
+
+    let base_oid = git2::Oid::from_str(&base).expect("base oid");
+    let base_message_before = {
+        let repo = Repository::open(temp.path()).expect("open repo");
+        let commit = repo.find_commit(base_oid).expect("find base commit");
+        commit.message().unwrap_or_default().to_string()
+    };
+
+    // Drop B, then try to squash C. Nothing has actually been picked yet
+    // (Drop never advances HEAD), so squashing here would fold C into
+    // `base` — a commit outside the requested range — instead of erroring
+    // the way real git does ("cannot squash without a previous commit").
+    let error = zync_git_core::interactive_rebase(
+        temp.path(),
+        &base,
+        &[
+            zync_git_core::RebaseStep {
+                commit: commit_b.clone(),
+                action: zync_git_core::RebaseAction::Drop,
+                message: None,
+            },
+            zync_git_core::RebaseStep {
+                commit: commit_c.clone(),
+                action: zync_git_core::RebaseAction::Squash,
+                message: None,
+            },
+        ],
+    )
+    .expect_err("squash immediately after a drop-only run must error, not amend base");
+    assert!(
+        error.to_string().contains("cannot squash"),
+        "unexpected error message: {error}"
+    );
+
+    // Base must be untouched by the failed attempt, and HEAD must still sit
+    // at base (reset by interactive_rebase before the loop runs) rather than
+    // at some amended commit that silently absorbed C's changes/message.
+    let repo = Repository::open(temp.path()).expect("reopen repo");
+    let base_commit_after = repo.find_commit(base_oid).expect("find base commit after");
+    assert_eq!(
+        base_commit_after.message().unwrap_or_default(),
+        base_message_before
+    );
+    let head = repo.head().expect("head").target().expect("head target");
+    assert_eq!(head, base_oid, "HEAD should sit at base, not an amended commit");
+}
+
+#[test]
 fn commit_graph_cursor_pagination() {
     let temp = tempfile::tempdir().expect("tempdir");
     Repository::init(temp.path()).expect("init repo");
@@ -821,4 +887,48 @@ fn revert_plain_commit_ignores_mainline() {
     zync_git_core::revert_commit_with_mainline(temp.path(), &commit_b, Some(1))
         .expect("revert of a plain commit ignores the mainline argument");
     assert!(!temp.path().join("b.txt").exists());
+}
+
+#[test]
+fn search_commits_matches_message_author_sha_and_file_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    Repository::init(temp.path()).expect("init repo");
+
+    fs::write(temp.path().join("a.txt"), "a").expect("write a");
+    zync_git_core::add(temp.path(), &["a.txt".to_string()]).expect("add a");
+    let base_id = zync_git_core::commit(temp.path(), "Add alpha module", "Ada", "ada@example.com")
+        .expect("base commit");
+
+    fs::write(temp.path().join("b.txt"), "b").expect("write b");
+    zync_git_core::add(temp.path(), &["b.txt".to_string()]).expect("add b");
+    zync_git_core::commit(temp.path(), "Fix beta bug", "Grace", "grace@example.com")
+        .expect("second commit");
+
+    // Message substring match, case-insensitive.
+    let by_message = zync_git_core::search_commits(temp.path(), "ALPHA", 10, None)
+        .expect("search by message");
+    assert_eq!(by_message.len(), 1);
+    assert_eq!(by_message[0].id, base_id);
+
+    // Author name/email match.
+    let by_author =
+        zync_git_core::search_commits(temp.path(), "grace@example", 10, None).expect("search by author");
+    assert_eq!(by_author.len(), 1);
+    assert_eq!(by_author[0].summary, "Fix beta bug");
+
+    // Partial SHA match.
+    let by_sha = zync_git_core::search_commits(temp.path(), &base_id[0..8], 10, None)
+        .expect("search by sha");
+    assert_eq!(by_sha.len(), 1);
+    assert_eq!(by_sha[0].id, base_id);
+
+    // Empty query matches everything (bounded by limit).
+    let all = zync_git_core::search_commits(temp.path(), "", 10, None).expect("search empty query");
+    assert_eq!(all.len(), 2);
+
+    // File-path filter: only the commit that touched a.txt matches.
+    let by_path = zync_git_core::search_commits(temp.path(), "", 10, Some("a.txt"))
+        .expect("search with path filter");
+    assert_eq!(by_path.len(), 1);
+    assert_eq!(by_path[0].id, base_id);
 }

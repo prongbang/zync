@@ -28,6 +28,7 @@ import type {
   FileStatus,
   MergeStrategy,
   PullMode,
+  RebaseStepRequest,
   RepoStats,
   RepositoryRecord,
   StashSummary,
@@ -124,9 +125,20 @@ export type WorkspaceState = {
     message: string | undefined,
     successNotice: string,
   ) => Promise<void>
+  /** Multi-row variant behind the interactive rebase todo editor (P1.6): runs an
+   * already-built, user-ordered/edited step list as-is (unlike `runInteractiveRebase`,
+   * which derives the steps itself via `quickRebasePlan` for a single-commit action). */
+  runInteractiveRebasePlan: (
+    base: string,
+    steps: RebaseStepRequest[],
+    successNotice: string,
+  ) => Promise<void>
   resetToCommit: (commitId: string, hard: boolean) => Promise<void>
   loadStats: () => Promise<void>
   repoStats: RepoStats | null
+  /** Full-history commit search (P1.3) — for matches outside the loaded graph
+   * window. Rejects if no repository is open, same as the other guarded actions. */
+  searchCommits: (query: string, path?: string) => Promise<CommitSummary[]>
 }
 
 export type LocalChangesMode = "dont-change" | "stash-reapply" | "discard"
@@ -659,6 +671,15 @@ export function useWorkspace(): WorkspaceState {
     [run],
   )
 
+  const runInteractiveRebasePlan = useCallback(
+    (base: string, steps: RebaseStepRequest[], successNotice: string) =>
+      run(async (id) => {
+        await api.interactiveRebase(id, { base, steps })
+        return successNotice
+      }, SCOPE_ALL),
+    [run],
+  )
+
   const resetToCommit = useCallback(
     (commitId: string, hard: boolean) =>
       run(
@@ -680,6 +701,21 @@ export function useWorkspace(): WorkspaceState {
       setNotice(error instanceof Error ? error.message : String(error))
     }
   }, [])
+
+  const searchCommits = useCallback(
+    async (query: string, path?: string): Promise<CommitSummary[]> => {
+      const repositoryId = guard()
+      if (!repositoryId) throw new Error("Open a repository first")
+      try {
+        return await api.searchCommits(repositoryId, query, 200, path)
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error))
+        setNotice(err.message)
+        throw err
+      }
+    },
+    [guard],
+  )
 
   // Live sync: reconnect with backoff, generation-guarded so switching repos
   // retires the previous socket loop (ported from start_live_events).
@@ -790,8 +826,10 @@ export function useWorkspace(): WorkspaceState {
     dropStash,
     resolveConflict,
     runInteractiveRebase,
+    runInteractiveRebasePlan,
     resetToCommit,
     loadStats,
     repoStats,
+    searchCommits,
   }
 }

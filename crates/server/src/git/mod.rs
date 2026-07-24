@@ -68,6 +68,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/repositories/:id/git/tags/push", post(push_tag))
         .route("/repositories/:id/git/revert", post(revert_commit))
         .route("/repositories/:id/git/graph", get(commit_graph))
+        .route("/repositories/:id/git/search", get(search_commits))
         .route("/repositories/:id/git/stats", get(repo_stats))
         .route("/repositories/:id/git/blame", get(blame))
         .route("/repositories/:id/git/history/file", get(file_history))
@@ -944,6 +945,28 @@ async fn commit_graph(
         .min(5000);
     let cursor = query.get("cursor").map(String::as_str);
     zync_git_core::commit_graph(repository.path, limit, cursor)
+        .map(Json)
+        .map_err(internal_error)
+}
+
+/// Full-history commit search (unlike `commit_graph`, not limited to the loaded page).
+/// Query params: `q` (message/author/SHA substring, case-insensitive; empty matches all),
+/// `limit` (default 200, capped at 2000), `path` (optional — only commits touching this
+/// file path match).
+async fn search_commits(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<zync_git_core::CommitSummary>>, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let q = query.get("q").cloned().unwrap_or_default();
+    let limit = query
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(200)
+        .min(2000);
+    let file_path = query.get("path").map(String::as_str);
+    zync_git_core::search_commits(repository.path, &q, limit, file_path)
         .map(Json)
         .map_err(internal_error)
 }

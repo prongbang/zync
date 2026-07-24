@@ -61,6 +61,7 @@ import {
   DeleteDialog,
   DeleteTagDialog,
   DropDialog,
+  InteractiveRebaseDialog,
   MergeDialog,
   NewBranchDialog,
   RenameDialog,
@@ -74,7 +75,11 @@ import { useIsMobile } from "./hooks/use-mobile"
 import { WORKDIR_REVISION } from "./lib/api"
 import { graphRows, statusLabel, type BlameRow } from "./lib/helpers"
 import { formatCommitTime, gravatarSrc, shortId } from "./lib/format"
-import type { CreateRepositoryRequest, RepositoryRecord } from "./lib/types"
+import type {
+  CommitSummary,
+  CreateRepositoryRequest,
+  RepositoryRecord,
+} from "./lib/types"
 import { useWorkspace } from "./lib/useWorkspace"
 
 type CenterMode = "changes" | "commits"
@@ -92,6 +97,7 @@ type ActiveDialog =
   | { kind: "drop"; commitId: string }
   | { kind: "stashApply"; index: number }
   | { kind: "revertParent"; commitId: string; parents: string[] }
+  | { kind: "interactiveRebase"; commitId: string }
   | null
 
 export function App() {
@@ -102,6 +108,13 @@ export function App() {
   const [blame, setBlame] = useState<BlameRow[] | null>(null)
   const [dialog, setDialog] = useState<ActiveDialog>(null)
   const [addRepoOpen, setAddRepoOpen] = useState(false)
+  // Commit search/filter (P1.3). historyResults is null until a full-history
+  // search has run; non-null replaces CommitGraph's list with a flat results view.
+  const [commitQuery, setCommitQuery] = useState("")
+  const [historyResults, setHistoryResults] = useState<CommitSummary[] | null>(
+    null,
+  )
+  const [searchingHistory, setSearchingHistory] = useState(false)
 
   const isMobile = useIsMobile()
   const [branchSheetOpen, setBranchSheetOpen] = useState(false)
@@ -163,9 +176,42 @@ export function App() {
       )
   }
 
+  function handleCommitQueryChange(value: string) {
+    setCommitQuery(value)
+    // A changed (or cleared) query invalidates a prior full-history result set.
+    if (historyResults !== null) setHistoryResults(null)
+  }
+
+  function handleClearHistoryResults() {
+    setHistoryResults(null)
+  }
+
+  async function handleSearchAllHistory() {
+    const query = commitQuery.trim()
+    if (!query) return
+    setSearchingHistory(true)
+    try {
+      const results = await ws.searchCommits(commitQuery)
+      setHistoryResults(results)
+      if (results.length === 0) {
+        toast.add({ title: `No commits match "${query}"`, type: "info" })
+      }
+    } catch (error) {
+      toast.add({
+        title: error instanceof Error ? error.message : String(error),
+        type: "error",
+      })
+    } finally {
+      setSearchingHistory(false)
+    }
+  }
+
   const rows = useMemo(() => graphRows(ws.commits), [ws.commits])
   const selected =
-    ws.commits.find((c) => c.id === selectedCommit) ?? ws.commits[0] ?? null
+    ws.commits.find((c) => c.id === selectedCommit) ??
+    historyResults?.find((c) => c.id === selectedCommit) ??
+    ws.commits[0] ??
+    null
   const changedPaths = ws.gitStatus
     .filter((f) => f.staged || f.unstaged || f.untracked || f.conflicted)
     .map((f) => f.path)
@@ -337,6 +383,12 @@ export function App() {
                 if (isMobile) setDetailSheetOpen(true)
               }}
               onLoadMore={ws.loadMore}
+              searchQuery={commitQuery}
+              onSearchQueryChange={handleCommitQueryChange}
+              historyResults={historyResults}
+              onSearchAllHistory={() => void handleSearchAllHistory()}
+              onClearHistoryResults={handleClearHistoryResults}
+              searchingHistory={searchingHistory}
               onMenuAction={(action, commitId) => {
                 const commit = ws.commits.find((c) => c.id === commitId)
                 switch (action) {
@@ -358,6 +410,9 @@ export function App() {
                     break
                   case "drop":
                     setDialog({ kind: "drop", commitId })
+                    break
+                  case "interactive-rebase":
+                    setDialog({ kind: "interactiveRebase", commitId })
                     break
                   case "edit":
                   case "squash":
@@ -794,6 +849,22 @@ export function App() {
             )
             setDialog(null)
           }}
+        />
+      )}
+      {dialog?.kind === "interactiveRebase" && (
+        <InteractiveRebaseDialog
+          open
+          commits={ws.commits}
+          targetId={dialog.commitId}
+          gitStatus={ws.gitStatus}
+          onOpenChange={(o) => !o && setDialog(null)}
+          onSubmit={(p) =>
+            void ws.runInteractiveRebasePlan(
+              p.base,
+              p.steps,
+              `Rebased ${p.steps.length} commit${p.steps.length === 1 ? "" : "s"} onto ${shortId(p.base)}`,
+            )
+          }
         />
       )}
       {dialog?.kind === "reset" && (

@@ -219,6 +219,22 @@ export class ZyncApi {
     )
   }
 
+  /** Full-history commit search — unlike `graph`/`graphWithLimit`, walks the whole
+   * history rather than a windowed page. `path` restricts to commits that touched
+   * that file (a simple "touched this path" diff-tree check, not `--follow`). */
+  async searchCommits(
+    repositoryId: string,
+    query: string,
+    limit = 200,
+    path?: string
+  ): Promise<CommitSummary[]> {
+    const params = new URLSearchParams({ q: query, limit: String(limit) })
+    if (path) params.set("path", path)
+    return getJson(
+      this.url(`/repositories/${repositoryId}/git/search?${params.toString()}`)
+    )
+  }
+
   // ---- Diffs ----
 
   async diffWorkdir(repositoryId: string): Promise<string> {
