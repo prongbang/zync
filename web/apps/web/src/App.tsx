@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 
+import { Info, PanelLeft } from "lucide-react"
+
 import {
   Avatar,
   AvatarFallback,
@@ -13,6 +15,13 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from "@workspace/ui/components/resizable"
+import { Separator } from "@workspace/ui/components/separator"
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "@workspace/ui/components/sheet"
 import {
   Tabs,
   TabsContent,
@@ -40,6 +49,7 @@ import {
   StashApplyDialog,
   TagDialog,
 } from "./components/dialogs"
+import { useIsMobile } from "./hooks/use-mobile"
 import { graphRows, statusLabel, type BlameRow } from "./lib/helpers"
 import { formatCommitTime, gravatarSrc, shortId } from "./lib/format"
 import { useWorkspace } from "./lib/useWorkspace"
@@ -66,6 +76,10 @@ export function App() {
   const [message, setMessage] = useState("")
   const [blame, setBlame] = useState<BlameRow[] | null>(null)
   const [dialog, setDialog] = useState<ActiveDialog>(null)
+
+  const isMobile = useIsMobile()
+  const [branchSheetOpen, setBranchSheetOpen] = useState(false)
+  const [detailSheetOpen, setDetailSheetOpen] = useState(false)
 
   const currentRepoId = ws.workspace?.repository.id ?? null
 
@@ -110,66 +124,24 @@ export function App() {
     }
   }
 
-  return (
-    <div className="bg-background text-foreground flex h-svh">
-      <RepoMinibar
-        repos={ws.repositories}
-        activeId={currentRepoId}
-        onSelect={(id) => void ws.openRepository(id)}
-      />
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <header className="border-border flex h-12 shrink-0 items-center gap-2 border-b px-3">
-        <span className="bg-primary size-2 rounded-full" />
-        <span className="text-sm font-semibold">Zync</span>
-        <Toolbar
-          disabled={!currentRepoId}
-          onAction={(kind) => {
-            if (kind === "stash") void ws.createStash("WIP from Zync")
-            else void ws.remoteAction(kind)
-          }}
-        />
-      </header>
-
-      <ResizablePanelGroup
-        orientation="horizontal"
-        className="min-h-0 flex-1"
-      >
-        <ResizablePanel defaultSize={18} minSize={12} maxSize={35}>
-          <aside className="h-full min-h-0 overflow-y-auto">
-            <BranchSidebar branches={ws.branches} onCommand={onBranchCommand} />
-          </aside>
-        </ResizablePanel>
-
-        <ResizableHandle withHandle />
-
-        <ResizablePanel defaultSize={52} minSize={30}>
-        <main className="flex h-full min-h-0 flex-col">
-          <div className="border-border flex h-9 shrink-0 items-center gap-3 border-b px-3">
-            <button
-              data-testid="changes-tab"
-              onClick={() => setMode("changes")}
-              className={cn(
-                "text-xs font-semibold",
-                mode === "changes"
-                  ? "text-foreground border-primary border-b-2"
-                  : "text-muted-foreground",
-              )}
-            >
-              Local Changes ({ws.gitStatus.length})
-            </button>
-            <button
-              data-testid="commits-tab"
-              onClick={() => setMode("commits")}
-              className={cn(
-                "text-xs font-semibold",
-                mode === "commits"
-                  ? "text-foreground border-primary border-b-2"
-                  : "text-muted-foreground",
-              )}
-            >
-              All Commits
-            </button>
-          </div>
+  // Shared between the desktop panel layout and the mobile single-column +
+  // sheet layout, so both render identical content.
+  const centerMain = (
+    <main className="flex h-full min-h-0 flex-col">
+          <Tabs
+            value={mode}
+            onValueChange={(v) => setMode(v as CenterMode)}
+            className="border-border shrink-0 gap-0 border-b px-3 py-1"
+          >
+            <TabsList>
+              <TabsTrigger value="changes" data-testid="changes-tab">
+                Local Changes ({ws.gitStatus.length})
+              </TabsTrigger>
+              <TabsTrigger value="commits" data-testid="commits-tab">
+                All Commits
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
 
           {mode === "changes" ? (
             <>
@@ -191,7 +163,10 @@ export function App() {
                   >
                     <button
                       className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                      onClick={() => void ws.selectFileDiff(file.path)}
+                      onClick={() => {
+                        void ws.selectFileDiff(file.path)
+                        if (isMobile) setDetailSheetOpen(true)
+                      }}
                     >
                       <span
                         className={cn(
@@ -204,22 +179,26 @@ export function App() {
                       <code className="min-w-0 truncate">{file.path}</code>
                     </button>
                     {(file.unstaged || file.untracked || file.conflicted) && (
-                      <button
+                      <Button
                         data-testid="stage-btn"
-                        className="text-muted-foreground hover:text-foreground shrink-0 text-xs"
+                        variant="ghost"
+                        size="xs"
+                        className="shrink-0"
                         onClick={() => void ws.stageFiles([file.path])}
                       >
                         Stage
-                      </button>
+                      </Button>
                     )}
                     {file.staged && (
-                      <button
+                      <Button
                         data-testid="unstage-btn"
-                        className="text-muted-foreground hover:text-foreground shrink-0 text-xs"
+                        variant="ghost"
+                        size="xs"
+                        className="shrink-0"
                         onClick={() => void ws.unstageFiles([file.path])}
                       >
                         Unstage
-                      </button>
+                      </Button>
                     )}
                   </li>
                 ))}
@@ -249,7 +228,10 @@ export function App() {
             <CommitGraph
               rows={rows}
               selectedId={selected?.id ?? null}
-              onSelect={setSelectedCommit}
+              onSelect={(id) => {
+                setSelectedCommit(id)
+                if (isMobile) setDetailSheetOpen(true)
+              }}
               onLoadMore={ws.loadMore}
               onMenuAction={(action, commitId) => {
                 const commit = ws.commits.find((c) => c.id === commitId)
@@ -299,11 +281,9 @@ export function App() {
             />
           )}
         </main>
-        </ResizablePanel>
+  )
 
-        <ResizableHandle withHandle />
-
-        <ResizablePanel defaultSize={30} minSize={20}>
+  const detailAside = (
         <aside className="flex h-full min-h-0 flex-col overflow-hidden">
           {ws.conflicts.length > 0 && (
             <div className="border-border max-h-48 overflow-y-auto border-b p-3">
@@ -365,8 +345,75 @@ export function App() {
             </Tabs>
           )}
         </aside>
-        </ResizablePanel>
-      </ResizablePanelGroup>
+  )
+
+  return (
+    <div className="bg-background text-foreground flex h-svh">
+      <RepoMinibar
+        repos={ws.repositories}
+        activeId={currentRepoId}
+        onSelect={(id) => void ws.openRepository(id)}
+      />
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <header className="border-border flex h-12 shrink-0 items-center gap-2 border-b px-3">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="md:hidden"
+          aria-label="Open branches"
+          onClick={() => setBranchSheetOpen(true)}
+        >
+          <PanelLeft />
+        </Button>
+        <span className="bg-primary size-2 rounded-full" />
+        <span className="text-sm font-semibold">Zync</span>
+        <Toolbar
+          disabled={!currentRepoId}
+          onAction={(kind) => {
+            if (kind === "stash") void ws.createStash("WIP from Zync")
+            else void ws.remoteAction(kind)
+          }}
+        />
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="ml-auto md:hidden"
+          aria-label="Open details"
+          onClick={() => setDetailSheetOpen(true)}
+        >
+          <Info />
+        </Button>
+      </header>
+
+      {isMobile ? (
+        <div className="flex min-h-0 flex-1 flex-col">{centerMain}</div>
+      ) : (
+        <ResizablePanelGroup
+          orientation="horizontal"
+          className="min-h-0 flex-1"
+        >
+          <ResizablePanel defaultSize="18" minSize="12" maxSize="35">
+            <aside className="h-full min-h-0 overflow-y-auto">
+              <BranchSidebar
+                branches={ws.branches}
+                onCommand={onBranchCommand}
+              />
+            </aside>
+          </ResizablePanel>
+
+          <ResizableHandle withHandle />
+
+          <ResizablePanel defaultSize="52" minSize="30">
+            {centerMain}
+          </ResizablePanel>
+
+          <ResizableHandle withHandle />
+
+          <ResizablePanel defaultSize="30" minSize="20">
+            {detailAside}
+          </ResizablePanel>
+        </ResizablePanelGroup>
+      )}
 
       <footer className="border-border text-muted-foreground flex h-7 shrink-0 items-center gap-2 border-t px-3 text-xs">
         <span
@@ -380,6 +427,53 @@ export function App() {
         </span>
       </footer>
       </div>
+
+      {/* Mobile overlays: branches (left) and detail (right) sheets. */}
+      {isMobile && (
+        <Sheet open={branchSheetOpen} onOpenChange={setBranchSheetOpen}>
+          <SheetContent side="left" className="gap-0">
+            <SheetHeader className="border-border border-b">
+              <SheetTitle>Branches</SheetTitle>
+            </SheetHeader>
+            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+              <nav aria-label="Repositories" className="flex flex-col gap-1 p-2">
+                {ws.repositories.map((repo) => (
+                  <Button
+                    key={repo.id}
+                    variant={repo.id === currentRepoId ? "secondary" : "ghost"}
+                    size="sm"
+                    className="justify-start"
+                    onClick={() => {
+                      void ws.openRepository(repo.id)
+                      setBranchSheetOpen(false)
+                    }}
+                  >
+                    <span className="truncate">{repo.name}</span>
+                  </Button>
+                ))}
+              </nav>
+              <Separator />
+              <BranchSidebar
+                branches={ws.branches}
+                onCommand={(cmd) => {
+                  onBranchCommand(cmd)
+                  if (cmd.kind === "checkout") setBranchSheetOpen(false)
+                }}
+              />
+            </div>
+          </SheetContent>
+        </Sheet>
+      )}
+      {isMobile && (
+        <Sheet open={detailSheetOpen} onOpenChange={setDetailSheetOpen}>
+          <SheetContent side="right" className="gap-0">
+            <SheetHeader className="border-border border-b">
+              <SheetTitle>Details</SheetTitle>
+            </SheetHeader>
+            <div className="flex min-h-0 flex-1 flex-col">{detailAside}</div>
+          </SheetContent>
+        </Sheet>
+      )}
 
       {/* Dialogs */}
       {dialog?.kind === "newBranch" && (

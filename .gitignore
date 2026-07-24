@@ -13,3 +13,6 @@ web/.turbo
 
 # Local Claude Code settings
 .claude/settings.local.json
+
+# CodeGraph local index
+.codegraph/

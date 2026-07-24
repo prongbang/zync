@@ -47,8 +47,10 @@ const LANE_WIDTH = 13
 const OVERSCAN_ROWS = 10
 const GRAPH_COLUMN_WIDTH = 90
 
-// graph | description | author | commit | date
-const GRID_TEMPLATE_COLUMNS = `${GRAPH_COLUMN_WIDTH}px minmax(0,1fr) 96px 84px 132px`
+// graph | description | commit (mobile) — author + date join at md+. The 90px
+// graph column must stay in sync with GRAPH_COLUMN_WIDTH above.
+const GRID_COLUMNS_CLASS =
+  "grid-cols-[90px_minmax(0,1fr)_84px] md:grid-cols-[90px_minmax(0,1fr)_96px_84px_132px]"
 
 function refClassName(kind: string): string {
   switch (kind) {
@@ -162,11 +164,11 @@ function CommitRow({
         data-commit-id={commit.id}
         className={cn(
           "grid h-[34px] cursor-pointer items-center gap-2 border-b border-border/60 px-2 text-[13px] text-foreground/90",
+          GRID_COLUMNS_CLASS,
           selected
             ? "bg-accent"
             : "hover:bg-accent/40",
         )}
-        style={{ gridTemplateColumns: GRID_TEMPLATE_COLUMNS }}
         onClick={() => onSelect(commit.id)}
       >
         <GraphLaneCell row={row} />
@@ -196,13 +198,13 @@ function CommitRow({
             {commit.summary}
           </span>
         </span>
-        <span className="w-24 min-w-0 truncate text-[12px] text-muted-foreground">
+        <span className="hidden min-w-0 truncate text-[12px] text-muted-foreground md:block">
           {commit.author}
         </span>
         <code className="text-muted-foreground min-w-0 truncate font-mono text-[12px] font-semibold">
           {shortId(commit.id)}
         </code>
-        <span className="min-w-0 truncate text-[12px] tabular-nums text-muted-foreground">
+        <span className="hidden min-w-0 truncate text-[12px] tabular-nums text-muted-foreground md:block">
           {formatCommitTime(commit.time)}
         </span>
       </ContextMenuTrigger>
@@ -344,14 +346,16 @@ export function CommitGraph(props: {
           </Button>
         </div>
         <div
-          className="grid items-center gap-2 border-t border-border px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground"
-          style={{ gridTemplateColumns: GRID_TEMPLATE_COLUMNS }}
+          className={cn(
+            "grid items-center gap-2 border-t border-border px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground",
+            GRID_COLUMNS_CLASS,
+          )}
         >
           <span>Graph</span>
           <span>Description</span>
-          <span>Author</span>
+          <span className="hidden md:inline">Author</span>
           <span>Commit</span>
-          <span>Date</span>
+          <span className="hidden md:inline">Date</span>
         </div>
       </header>
       <ol
