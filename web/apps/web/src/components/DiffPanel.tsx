@@ -1,7 +1,14 @@
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import type { ReactElement } from "react"
+import {
+  FileMinus2,
+  FilePen,
+  FilePlus2,
+  FileSymlink,
+} from "lucide-react"
 
 import { Button } from "@workspace/ui/components/button"
+import { ScrollArea } from "@workspace/ui/components/scroll-area"
 import {
   ToggleGroup,
   ToggleGroupItem,
@@ -15,7 +22,9 @@ import {
   compactDiffText,
   diffHunks,
   diffIsPatch,
+  pathBasename,
   splitDiffLines,
+  splitPatchByFile,
 } from "@/lib/helpers"
 import type {
   BlameRow,
@@ -23,6 +32,8 @@ import type {
   DiffHunk,
   DiffLine,
   DiffSegment,
+  PatchFile,
+  PatchFileStatus,
   SplitDiffLine,
   SplitKind,
 } from "@/lib/helpers"
@@ -45,6 +56,13 @@ export interface DiffPanelProps {
   onCloseBlame: () => void
 }
 
+// A multi-file patch (whole-commit / whole-workdir diff) is split per
+// `diff --git` header so we can render a file list and lazily parse only the
+// selected file's hunks. `displayPath` keys each row and drives selection.
+function displayPath(file: PatchFile): string {
+  return file.status === "deleted" ? file.oldPath : file.newPath
+}
+
 export function DiffPanel({
   path,
   diff,
@@ -54,8 +72,24 @@ export function DiffPanel({
   onCloseBlame,
 }: DiffPanelProps): ReactElement {
   const [viewMode, setViewMode] = useState<DiffViewMode>("inline")
+  const [selectedKey, setSelectedKey] = useState<string | null>(null)
+
+  const files = useMemo(() => splitPatchByFile(diff), [diff])
+  const isMultiFile = files.length > 1
+
+  // Resolve the active file: the user's pick if it still exists in the current
+  // patch, otherwise the first file. When single-file, we feed the whole diff.
+  const activeFile = isMultiFile
+    ? (files.find((file) => displayPath(file) === selectedKey) ?? files[0])
+    : null
+  const activeDiff = activeFile ? activeFile.patch : diff
+  const headerPath = activeFile ? displayPath(activeFile) : path
+
+  // Blame is keyed to the workspace's selected file (the `path`/`blame` props);
+  // for multi-file whole-commit diffs `path` is empty, so blame stays disabled.
   const showBlame = blame !== null
   const mode: DiffViewMode | "blame" = showBlame ? "blame" : viewMode
+  const blameDisabled = isMultiFile || path === ""
 
   const handleModeChange = (value: string[]) => {
     const next = value[0]
@@ -68,11 +102,11 @@ export function DiffPanel({
     }
   }
 
-  return (
-    <div className="bg-background flex h-full min-h-0 min-w-0 flex-col">
+  const content = (
+    <div className="bg-background flex h-full min-h-0 min-w-0 flex-1 flex-col">
       <header className="border-border flex shrink-0 items-center gap-2 border-b px-2.5 py-1.5">
         <code className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
-          {path === "" ? "Select a file" : path}
+          {headerPath === "" ? "Select a file" : headerPath}
         </code>
         <ToggleGroup
           size="sm"
@@ -87,7 +121,11 @@ export function DiffPanel({
           <ToggleGroupItem value="split" data-testid="diff-split">
             Split
           </ToggleGroupItem>
-          <ToggleGroupItem value="blame" data-testid="diff-blame" disabled={path === ""}>
+          <ToggleGroupItem
+            value="blame"
+            data-testid="diff-blame"
+            disabled={blameDisabled}
+          >
             Blame
           </ToggleGroupItem>
         </ToggleGroup>
@@ -95,15 +133,122 @@ export function DiffPanel({
       <div className="min-h-0 flex-1 overflow-auto font-mono text-[12px] leading-5">
         {showBlame ? (
           <BlameView rows={blame} />
-        ) : diff.trim() === "" ? (
+        ) : activeDiff.trim() === "" ? (
           <EmptyDiffState />
         ) : viewMode === "split" ? (
-          <SplitDiffView diff={diff} />
+          <SplitDiffView diff={activeDiff} />
         ) : (
-          <InlineDiffView diff={diff} onStageHunk={onStageHunk} />
+          <InlineDiffView diff={activeDiff} onStageHunk={onStageHunk} />
         )}
       </div>
     </div>
+  )
+
+  if (!isMultiFile) return content
+
+  return (
+    <div className="bg-background flex h-full min-h-0 min-w-0">
+      <DiffFileTree
+        files={files}
+        activePath={activeFile ? displayPath(activeFile) : null}
+        onSelect={setSelectedKey}
+      />
+      {content}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// File tree — a narrow, scrollable list of the files touched by the patch.
+// Selection uses the Button ghost/secondary variant pair (no invented state
+// styling) and aria-current for assistive tech.
+// ---------------------------------------------------------------------------
+
+const statusMeta: Record<
+  PatchFileStatus,
+  { icon: typeof FilePlus2; className: string; label: string }
+> = {
+  added: { icon: FilePlus2, className: "text-primary", label: "Added" },
+  modified: { icon: FilePen, className: "text-muted-foreground", label: "Modified" },
+  deleted: { icon: FileMinus2, className: "text-destructive", label: "Deleted" },
+  renamed: { icon: FileSymlink, className: "text-muted-foreground", label: "Renamed" },
+}
+
+function DiffFileTree({
+  files,
+  activePath,
+  onSelect,
+}: {
+  files: PatchFile[]
+  activePath: string | null
+  onSelect: (path: string) => void
+}) {
+  return (
+    <nav
+      data-testid="diff-file-tree"
+      aria-label="Changed files"
+      className="border-border flex w-56 shrink-0 flex-col border-r"
+    >
+      <div className="border-border text-muted-foreground flex shrink-0 items-center justify-between border-b px-2.5 py-1.5 text-xs font-semibold tracking-wide uppercase">
+        <span>Files</span>
+        <span>{files.length}</span>
+      </div>
+      <ScrollArea className="min-h-0 flex-1">
+        <ul className="flex flex-col gap-0.5 p-1">
+          {files.map((file) => {
+            const key = displayPath(file)
+            const isActive = key === activePath
+            return (
+              <li key={key}>
+                <DiffFileRow
+                  file={file}
+                  isActive={isActive}
+                  onSelect={() => onSelect(key)}
+                />
+              </li>
+            )
+          })}
+        </ul>
+      </ScrollArea>
+    </nav>
+  )
+}
+
+function DiffFileRow({
+  file,
+  isActive,
+  onSelect,
+}: {
+  file: PatchFile
+  isActive: boolean
+  onSelect: () => void
+}) {
+  const meta = statusMeta[file.status]
+  const Icon = meta.icon
+  const full = displayPath(file)
+  const name = pathBasename(full)
+  const dir = full.slice(0, full.length - name.length)
+  return (
+    <Button
+      type="button"
+      data-testid="diff-file-row"
+      variant={isActive ? "secondary" : "ghost"}
+      size="xs"
+      aria-current={isActive ? "true" : undefined}
+      title={file.status === "renamed" ? `${file.oldPath} → ${file.newPath}` : full}
+      onClick={onSelect}
+      className="w-full justify-start px-2 font-normal"
+    >
+      <Icon
+        data-icon="inline-start"
+        className={meta.className}
+        aria-label={meta.label}
+      />
+      <span className="min-w-0 flex-1 truncate text-left font-mono">
+        {dir !== "" && <span className="text-muted-foreground/70">{dir}</span>}
+        <span>{name}</span>
+      </span>
+    </Button>
   )
 }
 

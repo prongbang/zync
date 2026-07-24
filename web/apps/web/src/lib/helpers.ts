@@ -273,6 +273,104 @@ export function diffHunks(diff: string): DiffHunk[] {
   return hunks
 }
 
+// ---------------------------------------------------------------------------
+// Per-file split of a multi-file unified patch. A commit / working-tree diff
+// concatenates every file, each introduced by a `diff --git a/… b/…` header.
+// splitPatchByFile() slices the patch on those headers into ordered per-file
+// sub-patches (each still a valid unified diff) so DiffPanel can lazily feed
+// one file at a time to diffHunks()/splitDiffLines(). Pure + unit-testable.
+// ---------------------------------------------------------------------------
+export type PatchFileStatus = "added" | "modified" | "deleted" | "renamed"
+
+export type PatchFile = {
+  oldPath: string
+  newPath: string
+  status: PatchFileStatus
+  patch: string
+}
+
+function stripDiffPrefix(value: string): string {
+  if (value.startsWith("a/") || value.startsWith("b/")) return value.slice(2)
+  return value
+}
+
+function parsePatchFile(block: string[]): PatchFile {
+  const header = block[0] ?? ""
+  let oldPath = ""
+  let newPath = ""
+  let isNew = false
+  let isDeleted = false
+  let isRename = false
+
+  const headerMatch = /^diff --git a\/(.+) b\/(.+)$/.exec(header)
+  if (headerMatch) {
+    oldPath = headerMatch[1]
+    newPath = headerMatch[2]
+  }
+
+  for (const line of block) {
+    if (line.startsWith("new file mode")) {
+      isNew = true
+    } else if (line.startsWith("deleted file mode")) {
+      isDeleted = true
+    } else if (line.startsWith("rename from ")) {
+      oldPath = line.slice("rename from ".length)
+      isRename = true
+    } else if (line.startsWith("rename to ")) {
+      newPath = line.slice("rename to ".length)
+      isRename = true
+    } else if (line.startsWith("copy from ")) {
+      oldPath = line.slice("copy from ".length)
+      isRename = true
+    } else if (line.startsWith("copy to ")) {
+      newPath = line.slice("copy to ".length)
+      isRename = true
+    } else if (line.startsWith("--- ")) {
+      const value = line.slice(4).trim()
+      if (value === "/dev/null") isNew = true
+      else oldPath = stripDiffPrefix(value)
+    } else if (line.startsWith("+++ ")) {
+      const value = line.slice(4).trim()
+      if (value === "/dev/null") isDeleted = true
+      else newPath = stripDiffPrefix(value)
+    }
+  }
+
+  let status: PatchFileStatus
+  if (isRename) status = "renamed"
+  else if (isNew) status = "added"
+  else if (isDeleted) status = "deleted"
+  else status = "modified"
+
+  if (oldPath === "") oldPath = newPath
+  if (newPath === "") newPath = oldPath
+
+  return { oldPath, newPath, status, patch: `${block.join("\n")}\n` }
+}
+
+export function splitPatchByFile(patch: string): PatchFile[] {
+  if (!patch.includes("diff --git ")) return []
+  const files: PatchFile[] = []
+  let block: string[] = []
+
+  const flush = () => {
+    if (block.length === 0) return
+    files.push(parsePatchFile(block))
+    block = []
+  }
+
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      flush()
+      block = [line]
+    } else if (block.length > 0) {
+      block.push(line)
+    }
+  }
+  flush()
+  return files
+}
+
 function plainSegments(text: string): DiffSegment[] {
   return [{ text, changed: false }]
 }
