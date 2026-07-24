@@ -71,7 +71,7 @@ function BranchRow({
           "flex h-[26px] w-full cursor-pointer items-center gap-2 rounded px-2 text-[13px] text-foreground/90 outline-none focus-visible:ring-2 focus-visible:ring-ring",
           indent && "pl-5",
           is_head
-            ? "bg-accent text-accent-foreground shadow-[inset_2px_0_0_var(--primary)]"
+            ? "bg-accent text-accent-foreground"
             : "hover:bg-accent/40",
         )}
         onClick={() => onCommand({ kind: "checkout", name })}

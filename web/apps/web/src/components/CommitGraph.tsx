@@ -163,7 +163,7 @@ function CommitRow({
         className={cn(
           "grid h-[34px] cursor-pointer items-center gap-2 border-b border-border/60 px-2 text-[13px] text-foreground/90",
           selected
-            ? "bg-accent shadow-[inset_2px_0_0_var(--primary)]"
+            ? "bg-accent"
             : "hover:bg-accent/40",
         )}
         style={{ gridTemplateColumns: GRID_TEMPLATE_COLUMNS }}
