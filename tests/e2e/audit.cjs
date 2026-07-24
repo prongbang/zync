@@ -92,7 +92,7 @@ async function main() {
     });
 
     await step('repo tabs: switch to fixture repo tab', async () => {
-      const tab = page.locator(`[data-testid="repo-tab"][data-repo-id="${fixture.repoId}"]`);
+      const tab = page.locator(`[data-testid="repo-minibar-item"][data-repo-id="${fixture.repoId}"]`);
       await tab.waitFor({ timeout: 15000 });
       await tab.click();
       // Anchor on a commit from the fixture's own history to confirm the

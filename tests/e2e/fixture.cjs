@@ -39,6 +39,10 @@ function writeFile(filePath, contents) {
 
 /**
  * @param {string} baseDir an empty (or non-existent) directory to build the fixture in
+ * @param {{dirty?: boolean}} [options] set `dirty: false` to skip the modified-tracked-file /
+ *   untracked-file seeding, leaving `work` with a clean tree matching `origin/main` exactly -
+ *   used by remote.cjs, whose flows (fetch/pull/push) need a working tree that never blocks a
+ *   fast-forward merge.
  * @returns {Promise<{repoId: string, repoName: string, workPath: string, originPath: string}>}
  */
 // Remove fixtures leaked by aborted runs (killed before cleanup() could run).
@@ -58,7 +62,8 @@ async function removeStaleFixtures() {
   }
 }
 
-async function buildFixture(baseDir) {
+async function buildFixture(baseDir, options = {}) {
+  const { dirty = true } = options;
   await removeStaleFixtures();
   fs.mkdirSync(baseDir, { recursive: true });
 
@@ -95,11 +100,13 @@ async function buildFixture(baseDir) {
   // Push main to origin so Fetch/Pull/Push flows have something real to do.
   git(['push', '-u', 'origin', 'main'], workPath);
 
-  // One dirty (modified, unstaged) tracked file.
-  fs.appendFileSync(path.join(workPath, 'src', 'app.txt'), 'line three (uncommitted)\n');
+  if (dirty) {
+    // One dirty (modified, unstaged) tracked file.
+    fs.appendFileSync(path.join(workPath, 'src', 'app.txt'), 'line three (uncommitted)\n');
 
-  // One untracked file.
-  writeFile(path.join(workPath, 'notes.txt'), 'scratch notes\n');
+    // One untracked file.
+    writeFile(path.join(workPath, 'notes.txt'), 'scratch notes\n');
+  }
 
   // Register the working clone with zync-server.
   const response = await fetch(`${API_BASE}/repositories`, {
@@ -145,4 +152,4 @@ async function cleanup(fixture) {
   }
 }
 
-module.exports = { buildFixture, cleanup, API_BASE };
+module.exports = { buildFixture, cleanup, API_BASE, git };
