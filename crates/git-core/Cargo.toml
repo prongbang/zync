@@ -13,3 +13,4 @@ zeroize.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+zeroize.workspace = true

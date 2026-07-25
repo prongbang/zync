@@ -785,6 +785,77 @@ mod tests {
         assert!(build_credential_spec(&row, SecretBundle::default()).is_err());
     }
 
+    /// P4.3 closing-pass regression test, exercising the full HTTP-facing surface of this module
+    /// with a known sentinel secret: `create_credential`'s response, `list_credentials`'s
+    /// response, and `CreateCredentialRequest`'s hand-written `Debug` (the request holds the
+    /// plaintext token until it's encrypted) must never contain it. `resolve_credential_spec_for_url`
+    /// is then used to confirm the sentinel *is* correctly recoverable through the legitimate
+    /// decrypt path — this isn't a "nothing ever comes back" test, only "it never comes back
+    /// through the wrong door".
+    #[tokio::test]
+    async fn create_and_list_credentials_never_expose_sentinel_secret() {
+        const SENTINEL: &str = "SENTINEL_SECRET_bkq9";
+
+        let state = Arc::new(AppState {
+            db: Database::open(":memory:").expect("open in-memory db"),
+            hub: crate::websocket::WorkspaceHub::default(),
+            sync: crate::sync::WorkspaceSync::default(),
+            collaboration: crate::collaboration::CollaborationState::default(),
+            secrets: crypto::KeyState::Configured(crypto::test_key(9)),
+            auth: crate::auth::AuthState::disabled_for_test(),
+            repos_root: crate::repos_root::ReposRoot::default(),
+        });
+        let auth = AuthUser {
+            id: "owner".to_string(),
+            role: "user".to_string(),
+        };
+
+        let request = CreateCredentialRequest {
+            label: "Sentinel PAT".to_string(),
+            host_pattern: "github.com".to_string(),
+            kind: "https_token".to_string(),
+            username: Some("x-access-token".to_string()),
+            token: Some(SENTINEL.to_string()),
+            private_key: None,
+            passphrase: None,
+            public_key: None,
+        };
+        // The request's own Debug (holds the plaintext until encrypted) must redact it.
+        assert!(!format!("{request:?}").contains(SENTINEL));
+
+        let (status, Json(created)) =
+            create_credential(State(state.clone()), auth.clone(), Json(request))
+                .await
+                .expect("create credential");
+        assert_eq!(status, StatusCode::CREATED);
+        let created_json = serde_json::to_string(&created).expect("serialize response");
+        assert!(
+            !created_json.contains(SENTINEL),
+            "create_credential response must not echo the secret: {created_json}"
+        );
+
+        let Json(list) = list_credentials(State(state.clone()), auth.clone())
+            .await
+            .expect("list credentials");
+        let list_json = serde_json::to_string(&list).expect("serialize list");
+        assert!(
+            !list_json.contains(SENTINEL),
+            "list_credentials response must not echo the secret: {list_json}"
+        );
+
+        // The legitimate path — decrypting just-in-time to build a CredentialSpec for a remote
+        // op — must still recover the real secret (i.e. this isn't a "the value is just lost"
+        // false-positive).
+        let spec = resolve_credential_spec_for_url(&state, "owner", "https://github.com/org/repo.git")
+            .expect("resolve credential spec");
+        match spec {
+            zync_git_core::CredentialSpec::UserpassPlaintext { secret, .. } => {
+                assert_eq!(secret.as_str(), SENTINEL);
+            }
+            other => panic!("expected UserpassPlaintext, got {other:?}"),
+        }
+    }
+
     #[test]
     fn secret_bundle_zeroizes_fields_on_drop() {
         // Regression test for W1 (P0.11 security review): the decrypted bundle used to be a

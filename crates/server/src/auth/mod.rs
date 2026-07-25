@@ -1144,6 +1144,59 @@ mod tests {
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
     }
 
+    /// P4.3 closing-pass regression test: a failed login must never echo the submitted password
+    /// (or any detail derived from it) back in the response body — `login` already returns a
+    /// fixed, generic `"invalid credentials"` string on any failure (ADR-002 Decision 1), but this
+    /// pins that behavior against a known sentinel so a future refactor that starts interpolating
+    /// verification detail into the error would be caught here.
+    #[tokio::test]
+    async fn failed_login_never_echoes_submitted_password() {
+        const SENTINEL: &str = "SENTINEL_SECRET_bkq9";
+        let state = app_state(AuthMode::Enabled);
+
+        // Unknown user: still runs the dummy-hash verify (timing parity), then fails.
+        let err = login(
+            State(state.clone()),
+            Json(LoginRequest {
+                identifier: "nobody@zync.local".to_string(),
+                password: SENTINEL.to_string(),
+            }),
+        )
+        .await
+        .err()
+        .expect("login with an unknown identifier must fail");
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        assert!(!err.1.contains(SENTINEL), "error body leaked the password: {}", err.1);
+
+        // Known user, wrong password.
+        let admin = user_auth(OWNER_ID, ADMIN_ROLE);
+        let _ = create_user(
+            State(state.clone()),
+            admin,
+            Json(CreateUserRequest {
+                identifier: "real@zync.local".to_string(),
+                password: "correct horse battery staple".to_string(),
+                name: None,
+                role: None,
+            }),
+        )
+        .await
+        .expect("create user");
+
+        let err = login(
+            State(state.clone()),
+            Json(LoginRequest {
+                identifier: "real@zync.local".to_string(),
+                password: SENTINEL.to_string(),
+            }),
+        )
+        .await
+        .err()
+        .expect("login with the wrong password must fail");
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        assert!(!err.1.contains(SENTINEL), "error body leaked the password: {}", err.1);
+    }
+
     #[test]
     fn setup_token_lifecycle() {
         let state = AuthState {

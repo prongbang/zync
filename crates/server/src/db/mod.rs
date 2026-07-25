@@ -22,11 +22,27 @@ pub struct User {
 
 /// A user together with its stored argon2 password hash (`None` for the
 /// un-bootstrapped seed row). Never serialized to a response — the hash stays
-/// server-side; only [`User`] is ever returned over HTTP.
-#[derive(Debug, Clone)]
+/// server-side; only [`User`] is ever returned over HTTP. `Debug` is
+/// hand-written to redact `password_hash` even on a stray `{:?}` (log line,
+/// panic message) — mirrors `CredentialSecretRow`'s manual impl. An argon2id
+/// hash is still secret material (offline-crackable) and must never appear
+/// outside the verify path.
+#[derive(Clone)]
 pub struct UserWithHash {
     pub user: User,
     pub password_hash: Option<String>,
+}
+
+impl std::fmt::Debug for UserWithHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserWithHash")
+            .field("user", &self.user)
+            .field(
+                "password_hash",
+                &self.password_hash.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// The admin user-list projection (P3.5) — adds `created_at` to [`User`]'s
@@ -994,6 +1010,30 @@ mod tests {
 
     fn test_db() -> Database {
         Database::open(":memory:").expect("open in-memory db")
+    }
+
+    /// P4.3 closing-pass regression test: `UserWithHash` used to derive a plain `Debug` that would
+    /// print `password_hash` verbatim on a stray `{:?}` (log line, panic message, `expect`
+    /// failure) — the one secret-bearing type in this file that didn't follow the hand-written-
+    /// redacting-`Debug` convention every other one here does (`CredentialSecretRow`, etc.). Pins
+    /// the fix with a known sentinel standing in for an argon2id hash.
+    #[test]
+    fn user_with_hash_debug_redacts_password_hash() {
+        const SENTINEL: &str = "SENTINEL_SECRET_bkq9";
+        let with_hash = UserWithHash {
+            user: User {
+                id: "owner".to_string(),
+                email: "owner@zync.local".to_string(),
+                name: "Owner".to_string(),
+                role: "admin".to_string(),
+            },
+            password_hash: Some(SENTINEL.to_string()),
+        };
+        let debug = format!("{with_hash:?}");
+        assert!(
+            !debug.contains(SENTINEL),
+            "UserWithHash Debug must not print password_hash: {debug}"
+        );
     }
 
     #[test]

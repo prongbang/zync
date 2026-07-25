@@ -728,6 +728,70 @@ fn clone_with_userinfo_url_does_not_leak_token_on_failure() {
     }
 }
 
+/// P4.3 closing-pass regression test. `clone_with_userinfo_url_does_not_leak_token_on_failure`
+/// (above) covers a secret embedded *in the URL itself* (the P0.5 leak class). This covers the
+/// other secret-bearing path: a credential supplied out-of-band via `CredentialSpec` (what a
+/// stored, at-rest-encrypted credential — ADR-001 — resolves to), which the URL never carries at
+/// all. A known sentinel token is threaded through `fetch_with_credentials`'s
+/// `CredentialSpec::UserpassPlaintext` against an unreachable host, and must never surface in the
+/// resulting error — proving the credential closure (`callbacks()` in `crates/git-core/src/lib.rs`)
+/// never lets the secret escape into `GitCommandError`/`map_git2_error`'s output.
+#[test]
+fn fetch_with_stored_credential_does_not_leak_sentinel_secret_on_failure() {
+    const SENTINEL: &str = "SENTINEL_SECRET_bkq9";
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    Repository::init(temp.path()).expect("init repo");
+    // Port 1 refuses immediately (same rationale as the unreachable-host tests above); the URL
+    // itself carries no userinfo — the secret lives only in the `CredentialSpec` below.
+    zync_git_core::add_remote(temp.path(), "origin", "https://127.0.0.1:1/nonexistent.git")
+        .expect("add remote");
+
+    let spec = zync_git_core::CredentialSpec::UserpassPlaintext {
+        username: "x-access-token".to_string(),
+        secret: zeroize::Zeroizing::new(SENTINEL.to_string()),
+    };
+
+    let error = zync_git_core::fetch_with_credentials(temp.path(), Some("origin"), Some(&spec))
+        .expect_err("fetch against an unreachable host should fail");
+
+    let message = error.to_string();
+    assert!(
+        !message.contains(SENTINEL),
+        "fetch error must not leak the stored credential secret: {message}"
+    );
+    if let Some(git_error) = error.downcast_ref::<zync_git_core::GitCommandError>() {
+        assert!(
+            !git_error.command.contains(SENTINEL) && !git_error.stderr.contains(SENTINEL),
+            "GitCommandError must not leak the stored credential secret: command={:?} stderr={:?}",
+            git_error.command,
+            git_error.stderr
+        );
+    }
+}
+
+/// Direct regression lock on `CredentialSpec`'s hand-written `Debug` (P4.3): a stray `{:?}` on a
+/// credential spec (log line, panic message, `expect`/`unwrap` failure text) must never print the
+/// secret, regardless of which variant. Complements the network-failure test above by pinning the
+/// `Debug` contract itself rather than only one call path into it.
+#[test]
+fn credential_spec_debug_never_prints_sentinel_secret() {
+    const SENTINEL: &str = "SENTINEL_SECRET_bkq9";
+
+    let userpass = zync_git_core::CredentialSpec::UserpassPlaintext {
+        username: "x-access-token".to_string(),
+        secret: zeroize::Zeroizing::new(SENTINEL.to_string()),
+    };
+    assert!(!format!("{userpass:?}").contains(SENTINEL));
+
+    let ssh_key = zync_git_core::CredentialSpec::SshKey {
+        username: "git".to_string(),
+        private_key: zeroize::Zeroizing::new(SENTINEL.to_string()),
+        passphrase: Some(zeroize::Zeroizing::new(SENTINEL.to_string())),
+    };
+    assert!(!format!("{ssh_key:?}").contains(SENTINEL));
+}
+
 /// Builds a repo with a `base` commit on `main`, then a `feature` branch (checked out from
 /// `base`) carrying one additional commit that adds `feature.txt` — `main` is left behind, so a
 /// fast-forward of `main` onto `feature` is possible. Returns (repo root, feature branch name).
