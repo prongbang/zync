@@ -21,7 +21,6 @@ set -eu
 
 REPO="prongbang/zync"
 GITHUB="https://github.com/${REPO}"
-API="https://api.github.com/repos/${REPO}"
 
 log() {
   printf '%s\n' "$*"
@@ -99,10 +98,26 @@ if [ "${ZYNC_VERSION:-}" != "" ]; then
   log "Using requested version: $VERSION"
 else
   log "Resolving latest release..."
-  latest_json="$(fetch_to_stdout "${API}/releases/latest")" || err "failed to query ${API}/releases/latest"
-  tag="$(printf '%s' "$latest_json" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
+  # Resolve the latest tag via the *redirect* from the releases/latest page
+  # rather than the api.github.com REST API. The unauthenticated REST API is
+  # capped at 60 requests/hour/IP and installers running from shared CI
+  # runners or offices routinely exhaust that, turning this step into a
+  # 403. releases/latest on github.com (not api.github.com) 302s to
+  # releases/tag/vX.Y.Z and is not subject to that limit.
+  latest_url="${GITHUB}/releases/latest"
+  if [ "$DOWNLOADER" = "curl" ]; then
+    resolved_url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$latest_url" 2>/dev/null)" || resolved_url=""
+  else
+    resolved_url="$(wget -q --max-redirect=20 --spider -S "$latest_url" 2>&1 \
+      | awk 'tolower($1) == "location:" { loc = $2 } END { print loc }')"
+  fi
+  tag="${resolved_url##*/releases/tag/}"
+  case "$resolved_url" in
+    */releases/tag/*) : ;;
+    *) tag="" ;;
+  esac
   if [ -z "$tag" ]; then
-    err "no published release found for ${REPO} yet (or the GitHub API request failed). Set ZYNC_VERSION=<version> to install a specific version once one exists."
+    err "could not resolve the latest ${REPO} release (redirect lookup at ${latest_url} failed or returned no releases yet). Set ZYNC_VERSION=<version> to install a specific version, e.g. ZYNC_VERSION=0.1.0, or check ${latest_url} yourself."
   fi
   VERSION="${tag#v}"
   log "Latest version: $VERSION"
