@@ -176,6 +176,29 @@ End-to-end (Playwright, reads `E2E_BASE_URL`, default `http://127.0.0.1:5173`):
 cd tests/e2e && npm install && npm run audit
 ```
 
+## Releasing
+
+The workspace version lives in exactly one place — `[workspace.package].version`
+in the root `Cargo.toml` — and both `zync-git-core` and `zync-server` inherit it
+(`version.workspace = true`). To cut a release:
+
+1. Bump `[workspace.package].version` in `Cargo.toml` (e.g. `0.1.0` → `0.2.0`)
+   and add a matching `## [0.2.0] - YYYY-MM-DD` section to `CHANGELOG.md` (move
+   entries out of `## [Unreleased]`). Commit this on `main`.
+2. Tag the commit and push the tag:
+   ```sh
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+3. Pushing a `v*.*.*` tag triggers `.github/workflows/release.yml`, which
+   verifies the tag matches the `Cargo.toml` version, builds a multi-arch
+   (linux/amd64 + linux/arm64) image, pushes it to
+   `ghcr.io/<owner>/zync:vX.Y.Z` and `ghcr.io/<owner>/zync:latest`, and creates
+   a GitHub Release with the matching `CHANGELOG.md` section as its body.
+
+This is separate from `.github/workflows/ci.yml`, which gates every push/PR to
+`main` (check/test/web-check/e2e) but never publishes an image.
+
 ## Notes
 
 - `PLAN.md` is a local planning file and is intentionally ignored by Git.

@@ -1,0 +1,137 @@
+name: Release
+
+# Tag-triggered release: builds a multi-arch (amd64+arm64) Docker image and
+# publishes it to GHCR as vX.Y.Z + latest, then cuts a GitHub Release whose
+# body is the matching CHANGELOG.md section.
+#
+# This workflow is separate from ci.yml (which gates every push/PR to main)
+# so a release never runs the full PR-gating suite twice, and so a bad tag
+# push can't block normal CI.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+# Only ever run this in the real repo, never in a fork (forks can still push
+# tags to their own copy, which would otherwise try to publish images under
+# the fork's GHCR namespace with the fork's GITHUB_TOKEN).
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  verify-version:
+    name: Verify tag matches Cargo version
+    if: github.repository == 'prongbang/zync'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compare git tag to [workspace.package] version
+        id: check
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_version="$(awk -F'"' '/^\[workspace.package\]/{found=1} found && /^version *=/{print $2; exit}' Cargo.toml)"
+          echo "Tag version:   $tag"
+          echo "Cargo version: $cargo_version"
+          if [ "$tag" != "$cargo_version" ]; then
+            echo "::error::Tag v$tag does not match [workspace.package] version $cargo_version in Cargo.toml. Bump the version and re-tag."
+            exit 1
+          fi
+          echo "version=$cargo_version" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    name: Build and push multi-arch image
+    needs: verify-version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.5.1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # metadata-action auto-derives standard OCI labels from the checked-out
+      # git context (org.opencontainers.image.source/revision/created/...);
+      # we pin org.opencontainers.image.version explicitly to the release
+      # version rather than relying on tag inference, so it's unambiguous.
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v6.2.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ needs.verify-version.outputs.version }}
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.version=${{ needs.verify-version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  github-release:
+    name: Create GitHub Release
+    needs: [verify-version, build-and-push]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract CHANGELOG section for this version
+        id: changelog
+        run: |
+          set -euo pipefail
+          version="${{ needs.verify-version.outputs.version }}"
+          # Plain substring matching (via index()) rather than regex, so the
+          # version string never has to be escaped as a dynamic awk pattern.
+          awk -v ver="## [$version]" '
+            index($0, ver) == 1 { found=1; next }
+            found && index($0, "## [") == 1 { exit }
+            found && index($0, "[Unreleased]:") == 1 { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::No CHANGELOG.md section found for [$version]. Add one before tagging."
+            exit 1
+          fi
+
+      - name: Create release
+        uses: softprops/action-gh-release@v3.0.2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: v${{ needs.verify-version.outputs.version }}
+          body_path: release-notes.md
+          generate_release_notes: false
