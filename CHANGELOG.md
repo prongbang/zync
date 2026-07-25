@@ -8,27 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- **Observability (P5.3)** — per-request `X-Request-Id` correlation (honored
-  if the caller supplies a well-formed id, generated otherwise, always echoed
-  back on the response), `ZYNC_LOG_FORMAT=json` for structured log output,
-  `GET /health` (liveness, no I/O), `GET /ready` (readiness, a non-mutating DB
-  read), and `GET /metrics` (Prometheus text exposition, gated to
-  authenticated admins).
-- **Production docs** — `docs/BACKUP.md` (a `zync.db` backup/restore runbook
-  covering WAL-mode online-backup hazards, bare-metal and Docker Compose
-  variants, and the `ZYNC_SECRET_KEY` rotation caveat) and `docs/DEPLOY.md`
-  (the full `ZYNC_*` environment variable reference, nginx/Caddy TLS
-  reverse-proxy examples, and health/readiness probe wiring for an
-  orchestrator).
-
 ## [0.1.0] - 2026-07-25
 
 First tagged release. Zync is a Fork-inspired Git workspace client: a Rust/Axum
 API server backed by SQLite, operating on Git repositories on disk, with a
 React 19 + Vite web UI. This release folds together everything shipped across
-plan phases P0-P5.
+plan phases P0-P6.
 
 ### Added
 
@@ -61,16 +46,36 @@ plan phases P0-P5.
   on migration failure), a Docker image (bun → rust → debian multi-stage
   build) with `docker-compose.yml`, and this release-engineering workflow
   (tag-triggered multi-arch image publish to `ghcr.io`).
+- **Observability (P6)** — per-request `X-Request-Id` correlation (honored if
+  the caller supplies a well-formed id, generated otherwise, always echoed back
+  on the response), `ZYNC_LOG_FORMAT=json` for structured log output,
+  `GET /health` (liveness, no I/O), `GET /ready` (readiness, a non-mutating DB
+  read), and `GET /metrics` (Prometheus text exposition, gated to authenticated
+  admins).
+- **Single-binary distribution (P6)** — an `embed-ui` build feature that bakes
+  the web UI into `zync-server`, prebuilt single binaries for Linux and macOS
+  (x86_64 + aarch64) attached to every GitHub Release, and a `curl … | sh`
+  installer (`install.sh`) that verifies a SHA-256 checksum before installing.
+  The binary needs only a system `git` at runtime.
+- **Operational hardening & docs (P6)** — the container image now runs as a
+  non-root user; `docs/BACKUP.md` (a `zync.db` backup/restore runbook covering
+  WAL-mode online-backup hazards and the `ZYNC_SECRET_KEY` rotation caveat),
+  `docs/DEPLOY.md` (the full `ZYNC_*` reference, nginx/Caddy TLS reverse-proxy
+  examples, and health/readiness probe wiring), and a rewritten `docs/API.md`
+  covering every endpoint; CI now gates the server test suite and the
+  end-to-end suite.
+
+### Fixed
+
+- The live-sync footer indicator now resets per workspace, so it honestly
+  reflects the current workspace's WebSocket rather than showing a stale
+  "connected" state carried over from the previously open repository.
 
 ### Known limitations (tracked for a future release)
 
 - Quick rebase actions (reword/edit/squash/fixup/drop from the commit context
   menu) only support linear history; merge commits are rejected rather than
   guessed at.
-- No Prometheus `/metrics` endpoint yet; structured JSON logging and a
-  `/ready` DB-liveness probe are tracked separately from `/health`.
-- No reverse-proxy TLS guide or Kubernetes manifest yet (deploy guidance is
-  tracked for the next release).
 
 [Unreleased]: https://github.com/prongbang/zync/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/prongbang/zync/releases/tag/v0.1.0
