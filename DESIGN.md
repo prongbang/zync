@@ -1076,6 +1076,31 @@ drop+recreate since its rows are ephemeral and any live "sessions" are unauthent
   same-origin default + `ZYNC_CORS_ORIGINS`, security headers incl. CSP, request-body limits) and P4.1
   (`ZYNC_REPOS_ROOT` filesystem boundary — an authed non-admin still must not register `/etc`). Auth is
   necessary but not sufficient; the two land adjacent by design and P3.7/P4.4 security reviews cover the seam.
+- **P4.2 implemented** (`crates/server/src/net_hardening.rs`): CORS defaults to no cross-origin allowlist
+  (same-origin needs no CORS headers either way) with `ZYNC_CORS_ORIGINS` as the explicit, credentialed
+  opt-in — never combined with a wildcard origin. Every response gets `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, and a CSP (`default-src 'self'`, `img-src`
+  allows `https:` for gravatar, `style-src` allows `'unsafe-inline'` for Radix/shadcn's inline-styled
+  popovers/tooltips, `connect-src 'self'` covers the `/ws` upgrade) — verified against the production Vite
+  build with no violations; the raw-blob route's own stricter per-response CSP (Decision 4 area,
+  `git::blob_response_headers`) is left untouched since the layer only fills in headers a handler hasn't
+  already set. `POST /auth/login` and `POST /setup` get a strict `tower_governor` rate limit (~10/min per
+  IP); `POST /auth/ws-ticket` gets a deliberately generous one (60/min) so the reconnect backoff loop in
+  `useWorkspace.ts` can't lock itself out of live sync — both return `429` with a standard `Retry-After`
+  header. A global 10 MiB request body cap (`RequestBodyLimitLayer` + `DefaultBodyLimit::disable()`)
+  replaces axum's independent 2MB default.
+- **P4.2 follow-up — `ZYNC_TRUSTED_PROXY` (post-review fix):** the rate limiters above default to keying
+  on the raw TCP peer address (`PeerIpKeyExtractor`), which is correct for direct exposure but WRONG once
+  a reverse proxy sits in front (the P5.5 direction): every client's peer address is then the proxy's own
+  IP, so all callers collapse into one shared bucket — one noisy client can exhaust `/auth/login`'s bucket
+  and lock out *everyone's* login, and the per-IP brute-force defense is nullified since an attacker hides
+  behind the same apparent IP as legitimate users. `ZYNC_TRUSTED_PROXY=1` switches the key extractor to
+  `SmartIpKeyExtractor`, which recovers the real client IP from `X-Forwarded-For`/`X-Real-IP`/`Forwarded`
+  (falling back to the peer address if none are present) — set it **only** when a reverse proxy you
+  control terminates TLS and discards/rewrites any inbound copies of those headers before setting its own
+  (otherwise a direct, untrusted client can spoof its own rate-limit key). Terminating TLS at a proxy
+  WITHOUT setting this makes peer-IP rate limiting effectively inoperative for that deployment shape —
+  enforce rate limiting at the proxy instead in that case. See `net_hardening::trusted_proxy`.
 
 ### Consequences
 
@@ -1086,8 +1111,14 @@ drop+recreate since its rows are ephemeral and any live "sessions" are unauthent
   and swaps `DEFAULT_USER_ID` for `auth_user.id` in `credentials` (and anywhere else the owner id is assumed).
 - **New deploy env (document alongside `ZYNC_SECRET_KEY`/`ZYNC_REPOS_ROOT` in P5.5):** `ZYNC_AUTH`
   (`enabled`|`disabled`, default `enabled`), `ZYNC_ADMIN_USER`/`ZYNC_ADMIN_PASSWORD` (first-boot bootstrap),
-  `ZYNC_COOKIE_INSECURE` (drop `Secure` for plain-HTTP LAN). The Docker image ships `ZYNC_AUTH=enabled` by
-  default (launch-checklist item).
+  `ZYNC_COOKIE_INSECURE` (drop `Secure` for plain-HTTP LAN), and (P4.2) `ZYNC_CORS_ORIGINS`
+  (comma-separated list of origins allowed cross-origin, credentialed API access; unset/blank — the
+  default — allows no cross-origin caller since same-origin deploys need none) and `ZYNC_TRUSTED_PROXY`
+  (`1` to trust `X-Forwarded-For`/`X-Real-IP`/`Forwarded` for rate-limit keying — **only** behind a proxy
+  you control that strips/rewrites those headers; unset, the default, keys on the raw TCP peer address,
+  which is the SAFE choice for direct exposure but goes fleet-wide-shared and stops discriminating
+  between clients once ANY proxy is added in front without also setting this flag). The Docker image
+  ships `ZYNC_AUTH=enabled` by default (launch-checklist item).
 - **Behavior change:** `enabled` mode makes the frontend's current no-login flow break by design — P3.4 must
   ship the login screen + 401 interceptor in the same release that flips the default. `disabled` mode is the
   bridge that keeps existing LAN deploys working untouched.

@@ -5,17 +5,18 @@ mod crypto;
 mod db;
 mod files;
 mod git;
+mod net_hardening;
 mod repos_root;
 mod repository;
 mod sync;
 mod websocket;
 mod workspace;
 
-use axum::{routing::get, Router};
+use axum::{extract::DefaultBodyLimit, routing::get, Router};
 use std::{net::SocketAddr, sync::Arc};
 use tower_http::{
     compression::CompressionLayer,
-    cors::CorsLayer,
+    limit::RequestBodyLimitLayer,
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
@@ -113,14 +114,35 @@ async fn main() -> anyhow::Result<()> {
         // authenticated automatically, and `require_auth`'s allowlist is the
         // only opt-out (no path-prefix guessing). This is the OUTER auth layer
         // (added last → runs first), so authentication happens before the
-        // authorization layer above. Added before CORS so CORS remains outermost
-        // (preflight) and auth runs just before the handlers.
+        // authorization layer above. Added before CORS, which is layered next,
+        // so CORS sits just outside this auth/authz pair (auth runs just
+        // before the handlers, CORS preflight runs before auth).
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,
         ))
         .fallback_service(spa)
-        .layer(CorsLayer::permissive())
+        // CORS (P4.2): same-origin default, `ZYNC_CORS_ORIGINS` opt-in for
+        // cross-origin. Sits just outside the auth/authz layers above (added
+        // after them, so it wraps them) — NOT the outermost layer overall,
+        // since TraceLayer/CompressionLayer below are added later and so wrap
+        // CORS in turn (axum `Router::layer`: the last-chained call is
+        // outermost). What matters here is only that a preflight `OPTIONS`
+        // request is answered by this layer before it would otherwise hit
+        // `require_auth`/`require_repo_authz`, which still holds.
+        .layer(net_hardening::cors_layer())
+        // Security response headers (P4.2): nosniff/frame-deny/CSP/etc. on
+        // every response, including the SPA fallback above. Stateless, so a
+        // plain `from_fn` (no `with_state`) is enough.
+        .layer(axum::middleware::from_fn(net_hardening::security_headers))
+        // Request body cap (P4.2): `DefaultBodyLimit::disable()` turns off
+        // axum's own independent 2MB default on `Bytes`/`Json` extractors so
+        // `net_hardening::MAX_REQUEST_BODY_BYTES` is the one limit in effect
+        // (see that constant's doc comment for why both layers are needed).
+        .layer(DefaultBodyLimit::disable())
+        .layer(RequestBodyLimitLayer::new(
+            net_hardening::MAX_REQUEST_BODY_BYTES,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(CompressionLayer::new())
         .with_state(state);
@@ -130,7 +152,15 @@ async fn main() -> anyhow::Result<()> {
         .parse()?;
     tracing::info!("zync server listening on {addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // `into_make_service_with_connect_info` threads the peer `SocketAddr`
+    // into request extensions as `ConnectInfo<SocketAddr>` — required by the
+    // rate limiter's `PeerIpKeyExtractor` (P4.2, `auth::routes()`), which
+    // reads it from there rather than trusting client-supplied headers.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

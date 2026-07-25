@@ -117,11 +117,26 @@ impl AuthState {
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
+    // Rate limiting (P4.2, DESIGN.md ADR-002 Decision 7): `/auth/login` and
+    // `/setup` are brute-force-sensitive and get a strict per-IP quota;
+    // `/auth/ws-ticket` is fetched on every WebSocket reconnect and gets a
+    // deliberately generous one so a flaky connection can't lock itself out
+    // of live sync. See `net_hardening::with_strict_rate_limit`/
+    // `with_ws_ticket_rate_limit` for the exact quotas and rationale.
+    let login_and_setup = crate::net_hardening::with_strict_rate_limit(
+        Router::new()
+            .route("/auth/login", post(login))
+            .route("/setup", get(setup_get).post(setup_post)),
+    );
+    let ws_ticket_route = crate::net_hardening::with_ws_ticket_rate_limit(
+        Router::new().route("/auth/ws-ticket", post(ws_ticket)),
+    );
+
     Router::new()
-        .route("/auth/login", post(login))
+        .merge(login_and_setup)
+        .merge(ws_ticket_route)
         .route("/auth/logout", post(logout))
         .route("/auth/me", get(me))
-        .route("/auth/ws-ticket", post(ws_ticket))
         // Admin user provisioning (P3.5, ADR-002 Decision 1: "User creation is
         // admin-only"). Deliberately NOT in `is_public`'s allowlist below — a
         // session is required — and each handler additionally checks
@@ -129,7 +144,6 @@ pub fn routes() -> Router<Arc<AppState>> {
         // only classifies `/repositories/*` and `/workspace/*`, so admin-only
         // `/auth/*` routes gate in the handler, same as `ws_ticket` above).
         .route("/auth/users", get(list_users).post(create_user))
-        .route("/setup", get(setup_get).post(setup_post))
 }
 
 // ---- AuthUser extractor ----
