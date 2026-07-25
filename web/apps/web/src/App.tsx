@@ -35,6 +35,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@workspace/ui/components/sheet"
+import { Spinner } from "@workspace/ui/components/spinner"
 import {
   Tabs,
   TabsContent,
@@ -223,6 +224,16 @@ export function App() {
     (jumpCommit?.id === selectedCommit ? jumpCommit : undefined) ??
     ws.commits[0] ??
     null
+
+  // P1.4: All Commits mode has no per-file selection like Local Changes does,
+  // so the moment a commit is the active detail target, fetch its whole-commit
+  // patch so the Commit tab can render DiffPanel's file tree + per-file diff
+  // (previously only reachable via Local Changes' workdir diff).
+  useEffect(() => {
+    if (mode !== "commits" || !selected) return
+    void ws.loadCommitDiff(selected.id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, selected?.id, ws.loadCommitDiff])
 
   // Blame gutter / file-history "View commit" -> select that commit in the
   // graph and switch to its detail (P1.2). The target may be outside the
@@ -556,9 +567,47 @@ export function App() {
               </TabsList>
               <TabsContent
                 value="commit"
-                className="min-h-0 flex-1 overflow-y-auto p-4"
+                className="flex min-h-0 flex-1 flex-col overflow-hidden"
               >
-                <CommitDetail commit={selected} />
+                <div className="shrink-0 overflow-y-auto p-4">
+                  <CommitDetail commit={selected} />
+                </div>
+                {selected && (
+                  <>
+                    <Separator />
+                    <div className="min-h-0 flex-1" data-testid="commit-diff-panel">
+                      {ws.selectedCommitDiffLoading ? (
+                        <div className="text-muted-foreground flex items-center gap-2 p-4 text-sm">
+                          <Spinner /> Loading commit diff…
+                        </div>
+                      ) : ws.selectedCommitDiffError ? (
+                        <div className="text-destructive p-4 text-sm">
+                          {ws.selectedCommitDiffError}
+                        </div>
+                      ) : (
+                        <DiffPanel
+                          path=""
+                          diff={ws.selectedCommitDiff}
+                          blame={null}
+                          onRequestBlame={() => {}}
+                          onCloseBlame={() => {}}
+                          imageSrc={(path, side) => {
+                            if (!currentRepoId) return null
+                            if (side === "before") {
+                              const parent = selected.parents[0]
+                              return parent
+                                ? ws.api.blobUrl(currentRepoId, parent, path)
+                                : null
+                            }
+                            return ws.api.blobUrl(currentRepoId, selected.id, path)
+                          }}
+                          onOpenFileHistory={openFileHistory}
+                          onSelectBlameCommit={handleJumpToCommit}
+                        />
+                      )}
+                    </div>
+                  </>
+                )}
               </TabsContent>
               <TabsContent
                 value="repository"

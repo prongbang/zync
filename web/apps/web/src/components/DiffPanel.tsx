@@ -56,7 +56,9 @@ export interface DiffPanelProps {
   path: string
   diff: string
   blame: BlameRow[] | null
-  onStageHunk: (patch: string) => void
+  /** Omit to hide the "Stage hunk" button entirely (e.g. a historical commit's
+   * read-only diff, where staging a hunk from it doesn't make sense). */
+  onStageHunk?: (patch: string) => void
   onRequestBlame: () => void
   onCloseBlame: () => void
   /**

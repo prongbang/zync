@@ -59,6 +59,13 @@ export type WorkspaceState = {
   notice: string
   liveSyncOk: boolean
   selectedFile: string
+  /** Whole-commit patch for the commit currently selected in All Commits mode
+   * (P1.4) — fetched via `loadCommitDiff`, independent of `diff`/`selectedFile`
+   * (the Local Changes workdir diff) so switching between Local Changes and a
+   * selected commit never clobbers the other's state. */
+  selectedCommitDiff: string
+  selectedCommitDiffLoading: boolean
+  selectedCommitDiffError: string | null
   /** True while an `openRepository()` call is in flight (from either the auto-open effect or an
    * explicit repo switch). Lets callers avoid kicking off a redundant/competing open while one is
    * already resolving — see the generation guard in `openRepository`. */
@@ -74,6 +81,12 @@ export type WorkspaceState = {
   loadMore: () => void
   setDiff: (patch: string) => void
   setNotice: (message: string) => void
+  /** Fetches the whole-commit patch for `commitId` into `selectedCommitDiff`
+   * (P1.4 — All Commits mode has no per-file selection, so this loads every
+   * changed file's diff at once for the file tree). Generation-guarded like
+   * `openRepository` so a fast commit-to-commit reselect can't have a slower,
+   * earlier fetch clobber a newer one. */
+  loadCommitDiff: (commitId: string) => Promise<void>
   // Working-copy actions.
   selectFileDiff: (path: string) => Promise<void>
   stageFiles: (paths: string[]) => Promise<void>
@@ -175,6 +188,11 @@ export function useWorkspace(): WorkspaceState {
   const [notice, setNotice] = useState("Ready")
   const [liveSyncOk, setLiveSyncOk] = useState(false)
   const [selectedFile, setSelectedFile] = useState("")
+  const [selectedCommitDiff, setSelectedCommitDiff] = useState("")
+  const [selectedCommitDiffLoading, setSelectedCommitDiffLoading] = useState(false)
+  const [selectedCommitDiffError, setSelectedCommitDiffError] = useState<
+    string | null
+  >(null)
   const [repoStats, setRepoStats] = useState<RepoStats | null>(null)
   const [openingRepository, setOpeningRepository] = useState(false)
 
@@ -192,6 +210,10 @@ export function useWorkspace(): WorkspaceState {
   // default-repository auto-open racing an explicit repo switch) can never clobber a
   // faster one that started after it. See tests/e2e/README.md "Known non-bugs" section.
   const openGenerationRef = useRef(0)
+  // Same generation-guard pattern, scoped to loadCommitDiff: a commit reselect
+  // while a previous fetch is still in flight must not let the stale response
+  // land after a newer one (e.g. clicking two commits quickly in All Commits mode).
+  const commitDiffGenerationRef = useRef(0)
 
   const loadRepositories = useCallback(async () => {
     try {
@@ -257,6 +279,8 @@ export function useWorkspace(): WorkspaceState {
         commitsCountRef.current = 0
         setCommits([])
         setDiff("")
+        setSelectedCommitDiff("")
+        setSelectedCommitDiffError(null)
         setNotice("Workspace opened and watcher attached")
         // Fetch + set `workspace` inline (awaited here) rather than through the
         // fire-and-forget `refresh` below — `workspace` is what the auto-open effect
@@ -314,6 +338,8 @@ export function useWorkspace(): WorkspaceState {
           setConflicts([])
           setDiff("")
           setSelectedFile("")
+          setSelectedCommitDiff("")
+          setSelectedCommitDiffError(null)
           if (remaining.length > 0) {
             await openRepository(remaining[0].id)
           } else {
@@ -377,6 +403,32 @@ export function useWorkspace(): WorkspaceState {
       setNotice(error instanceof Error ? error.message : String(error))
     }
   }, [guard])
+
+  const loadCommitDiff = useCallback(
+    async (commitId: string) => {
+      const repositoryId = guard()
+      if (!repositoryId) return
+      const myGeneration = ++commitDiffGenerationRef.current
+      setSelectedCommitDiffLoading(true)
+      setSelectedCommitDiffError(null)
+      try {
+        const patch = await api.diffCommit(repositoryId, commitId)
+        if (commitDiffGenerationRef.current !== myGeneration) return
+        setSelectedCommitDiff(patch)
+      } catch (error) {
+        if (commitDiffGenerationRef.current !== myGeneration) return
+        setSelectedCommitDiff("")
+        setSelectedCommitDiffError(
+          error instanceof Error ? error.message : String(error),
+        )
+      } finally {
+        if (commitDiffGenerationRef.current === myGeneration) {
+          setSelectedCommitDiffLoading(false)
+        }
+      }
+    },
+    [guard],
+  )
 
   const stageFiles = useCallback(
     (paths: string[]) =>
@@ -811,6 +863,9 @@ export function useWorkspace(): WorkspaceState {
     notice,
     liveSyncOk,
     selectedFile,
+    selectedCommitDiff,
+    selectedCommitDiffLoading,
+    selectedCommitDiffError,
     openingRepository,
     loadRepositories,
     openRepository,
@@ -820,6 +875,7 @@ export function useWorkspace(): WorkspaceState {
     loadMore,
     setDiff,
     setNotice,
+    loadCommitDiff,
     selectFileDiff,
     stageFiles,
     unstageFiles,
