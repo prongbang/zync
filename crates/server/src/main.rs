@@ -99,16 +99,6 @@ async fn main() -> anyhow::Result<()> {
     auth::bootstrap(&state).await?;
     auth::spawn_session_sweeper(state.clone());
 
-    // Serve the built React app (Vite emits index.html + /assets/*). Unmatched
-    // routes fall back to index.html with a 200 so client-side navigation and
-    // hard refreshes work (a plain not_found_service would preserve the 404
-    // status even while serving the index body).
-    let static_root = static_dir();
-    let index_path = std::path::Path::new(&static_root).join("index.html");
-    let spa = ServeDir::new(&static_root)
-        .append_index_html_on_directories(true)
-        .fallback(ServeFile::new(index_path));
-
     let app = Router::new()
         // Liveness (no I/O) vs readiness (a cheap DB touch) vs metrics
         // (admin-gated internal state) — see `observability` module docs.
@@ -150,8 +140,19 @@ async fn main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,
-        ))
-        .fallback_service(spa)
+        ));
+
+    // Serve the built React app (Vite emits index.html + /assets/*). Attached
+    // here — AFTER the two auth layers above and BEFORE the outer layers below —
+    // so the SPA fallback stays *outside* auth: unmatched paths (client-side
+    // routes, static assets, index.html) are served publicly, while every API
+    // route stays closed-by-default. Unmatched routes fall back to index.html
+    // with a 200 so client-side navigation and hard refreshes work (a plain
+    // not_found_service would preserve the 404 status even while serving the
+    // index body). Source of the assets — on-disk dir vs. baked-into-binary —
+    // is decided by `attach_spa_fallback`; the public-fallback ordering here is
+    // identical either way.
+    let app = attach_spa_fallback(app)
         // CORS (P4.2): same-origin default, `ZYNC_CORS_ORIGINS` opt-in for
         // cross-origin. Sits just outside the auth/authz layers above (added
         // after them, so it wraps them) — NOT the outermost layer overall,
@@ -208,6 +209,112 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn static_dir() -> String {
-    std::env::var("ZYNC_STATIC_DIR").unwrap_or_else(|_| "/app/public".to_string())
+/// Default on-disk location for the built React app when `ZYNC_STATIC_DIR` is
+/// unset (the Docker image copies `web/apps/web/dist` here). Only referenced by
+/// the non-`embed-ui` fallback arm, so it's unused in an `embed-ui` build.
+#[cfg_attr(feature = "embed-ui", allow(dead_code))]
+const DEFAULT_STATIC_DIR: &str = "/app/public";
+
+/// Attach the SPA fallback that serves the built React app, choosing the asset
+/// source at boot:
+///
+/// 1. `ZYNC_STATIC_DIR` set (non-empty) → serve from that directory on disk.
+///    This always wins — it's how dev and the Docker mount point work — and it
+///    takes precedence over any baked-in assets regardless of build features.
+/// 2. `ZYNC_STATIC_DIR` unset **and** built with `--features embed-ui` → serve
+///    the React app baked into the binary (see `EmbeddedUi`), for a truly
+///    self-contained single-file deploy.
+/// 3. `ZYNC_STATIC_DIR` unset and no `embed-ui` feature → serve from the
+///    default on-disk directory (`DEFAULT_STATIC_DIR`), today's behavior.
+///
+/// `Router::fallback`/`Router::fallback_service` both return `Router<S>`, so the
+/// disk (service) and embedded (handler) arms unify without manual boxing.
+fn attach_spa_fallback(router: Router<Arc<AppState>>) -> Router<Arc<AppState>> {
+    let static_dir_env = std::env::var("ZYNC_STATIC_DIR")
+        .ok()
+        .filter(|dir| !dir.is_empty());
+
+    // Env override always wins, feature or not (case 1).
+    if let Some(dir) = static_dir_env {
+        return router.fallback_service(disk_spa(&dir));
+    }
+
+    // No override: prefer compiled-in assets when available (case 2), else the
+    // default on-disk directory (case 3).
+    #[cfg(feature = "embed-ui")]
+    {
+        router.fallback(embedded_spa_handler)
+    }
+    #[cfg(not(feature = "embed-ui"))]
+    {
+        router.fallback_service(disk_spa(DEFAULT_STATIC_DIR))
+    }
+}
+
+/// On-disk SPA service: serve files under `static_root`, appending `index.html`
+/// for directory requests, and falling back to `index.html` (200) for any
+/// unmatched path so client-side routes resolve.
+fn disk_spa(static_root: &str) -> ServeDir<ServeFile> {
+    let index_path = std::path::Path::new(static_root).join("index.html");
+    ServeDir::new(static_root)
+        .append_index_html_on_directories(true)
+        .fallback(ServeFile::new(index_path))
+}
+
+/// The built React app (`web/apps/web/dist`) baked into the binary. rust-embed
+/// embeds the folder at compile time for release builds (reads it from disk at
+/// runtime for debug builds), so a release build with `--features embed-ui`
+/// MUST have run `cd web/apps/web && bun run build` first — the folder has to
+/// exist at compile time. Feature-gated so the default build never references
+/// the folder (nothing here compiles without `embed-ui`).
+#[cfg(feature = "embed-ui")]
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../../web/apps/web/dist"]
+struct EmbeddedUi;
+
+/// SPA fallback handler over the embedded assets, mirroring `disk_spa`'s
+/// ServeDir+ServeFile semantics: serve the requested asset with the right
+/// Content-Type when it exists, otherwise return the embedded `index.html`
+/// with a 200 so client-side routes and hard refreshes resolve.
+#[cfg(feature = "embed-ui")]
+async fn embedded_spa_handler(uri: axum::http::Uri) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let path = uri.path().trim_start_matches('/');
+    let lookup = if path.is_empty() { "index.html" } else { path };
+
+    embedded_asset(lookup)
+        .or_else(|| embedded_asset("index.html"))
+        .unwrap_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                "embedded UI missing index.html",
+            )
+                .into_response()
+        })
+}
+
+/// Look up one embedded asset by path and build a response with a Content-Type
+/// derived from the path extension. Hashed `/assets/*` files (immutable across
+/// deploys) get a long `Cache-Control`; everything else (notably `index.html`)
+/// is left uncached so a new build is picked up immediately.
+#[cfg(feature = "embed-ui")]
+fn embedded_asset(path: &str) -> Option<axum::response::Response> {
+    use axum::response::IntoResponse;
+
+    let file = EmbeddedUi::get(path)?;
+    let mime = mime_guess::from_path(path).first_or_octet_stream();
+
+    let mut response = axum::body::Bytes::from(file.data.into_owned()).into_response();
+    let headers = response.headers_mut();
+    if let Ok(value) = axum::http::HeaderValue::from_str(mime.as_ref()) {
+        headers.insert(axum::http::header::CONTENT_TYPE, value);
+    }
+    if path.starts_with("assets/") {
+        headers.insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
+    }
+    Some(response)
 }

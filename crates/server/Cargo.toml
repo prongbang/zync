@@ -13,8 +13,14 @@ base64.workspace = true
 chacha20poly1305.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
+# `embed-ui`-only: bakes web/apps/web/dist into the binary (rust-embed) and
+# resolves per-asset Content-Type (mime_guess). Both are `optional` and pulled
+# in solely by the `embed-ui` feature via `dep:` below, so the default build
+# never compiles them and never references the dist/ folder at compile time.
+mime_guess = { version = "2", optional = true }
 notify.workspace = true
 rand.workspace = true
+rust-embed = { version = "8", optional = true }
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -32,6 +38,16 @@ tracing-subscriber = { workspace = true, features = ["json"] }
 uuid.workspace = true
 zeroize.workspace = true
 zync-git-core = { path = "../git-core" }
+
+[features]
+# Bakes the built React app (web/apps/web/dist) INTO the binary for a truly
+# self-contained single-file deploy. OFF by default: the normal dev build and CI
+# gate (`cargo check`/`cargo test` with no features) never compile rust-embed
+# and never require dist/ to exist. A release build with this feature MUST have
+# built the web app first (`cd web/apps/web && bun run build`) — rust-embed reads
+# the folder at compile time. See `attach_spa_fallback` in `main.rs` for the
+# runtime serving logic (env override still wins over the embedded assets).
+embed-ui = ["dep:rust-embed", "dep:mime_guess"]
 
 [dev-dependencies]
 tempfile = "3"
