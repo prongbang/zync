@@ -26,6 +26,25 @@ ZYNC_SECRET_KEY="$(openssl rand -base64 32)" zync serve
 A system `git` (and `ssh` for SSH remotes) must be installed. Override the
 version or install location with `ZYNC_VERSION` and `ZYNC_INSTALL_DIR`.
 
+### First run / sign in
+
+Zync requires a login by default. Set `ZYNC_ADMIN_USER` (the login email) and
+`ZYNC_ADMIN_PASSWORD` on first start to create the admin account:
+
+```sh
+ZYNC_SECRET_KEY="$(openssl rand -base64 32)" \
+  ZYNC_ADMIN_USER="you@example.com" \
+  ZYNC_ADMIN_PASSWORD="a-strong-password" \
+  zync serve
+```
+
+Then open <http://127.0.0.1:58271> and sign in with that email and password.
+The admin is created once, in `zync.db` (path via `ZYNC_DB`) — later starts
+ignore `ZYNC_ADMIN_*`, so don't delete the DB or change `ZYNC_SECRET_KEY`
+afterwards. Skip the login entirely with `ZYNC_AUTH=disabled`, or, if you
+start without `ZYNC_ADMIN_*`, follow the one-time `/setup?token=...` link
+(valid ~24h) that the server logs on boot.
+
 ### Docker
 
 ```sh
@@ -33,7 +52,9 @@ docker compose up --build
 ```
 
 Then open <http://127.0.0.1:58271>. Mount host Git projects under `/workspaces`
-in `docker-compose.yml` and add the mounted path in the UI.
+in `docker-compose.yml` and add the mounted path in the UI. Set the same
+`ZYNC_ADMIN_USER`/`ZYNC_ADMIN_PASSWORD` (or `ZYNC_AUTH=disabled`) in
+`docker-compose.yml` for first-run sign-in, as above.
 
 ### From source
 
