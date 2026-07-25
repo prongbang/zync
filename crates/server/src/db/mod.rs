@@ -557,13 +557,7 @@ impl Database {
 
     /// Insert a user (no password — password-set is a separate bootstrap/admin
     /// path). Used by tests and the bootstrap seed.
-    pub fn create_user(
-        &self,
-        id: &str,
-        email: &str,
-        name: &str,
-        role: &str,
-    ) -> anyhow::Result<()> {
+    pub fn create_user(&self, id: &str, email: &str, name: &str, role: &str) -> anyhow::Result<()> {
         let conn = self.conn.lock().expect("database lock");
         conn.execute(
             "INSERT INTO users (id, email, name, role, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -594,7 +588,14 @@ impl Database {
         conn.execute(
             "INSERT INTO users (id, email, name, role, password_hash, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, email, name, role, password_hash, Utc::now().to_rfc3339()],
+            params![
+                id,
+                email,
+                name,
+                role,
+                password_hash,
+                Utc::now().to_rfc3339()
+            ],
         )
         .map_err(|err| {
             if is_unique_constraint_violation(&err) {
@@ -794,10 +795,7 @@ impl Database {
     /// (seconds precision, `Z`) so the lexical comparison is monotonic.
     pub fn sweep_expired_sessions(&self, now: &str) -> anyhow::Result<usize> {
         let conn = self.conn.lock().expect("database lock");
-        let removed = conn.execute(
-            "DELETE FROM sessions WHERE expires_at <= ?1",
-            params![now],
-        )?;
+        let removed = conn.execute("DELETE FROM sessions WHERE expires_at <= ?1", params![now])?;
         Ok(removed)
     }
 
@@ -1021,7 +1019,10 @@ impl Database {
 
     /// Masked projection for a user's credentials — never includes secret
     /// columns. This is the only shape the list/read API may return.
-    pub fn list_credentials_by_user(&self, user_id: &str) -> anyhow::Result<Vec<CredentialSummary>> {
+    pub fn list_credentials_by_user(
+        &self,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<CredentialSummary>> {
         let conn = self.conn.lock().expect("database lock");
         let mut stmt = conn.prepare(
             "SELECT id, user_id, label, host_pattern, kind, username, created_at \
@@ -1266,7 +1267,8 @@ mod tests {
             assert_eq!(version, 0, "sanity check: legacy db starts unstamped");
         }
 
-        let db = Database::open(&path).expect("opening an existing ad-hoc-schema db must not error");
+        let db =
+            Database::open(&path).expect("opening an existing ad-hoc-schema db must not error");
 
         let conn = db.conn.lock().expect("database lock");
         let version: i64 = conn
@@ -1342,7 +1344,10 @@ mod tests {
         // Retrying with the same migration list resumes from version 1 and
         // fails again the same way — it doesn't skip the broken migration.
         let retry = run_migrations(&mut conn, &migrations);
-        assert!(retry.is_err(), "retrying a still-broken migration still refuses to boot");
+        assert!(
+            retry.is_err(),
+            "retrying a still-broken migration still refuses to boot"
+        );
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
@@ -1554,7 +1559,11 @@ mod tests {
             .iter()
             .filter(|m| m.user_id == "bob" && m.role == "owner")
             .collect();
-        assert_eq!(owners.len(), 1, "exactly one owner row after repeated migrate");
+        assert_eq!(
+            owners.len(),
+            1,
+            "exactly one owner row after repeated migrate"
+        );
         assert_eq!(
             db.repo_role_for_user(&repo.id, "bob").unwrap().as_deref(),
             Some("owner")
@@ -1566,13 +1575,21 @@ mod tests {
         let db = test_db();
         db.create_user("bob", "bob@z", "Bob", "user").unwrap();
         db.create_user("out", "out@z", "Out", "user").unwrap();
-        let owned = db.create_repository("own", "/tmp/own", None, "bob").unwrap();
+        let owned = db
+            .create_repository("own", "/tmp/own", None, "bob")
+            .unwrap();
         db.workspace_for_repository(&owned.id, &owned.name).unwrap();
-        let shared = db.create_repository("shr", "/tmp/shr", None, "out").unwrap();
-        db.workspace_for_repository(&shared.id, &shared.name).unwrap();
+        let shared = db
+            .create_repository("shr", "/tmp/shr", None, "out")
+            .unwrap();
+        db.workspace_for_repository(&shared.id, &shared.name)
+            .unwrap();
         db.add_repo_member(&shared.id, "bob", "viewer").unwrap();
-        let hidden = db.create_repository("hid", "/tmp/hid", None, "out").unwrap();
-        db.workspace_for_repository(&hidden.id, &hidden.name).unwrap();
+        let hidden = db
+            .create_repository("hid", "/tmp/hid", None, "out")
+            .unwrap();
+        db.workspace_for_repository(&hidden.id, &hidden.name)
+            .unwrap();
 
         let visible: Vec<_> = db
             .list_repositories_for_user("bob")
@@ -1582,7 +1599,10 @@ mod tests {
             .collect();
         assert!(visible.contains(&owned.id), "sees owned repo");
         assert!(visible.contains(&shared.id), "sees shared (member) repo");
-        assert!(!visible.contains(&hidden.id), "cannot see a repo it has no role on");
+        assert!(
+            !visible.contains(&hidden.id),
+            "cannot see a repo it has no role on"
+        );
         assert_eq!(visible.len(), 2);
     }
 
@@ -1617,7 +1637,8 @@ mod tests {
         // N5: changing the role of a non-member updates zero rows — the handler
         // maps that to a 404 rather than a misleading success.
         assert_eq!(
-            db.set_repo_member_role(&repo.id, "ghost", "member").unwrap(),
+            db.set_repo_member_role(&repo.id, "ghost", "member")
+                .unwrap(),
             0
         );
         // Removal revokes access.
@@ -1660,7 +1681,8 @@ mod tests {
     #[test]
     fn find_user_by_identifier_matches_id_or_email() {
         let db = test_db();
-        db.create_user("bob", "bob@zync.local", "Bob", "user").unwrap();
+        db.create_user("bob", "bob@zync.local", "Bob", "user")
+            .unwrap();
         assert_eq!(
             db.find_user_by_identifier("bob").unwrap().map(|u| u.id),
             Some("bob".to_string())

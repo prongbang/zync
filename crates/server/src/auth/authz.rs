@@ -104,11 +104,7 @@ pub async fn require_repo_authz(
 
     match granted {
         Some(capability) if capability >= required => next.run(req).await,
-        _ => (
-            StatusCode::FORBIDDEN,
-            "not authorized for this repository",
-        )
-            .into_response(),
+        _ => (StatusCode::FORBIDDEN, "not authorized for this repository").into_response(),
     }
 }
 
@@ -334,16 +330,27 @@ mod tests {
             let mutates = handler_calls_broadcast(GIT_SRC, handler);
             let capability = match classify(method, path) {
                 Some(Scope::Repo { required, .. }) => required,
-                other => panic!("git route `{method} {path}` did not classify as repo-scoped: {other:?}"),
+                other => {
+                    panic!("git route `{method} {path}` did not classify as repo-scoped: {other:?}")
+                }
             };
             let treated_as_write = capability >= Capability::Member;
             assert_eq!(
-                treated_as_write, mutates,
+                treated_as_write,
+                mutates,
                 "git route `{method} {path}` (handler `{handler}`): guard treats it as \
                  {}, but it {} `broadcast_git_change`. A mutation MUST use a non-safe \
                  method (member+); a member+ git route MUST broadcast.",
-                if treated_as_write { "a WRITE (member+)" } else { "a READ (viewer)" },
-                if mutates { "DOES call" } else { "does NOT call" },
+                if treated_as_write {
+                    "a WRITE (member+)"
+                } else {
+                    "a READ (viewer)"
+                },
+                if mutates {
+                    "DOES call"
+                } else {
+                    "does NOT call"
+                },
             );
         }
     }
@@ -479,7 +486,12 @@ mod tests {
     fn fixture(mode: AuthMode) -> Fixture {
         let state = app_state(mode);
         let db = &state.db;
-        for (id, role) in [("bob", "user"), ("mem", "user"), ("vwr", "user"), ("out", "user")] {
+        for (id, role) in [
+            ("bob", "user"),
+            ("mem", "user"),
+            ("vwr", "user"),
+            ("out", "user"),
+        ] {
             db.create_user(id, &format!("{id}@zync.local"), id, role)
                 .expect("create user");
         }
@@ -489,8 +501,10 @@ mod tests {
         let workspace = db
             .workspace_for_repository(&repo.id, &repo.name)
             .expect("workspace");
-        db.add_repo_member(&repo.id, "mem", "member").expect("add member");
-        db.add_repo_member(&repo.id, "vwr", "viewer").expect("add viewer");
+        db.add_repo_member(&repo.id, "mem", "member")
+            .expect("add member");
+        db.add_repo_member(&repo.id, "vwr", "viewer")
+            .expect("add viewer");
         Fixture {
             state,
             repo_id: repo.id,
@@ -519,16 +533,14 @@ mod tests {
                 state.clone(),
                 require_repo_authz,
             ))
-            .layer(axum::middleware::from_fn_with_state(state.clone(), require_auth))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                require_auth,
+            ))
             .with_state(state)
     }
 
-    async fn request(
-        app: &Router,
-        method: Method,
-        uri: &str,
-        cookie: Option<&str>,
-    ) -> StatusCode {
+    async fn request(app: &Router, method: Method, uri: &str, cookie: Option<&str>) -> StatusCode {
         let mut builder = Request::builder().method(method).uri(uri);
         if let Some(token) = cookie {
             builder = builder.header(header::COOKIE, format!("{}={token}", session::COOKIE_NAME));
@@ -548,11 +560,23 @@ mod tests {
         let c = Some(cookie.as_str());
         let r = &fx.repo_id;
         assert_eq!(
-            request(&app, Method::GET, &format!("/repositories/{r}/git/status"), c).await,
+            request(
+                &app,
+                Method::GET,
+                &format!("/repositories/{r}/git/status"),
+                c
+            )
+            .await,
             StatusCode::OK
         );
         assert_eq!(
-            request(&app, Method::POST, &format!("/repositories/{r}/git/commit"), c).await,
+            request(
+                &app,
+                Method::POST,
+                &format!("/repositories/{r}/git/commit"),
+                c
+            )
+            .await,
             StatusCode::OK
         );
         assert_eq!(
@@ -577,11 +601,23 @@ mod tests {
         let c = Some(cookie.as_str());
         let r = &fx.repo_id;
         assert_eq!(
-            request(&app, Method::GET, &format!("/repositories/{r}/git/status"), c).await,
+            request(
+                &app,
+                Method::GET,
+                &format!("/repositories/{r}/git/status"),
+                c
+            )
+            .await,
             StatusCode::OK
         );
         assert_eq!(
-            request(&app, Method::POST, &format!("/repositories/{r}/git/commit"), c).await,
+            request(
+                &app,
+                Method::POST,
+                &format!("/repositories/{r}/git/commit"),
+                c
+            )
+            .await,
             StatusCode::OK
         );
         // Member management + repo delete are owner-only.
@@ -607,7 +643,13 @@ mod tests {
         let c = Some(cookie.as_str());
         let r = &fx.repo_id;
         assert_eq!(
-            request(&app, Method::GET, &format!("/repositories/{r}/git/status"), c).await,
+            request(
+                &app,
+                Method::GET,
+                &format!("/repositories/{r}/git/status"),
+                c
+            )
+            .await,
             StatusCode::OK
         );
         // Opening is a viewer-allowed read-only POST.
@@ -617,7 +659,13 @@ mod tests {
         );
         // A mutating git route is forbidden for a viewer.
         assert_eq!(
-            request(&app, Method::POST, &format!("/repositories/{r}/git/commit"), c).await,
+            request(
+                &app,
+                Method::POST,
+                &format!("/repositories/{r}/git/commit"),
+                c
+            )
+            .await,
             StatusCode::FORBIDDEN
         );
         assert_eq!(
@@ -634,11 +682,23 @@ mod tests {
         let c = Some(cookie.as_str());
         let r = &fx.repo_id;
         assert_eq!(
-            request(&app, Method::GET, &format!("/repositories/{r}/git/status"), c).await,
+            request(
+                &app,
+                Method::GET,
+                &format!("/repositories/{r}/git/status"),
+                c
+            )
+            .await,
             StatusCode::FORBIDDEN
         );
         assert_eq!(
-            request(&app, Method::POST, &format!("/repositories/{r}/git/commit"), c).await,
+            request(
+                &app,
+                Method::POST,
+                &format!("/repositories/{r}/git/commit"),
+                c
+            )
+            .await,
             StatusCode::FORBIDDEN
         );
     }
@@ -684,12 +744,24 @@ mod tests {
         );
         // Viewer cannot write a file; member can.
         assert_eq!(
-            request(&app, Method::PUT, &format!("/workspace/{w}/files/x"), Some(&vwr)).await,
+            request(
+                &app,
+                Method::PUT,
+                &format!("/workspace/{w}/files/x"),
+                Some(&vwr)
+            )
+            .await,
             StatusCode::FORBIDDEN
         );
         let mem = session_for(&fx.state, "mem");
         assert_eq!(
-            request(&app, Method::PUT, &format!("/workspace/{w}/files/x"), Some(&mem)).await,
+            request(
+                &app,
+                Method::PUT,
+                &format!("/workspace/{w}/files/x"),
+                Some(&mem)
+            )
+            .await,
             StatusCode::OK
         );
     }

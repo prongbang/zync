@@ -49,7 +49,8 @@ fn read_workdir_file_returns_bytes_and_blocks_traversal() {
     let bytes: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
     fs::write(temp.path().join("logo.png"), bytes).expect("write png");
 
-    let read = zync_git_core::read_workdir_file(temp.path(), "logo.png").expect("read workdir file");
+    let read =
+        zync_git_core::read_workdir_file(temp.path(), "logo.png").expect("read workdir file");
     assert_eq!(read, bytes);
 
     // A traversal attempt must not escape the working directory.
@@ -231,7 +232,10 @@ fn interactive_rebase_squash_after_drop_only_errors_without_amending_base() {
         base_message_before
     );
     let head = repo.head().expect("head").target().expect("head target");
-    assert_eq!(head, base_oid, "HEAD should sit at base, not an amended commit");
+    assert_eq!(
+        head, base_oid,
+        "HEAD should sit at base, not an amended commit"
+    );
 }
 
 #[test]
@@ -386,8 +390,7 @@ fn submodule_add_and_remove_round_trip() {
     assert_eq!(modules[0].path, "vendor/lib");
     assert_eq!(modules[0].url.as_deref(), Some(sub_url.as_str()));
 
-    zync_git_core::submodule_remove(superproject.path(), "vendor/lib")
-        .expect("submodule remove");
+    zync_git_core::submodule_remove(superproject.path(), "vendor/lib").expect("submodule remove");
 
     assert!(!superproject.path().join("vendor/lib").exists());
     let modules_after_remove =
@@ -439,7 +442,10 @@ fn fetch_and_push_round_trip_via_libgit2() {
         .find_reference("FETCH_HEAD")
         .expect("FETCH_HEAD written by fetch");
     assert_eq!(
-        fetch_head.target().expect("FETCH_HEAD has a target").to_string(),
+        fetch_head
+            .target()
+            .expect("FETCH_HEAD has a target")
+            .to_string(),
         second_commit
     );
 }
@@ -929,7 +935,9 @@ fn rebase_branch_replays_diverged_commit_onto_upstream_tip() {
     {
         let repo = Repository::open(temp.path()).expect("open repo for config");
         let mut config = repo.config().expect("repo config");
-        config.set_str("user.name", "Zync Test").expect("set user.name");
+        config
+            .set_str("user.name", "Zync Test")
+            .expect("set user.name");
         config
             .set_str("user.email", "zync@test.local")
             .expect("set user.email");
@@ -954,7 +962,11 @@ fn rebase_branch_replays_diverged_commit_onto_upstream_tip() {
     zync_git_core::rebase_branch(temp.path(), &feature).expect("rebase onto feature");
 
     let repo = Repository::open(temp.path()).expect("reopen repo after rebase");
-    let head = repo.head().expect("head").peel_to_commit().expect("head commit");
+    let head = repo
+        .head()
+        .expect("head")
+        .peel_to_commit()
+        .expect("head commit");
     assert_ne!(
         head.id().to_string(),
         original_commit,
@@ -1121,11 +1133,7 @@ fn revert_merge_commit_requires_mainline_and_succeeds_with_it() {
 
     let merge_commit_id = {
         let repo = Repository::open(temp.path()).expect("open repo");
-        let merge_commit = repo
-            .head()
-            .expect("head")
-            .peel_to_commit()
-            .expect("commit");
+        let merge_commit = repo.head().expect("head").peel_to_commit().expect("commit");
         assert_eq!(merge_commit.parent_count(), 2, "sanity: is a merge commit");
         merge_commit.id().to_string()
     };
@@ -1186,14 +1194,14 @@ fn search_commits_matches_message_author_sha_and_file_path() {
         .expect("second commit");
 
     // Message substring match, case-insensitive.
-    let by_message = zync_git_core::search_commits(temp.path(), "ALPHA", 10, None)
-        .expect("search by message");
+    let by_message =
+        zync_git_core::search_commits(temp.path(), "ALPHA", 10, None).expect("search by message");
     assert_eq!(by_message.len(), 1);
     assert_eq!(by_message[0].id, base_id);
 
     // Author name/email match.
-    let by_author =
-        zync_git_core::search_commits(temp.path(), "grace@example", 10, None).expect("search by author");
+    let by_author = zync_git_core::search_commits(temp.path(), "grace@example", 10, None)
+        .expect("search by author");
     assert_eq!(by_author.len(), 1);
     assert_eq!(by_author[0].summary, "Fix beta bug");
 
@@ -1366,7 +1374,10 @@ fn bisect_rejects_option_like_rev_and_creates_no_marker() {
 
     let bad_err = zync_git_core::bisect_start(temp.path(), &hostile, &[])
         .expect_err("an option-like bad revision must be rejected before it reaches git");
-    assert!(bad_err.to_string().contains("invalid") || bad_err.to_string().contains("not a valid revision"));
+    assert!(
+        bad_err.to_string().contains("invalid")
+            || bad_err.to_string().contains("not a valid revision")
+    );
     assert!(!marker.exists());
     assert!(
         !zync_git_core::bisect_status(temp.path())
@@ -1382,7 +1393,10 @@ fn bisect_rejects_option_like_rev_and_creates_no_marker() {
 
     let good_err = zync_git_core::bisect_start(temp.path(), &head, &[hostile.clone()])
         .expect_err("an option-like good revision must be rejected before it reaches git");
-    assert!(good_err.to_string().contains("invalid") || good_err.to_string().contains("not a valid revision"));
+    assert!(
+        good_err.to_string().contains("invalid")
+            || good_err.to_string().contains("not a valid revision")
+    );
     assert!(!marker.exists());
     assert!(
         !zync_git_core::bisect_status(temp.path())
@@ -1396,7 +1410,8 @@ fn bisect_rejects_option_like_rev_and_creates_no_marker() {
     let mark_err = zync_git_core::bisect_bad(temp.path(), Some(&hostile))
         .expect_err("an option-like explicit rev must be rejected");
     assert!(
-        mark_err.to_string().contains("invalid") || mark_err.to_string().contains("not a valid revision")
+        mark_err.to_string().contains("invalid")
+            || mark_err.to_string().contains("not a valid revision")
     );
     assert!(
         !marker.exists(),

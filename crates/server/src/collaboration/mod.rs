@@ -273,8 +273,7 @@ mod tests {
         // The lock holder may clear their own lock.
         assert!(authorize_lock_actor(&user("bob", "user"), &state, "ws", "a.txt").is_ok());
         // Someone else may not.
-        let err =
-            authorize_lock_actor(&user("eve", "user"), &state, "ws", "a.txt").unwrap_err();
+        let err = authorize_lock_actor(&user("eve", "user"), &state, "ws", "a.txt").unwrap_err();
         assert_eq!(err.0, StatusCode::FORBIDDEN);
         // ...unless they are a global admin.
         assert!(authorize_lock_actor(&user("root", ADMIN_ROLE), &state, "ws", "a.txt").is_ok());

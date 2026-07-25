@@ -213,7 +213,8 @@ async fn create_repository(
         // let the check and the real write target disagree (e.g. a dangling symlink component
         // that `enforce_repos_root`/W1 rejects up front, but that a naive second lookup from the
         // raw string could still resolve differently at write time).
-        let destination = enforce_repos_root(&state, clone_to)?.unwrap_or_else(|| PathBuf::from(clone_to));
+        let destination =
+            enforce_repos_root(&state, clone_to)?.unwrap_or_else(|| PathBuf::from(clone_to));
         let spec = credentials::resolve_credential_spec_for_url(&state, &auth.id, remote_url)?;
         zync_git_core::clone_repo_with_credentials(remote_url, &destination, Some(&spec))
             .map_err(map_git_error)?;
@@ -234,7 +235,8 @@ async fn create_repository(
         }
         // Same N1 rule as the clone branch above: `target_path` is the resolved path from the
         // boundary check itself, not re-derived from `trimmed` afterward.
-        let target_path = enforce_repos_root(&state, trimmed)?.unwrap_or_else(|| PathBuf::from(trimmed));
+        let target_path =
+            enforce_repos_root(&state, trimmed)?.unwrap_or_else(|| PathBuf::from(trimmed));
         if target_path.is_file() {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -680,7 +682,8 @@ mod tests {
         };
 
         let result = create_repository(State(state), owner_auth_user(), Json(request)).await;
-        let (status, _) = result.expect_err("init path outside the configured root must be rejected");
+        let (status, _) =
+            result.expect_err("init path outside the configured root must be rejected");
         assert_eq!(status, StatusCode::FORBIDDEN);
         // Nothing should have been created on disk.
         assert!(!outside.exists());
@@ -717,8 +720,7 @@ mod tests {
         };
 
         let result = create_repository(State(state), owner_auth_user(), Json(request)).await;
-        let (status, body) =
-            result.expect_err("init through a dangling symlink must be rejected");
+        let (status, body) = result.expect_err("init through a dangling symlink must be rejected");
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert!(
             body.contains("unresolvable symlink"),
@@ -762,7 +764,9 @@ mod tests {
             .canonicalize()
             .expect("canonicalize allowed root");
 
-        let state = test_state(crate::repos_root::ReposRoot::for_test(vec![allowed.clone()]));
+        let state = test_state(crate::repos_root::ReposRoot::for_test(
+            vec![allowed.clone()],
+        ));
         let result = list_directories(State(state), Query(DirectoryQuery { path: None }))
             .await
             .expect("listing the configured roots must succeed");
@@ -782,7 +786,9 @@ mod tests {
         let sub = allowed.join("sub");
         std::fs::create_dir(&sub).expect("create sub dir");
 
-        let state = test_state(crate::repos_root::ReposRoot::for_test(vec![allowed.clone()]));
+        let state = test_state(crate::repos_root::ReposRoot::for_test(
+            vec![allowed.clone()],
+        ));
         let result = list_directories(
             State(state),
             Query(DirectoryQuery {

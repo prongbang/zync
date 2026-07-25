@@ -73,7 +73,10 @@ pub enum SessionCheck {
     Valid,
     /// Session is valid but the refresh window elapsed — bump `last_used` and
     /// `expires_at` to these values and re-set the cookie.
-    Refresh { last_used: String, expires_at: String },
+    Refresh {
+        last_used: String,
+        expires_at: String,
+    },
 }
 
 /// Pure sliding-expiry evaluation (ADR-002 Decision 2). Takes the stored
@@ -85,11 +88,9 @@ pub fn evaluate(
     expires_at: &str,
     now: DateTime<Utc>,
 ) -> SessionCheck {
-    let (Ok(created), Ok(last), Ok(expires)) = (
-        parse(created_at),
-        parse(last_used),
-        parse(expires_at),
-    ) else {
+    let (Ok(created), Ok(last), Ok(expires)) =
+        (parse(created_at), parse(last_used), parse(expires_at))
+    else {
         return SessionCheck::Invalid;
     };
 

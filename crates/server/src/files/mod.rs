@@ -262,12 +262,9 @@ mod tests {
     async fn read_file_accepts_legit_in_tree_file() {
         let (state, workspace_id, _dir, _root) = setup_workspace();
 
-        let result = read_file(
-            State(state),
-            Path((workspace_id, "hello.txt".to_string())),
-        )
-        .await
-        .expect("legit in-tree file must be readable");
+        let result = read_file(State(state), Path((workspace_id, "hello.txt".to_string())))
+            .await
+            .expect("legit in-tree file must be readable");
         assert_eq!(result.0.content, "hi");
     }
 
@@ -305,8 +302,7 @@ mod tests {
             Path((workspace_id, "dangling-link/secret".to_string())),
         )
         .await;
-        let (status, body) =
-            result.expect_err("read through a dangling symlink must be rejected");
+        let (status, body) = result.expect_err("read through a dangling symlink must be rejected");
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert!(
             body.contains("unresolvable symlink"),
@@ -322,7 +318,10 @@ mod tests {
 
         let result = write_file(
             State(state),
-            Path((workspace_id, "etc-link/zync-w1-should-not-write".to_string())),
+            Path((
+                workspace_id,
+                "etc-link/zync-w1-should-not-write".to_string(),
+            )),
             Json(WriteFileRequest {
                 content: "pwned".to_string(),
             }),

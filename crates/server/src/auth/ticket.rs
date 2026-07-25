@@ -35,7 +35,11 @@ impl WsTicketStore {
     /// Mint a ticket bound to `(user_id, workspace_id)`, expiring `TICKET_TTL_SECS`
     /// from now. Returns the opaque ticket string.
     pub fn mint(&self, user_id: &str, workspace_id: &str) -> String {
-        self.mint_at(user_id, workspace_id, Utc::now() + Duration::seconds(TICKET_TTL_SECS))
+        self.mint_at(
+            user_id,
+            workspace_id,
+            Utc::now() + Duration::seconds(TICKET_TTL_SECS),
+        )
     }
 
     /// Testable mint with an explicit expiry.

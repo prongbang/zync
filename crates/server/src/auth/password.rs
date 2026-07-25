@@ -24,10 +24,8 @@ pub fn dummy_hash() -> &'static str {
     DUMMY.get_or_init(|| {
         let mut secret = [0u8; 32];
         rand::RngCore::fill_bytes(&mut OsRng, &mut secret);
-        let secret = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD_NO_PAD,
-            secret,
-        );
+        let secret =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD_NO_PAD, secret);
         hash_password(&secret).expect("hash dummy password")
     })
 }

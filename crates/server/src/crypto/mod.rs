@@ -88,9 +88,7 @@ fn is_dev_mode() -> bool {
 }
 
 fn decode_key(raw: &str) -> Option<[u8; KEY_LEN]> {
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(raw)
-        .ok()?;
+    let decoded = base64::engine::general_purpose::STANDARD.decode(raw).ok()?;
     decoded.try_into().ok()
 }
 

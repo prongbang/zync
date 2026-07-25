@@ -211,4 +211,3 @@ async fn main() -> anyhow::Result<()> {
 fn static_dir() -> String {
     std::env::var("ZYNC_STATIC_DIR").unwrap_or_else(|_| "/app/public".to_string())
 }
-

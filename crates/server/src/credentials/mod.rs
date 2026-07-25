@@ -22,7 +22,10 @@ use zeroize::{Zeroize, Zeroizing};
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/credentials", get(list_credentials).post(create_credential))
+        .route(
+            "/credentials",
+            get(list_credentials).post(create_credential),
+        )
         .route("/credentials/:id", delete(delete_credential))
 }
 
@@ -52,9 +55,18 @@ impl std::fmt::Debug for CreateCredentialRequest {
             .field("kind", &self.kind)
             .field("username", &self.username)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
-            .field("private_key", &self.private_key.as_ref().map(|_| "<redacted>"))
-            .field("passphrase", &self.passphrase.as_ref().map(|_| "<redacted>"))
-            .field("public_key", &self.public_key.as_ref().map(|_| "<redacted>"))
+            .field(
+                "private_key",
+                &self.private_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "passphrase",
+                &self.passphrase.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "public_key",
+                &self.public_key.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -238,7 +250,10 @@ impl SchemeClass {
 /// (e.g. a local filesystem path, which never needs credentials).
 pub fn parse_remote_host(remote_url: &str) -> Option<(String, SchemeClass)> {
     let url = remote_url.trim();
-    if let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) {
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    {
         return host_from_authority(rest).map(|host| (host, SchemeClass::Https));
     }
     if let Some(rest) = url.strip_prefix("ssh://") {
@@ -344,7 +359,10 @@ fn select_from_candidates(
             .then_with(|| cred_b.created_at.cmp(&cred_a.created_at))
     });
 
-    scored.into_iter().next().map(|(_, credential)| credential.clone())
+    scored
+        .into_iter()
+        .next()
+        .map(|(_, credential)| credential.clone())
 }
 
 /// A decrypted credential secret bundle, interpreted per `kind` by
@@ -367,9 +385,18 @@ impl std::fmt::Debug for SecretBundle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecretBundle")
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
-            .field("private_key", &self.private_key.as_ref().map(|_| "<redacted>"))
-            .field("passphrase", &self.passphrase.as_ref().map(|_| "<redacted>"))
-            .field("public_key", &self.public_key.as_ref().map(|_| "<redacted>"))
+            .field(
+                "private_key",
+                &self.private_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "passphrase",
+                &self.passphrase.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "public_key",
+                &self.public_key.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -508,12 +535,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-    fn credential(
-        id: &str,
-        host_pattern: &str,
-        kind: &str,
-        created_at: &str,
-    ) -> CredentialSummary {
+    fn credential(id: &str, host_pattern: &str, kind: &str, created_at: &str) -> CredentialSummary {
         CredentialSummary {
             id: id.to_string(),
             user_id: "owner".to_string(),
@@ -594,8 +616,18 @@ mod tests {
     #[test]
     fn exact_beats_wildcard() {
         let creds = vec![
-            credential("wildcard", "*.github.com", "https_token", "2026-01-01T00:00:00Z"),
-            credential("exact", "api.github.com", "https_token", "2026-01-01T00:00:00Z"),
+            credential(
+                "wildcard",
+                "*.github.com",
+                "https_token",
+                "2026-01-01T00:00:00Z",
+            ),
+            credential(
+                "exact",
+                "api.github.com",
+                "https_token",
+                "2026-01-01T00:00:00Z",
+            ),
         ];
         let picked = select_from_candidates(&creds, "https://api.github.com/org/repo.git").unwrap();
         assert_eq!(picked.id, "exact");
@@ -605,7 +637,12 @@ mod tests {
     fn more_specific_wildcard_wins() {
         let creds = vec![
             credential("broad", "*.com", "https_token", "2026-01-01T00:00:00Z"),
-            credential("narrow", "*.github.com", "https_token", "2026-01-01T00:00:00Z"),
+            credential(
+                "narrow",
+                "*.github.com",
+                "https_token",
+                "2026-01-01T00:00:00Z",
+            ),
         ];
         let picked = select_from_candidates(&creds, "https://api.github.com/org/repo.git").unwrap();
         assert_eq!(picked.id, "narrow");
@@ -847,8 +884,9 @@ mod tests {
         // The legitimate path — decrypting just-in-time to build a CredentialSpec for a remote
         // op — must still recover the real secret (i.e. this isn't a "the value is just lost"
         // false-positive).
-        let spec = resolve_credential_spec_for_url(&state, "owner", "https://github.com/org/repo.git")
-            .expect("resolve credential spec");
+        let spec =
+            resolve_credential_spec_for_url(&state, "owner", "https://github.com/org/repo.git")
+                .expect("resolve credential spec");
         match spec {
             zync_git_core::CredentialSpec::UserpassPlaintext { secret, .. } => {
                 assert_eq!(secret.as_str(), SENTINEL);

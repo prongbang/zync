@@ -112,19 +112,15 @@ async fn workspace_socket(
         // No ticket in disabled mode; the synthetic owner drives the socket.
         OWNER_ID.to_string()
     } else {
-        match query
-            .ticket
-            .as_deref()
-            .and_then(|ticket| {
-                state
-                    .auth
-                    .tickets
-                    .consume(ticket, &workspace_id, chrono::Utc::now())
-            }) {
+        match query.ticket.as_deref().and_then(|ticket| {
+            state
+                .auth
+                .tickets
+                .consume(ticket, &workspace_id, chrono::Utc::now())
+        }) {
             Some(user_id) => user_id,
             None => {
-                return (StatusCode::UNAUTHORIZED, "invalid or missing ws ticket")
-                    .into_response()
+                return (StatusCode::UNAUTHORIZED, "invalid or missing ws ticket").into_response()
             }
         }
     };
@@ -171,11 +167,26 @@ mod tests {
         db.add_repo_member(&repo.id, "mem", "member").unwrap();
         db.add_repo_member(&repo.id, "vwr", "viewer").unwrap();
 
-        assert!(user_can_write_workspace(&db, "owner", &ws.id), "global admin writes");
-        assert!(user_can_write_workspace(&db, "bob", &ws.id), "repo owner writes");
-        assert!(user_can_write_workspace(&db, "mem", &ws.id), "member writes");
-        assert!(!user_can_write_workspace(&db, "vwr", &ws.id), "viewer is read-only");
-        assert!(!user_can_write_workspace(&db, "out", &ws.id), "non-member is read-only");
+        assert!(
+            user_can_write_workspace(&db, "owner", &ws.id),
+            "global admin writes"
+        );
+        assert!(
+            user_can_write_workspace(&db, "bob", &ws.id),
+            "repo owner writes"
+        );
+        assert!(
+            user_can_write_workspace(&db, "mem", &ws.id),
+            "member writes"
+        );
+        assert!(
+            !user_can_write_workspace(&db, "vwr", &ws.id),
+            "viewer is read-only"
+        );
+        assert!(
+            !user_can_write_workspace(&db, "out", &ws.id),
+            "non-member is read-only"
+        );
         assert!(
             !user_can_write_workspace(&db, "mem", "no-such-ws"),
             "unknown workspace denies write"

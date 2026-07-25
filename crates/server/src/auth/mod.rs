@@ -238,7 +238,8 @@ pub async fn require_auth(
     let mut response = next.run(req).await;
     if refreshed {
         // Re-set the sliding cookie (same token, refreshed Max-Age).
-        if let Ok(value) = HeaderValue::from_str(&set_cookie_value(&token, state.auth.cookie_secure))
+        if let Ok(value) =
+            HeaderValue::from_str(&set_cookie_value(&token, state.auth.cookie_secure))
         {
             response.headers_mut().append(header::SET_COOKIE, value);
         }
@@ -321,7 +322,8 @@ fn clear_cookie_value(secure: bool) -> String {
 fn set_cookie_header(value: &str) -> [(header::HeaderName, HeaderValue); 1] {
     // `value` is entirely ASCII (name, base64url token, fixed attributes), so
     // `from_str` never fails; fall back to an empty header if it somehow does.
-    let header_value = HeaderValue::from_str(value).unwrap_or_else(|_| HeaderValue::from_static(""));
+    let header_value =
+        HeaderValue::from_str(value).unwrap_or_else(|_| HeaderValue::from_static(""));
     [(header::SET_COOKIE, header_value)]
 }
 
@@ -635,7 +637,10 @@ async fn setup_post(
         ));
     }
     if request.identifier.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "identifier is required".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "identifier is required".to_string(),
+        ));
     }
     if request.password.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "password is required".to_string()));
@@ -1002,7 +1007,10 @@ mod tests {
         assert!(mint("bob").await.is_ok());
         assert!(mint("mem").await.is_ok());
         // A non-member is forbidden — no ticket.
-        let err = mint("out").await.err().expect("non-member must be rejected");
+        let err = mint("out")
+            .await
+            .err()
+            .expect("non-member must be rejected");
         assert_eq!(err.0, StatusCode::FORBIDDEN);
 
         // A global admin bypasses the membership check.
@@ -1180,7 +1188,11 @@ mod tests {
         .err()
         .expect("login with an unknown identifier must fail");
         assert_eq!(err.0, StatusCode::UNAUTHORIZED);
-        assert!(!err.1.contains(SENTINEL), "error body leaked the password: {}", err.1);
+        assert!(
+            !err.1.contains(SENTINEL),
+            "error body leaked the password: {}",
+            err.1
+        );
 
         // Known user, wrong password.
         let admin = user_auth(OWNER_ID, ADMIN_ROLE);
@@ -1208,7 +1220,11 @@ mod tests {
         .err()
         .expect("login with the wrong password must fail");
         assert_eq!(err.0, StatusCode::UNAUTHORIZED);
-        assert!(!err.1.contains(SENTINEL), "error body leaked the password: {}", err.1);
+        assert!(
+            !err.1.contains(SENTINEL),
+            "error body leaked the password: {}",
+            err.1
+        );
     }
 
     #[test]

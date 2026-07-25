@@ -1,8 +1,7 @@
 use git2::{
     ApplyLocation, AutotagOption, BranchType, Cred, CredentialType, DiffFormat, DiffOptions,
     FetchOptions, FetchPrune, IndexAddOption, MergeOptions, Oid, PushOptions, Remote,
-    RemoteCallbacks, Repository, ResetType, Signature, StatusOptions, TreeWalkMode,
-    TreeWalkResult,
+    RemoteCallbacks, Repository, ResetType, Signature, StatusOptions, TreeWalkMode, TreeWalkResult,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -350,7 +349,11 @@ pub fn clone_repo_with_credentials(
         .fetch_options(fetch_options)
         .clone(url, destination.as_ref())
         .map_err(|err| {
-            map_git2_error(&format!("git clone {}", redact_url_userinfo(url)), &host, err)
+            map_git2_error(
+                &format!("git clone {}", redact_url_userinfo(url)),
+                &host,
+                err,
+            )
         })?;
     repo_info(&repo)
 }
@@ -539,8 +542,9 @@ fn pull_ff_only(
     if !analysis.0.is_fast_forward() {
         return Err(GitCommandError {
             command: format!("git pull --ff-only {remote_name} {branch_name}"),
-            stderr: "not possible to fast-forward, aborting (local and remote history have diverged)"
-                .to_string(),
+            stderr:
+                "not possible to fast-forward, aborting (local and remote history have diverged)"
+                    .to_string(),
             kind: GitErrorKind::NonFastForward,
         }
         .into());

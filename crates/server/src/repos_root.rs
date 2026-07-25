@@ -222,11 +222,17 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().canonicalize().expect("canonicalize root");
         let other = tempfile::tempdir().expect("other tempdir");
-        let other_root = other.path().canonicalize().expect("canonicalize other root");
+        let other_root = other
+            .path()
+            .canonicalize()
+            .expect("canonicalize other root");
 
         let err =
             within_repos_root(&[root], &other_root).expect_err("must reject path outside root");
-        assert!(err.to_string().contains("outside"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("outside"),
+            "unexpected error: {err}"
+        );
     }
 
     #[cfg(unix)]
@@ -235,13 +241,19 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().canonicalize().expect("canonicalize root");
         let outside = tempfile::tempdir().expect("outside tempdir");
-        let outside_root = outside.path().canonicalize().expect("canonicalize outside root");
+        let outside_root = outside
+            .path()
+            .canonicalize()
+            .expect("canonicalize outside root");
 
         let link = root.join("escape-link");
         std::os::unix::fs::symlink(&outside_root, &link).expect("create symlink");
 
         let err = within_repos_root(&[root], &link).expect_err("must reject symlink escape");
-        assert!(err.to_string().contains("outside"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("outside"),
+            "unexpected error: {err}"
+        );
     }
 
     /// P4.1 security review W1: a *dangling* symlink (target doesn't exist)

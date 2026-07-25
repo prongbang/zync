@@ -419,8 +419,8 @@ async fn diff_compare_commit(
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
-    let patch =
-        zync_git_core::diff_commit_to_workdir(repository.path, &commit_id).map_err(internal_error)?;
+    let patch = zync_git_core::diff_commit_to_workdir(repository.path, &commit_id)
+        .map_err(internal_error)?;
     Ok(cap_diff(patch, max_bytes(&query)))
 }
 
@@ -690,8 +690,13 @@ async fn delete_remote_branch(
         .as_deref()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "branch is required".to_string()))?;
     let spec = credentials::resolve_credential_spec(&state, &auth.id, &repository.path, remote)?;
-    zync_git_core::delete_remote_branch_with_credentials(&repository.path, remote, branch, Some(&spec))
-        .map_err(map_git_error)?;
+    zync_git_core::delete_remote_branch_with_credentials(
+        &repository.path,
+        remote,
+        branch,
+        Some(&spec),
+    )
+    .map_err(map_git_error)?;
     broadcast_git_change(&state, &id, &["branches"]);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1834,12 +1839,18 @@ mod tests {
     fn map_git_error_preserves_readable_body() {
         let (status, body) = map_git_error(git_error(zync_git_core::GitErrorKind::Auth));
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(body.contains("boom"), "body should keep the raw detail: {body}");
+        assert!(
+            body.contains("boom"),
+            "body should keep the raw detail: {body}"
+        );
     }
 
     #[test]
     fn parse_pull_mode_defaults_to_ff_only() {
-        assert_eq!(parse_pull_mode(None).unwrap(), zync_git_core::PullMode::FfOnly);
+        assert_eq!(
+            parse_pull_mode(None).unwrap(),
+            zync_git_core::PullMode::FfOnly
+        );
         assert_eq!(
             parse_pull_mode(Some("ff-only")).unwrap(),
             zync_git_core::PullMode::FfOnly

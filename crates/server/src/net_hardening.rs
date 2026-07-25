@@ -70,9 +70,7 @@ fn parse_origins(origins_env: &str) -> Vec<HeaderValue> {
                 // Silently dropping this would let an operator believe a
                 // typo'd/malformed entry is allow-listed when it never made
                 // it into the CORS layer at all.
-                tracing::warn!(
-                    "ZYNC_CORS_ORIGINS: ignoring invalid origin {s:?}: {error}"
-                );
+                tracing::warn!("ZYNC_CORS_ORIGINS: ignoring invalid origin {s:?}: {error}");
                 None
             }
         })
@@ -425,7 +423,10 @@ mod tests {
             .unwrap();
 
         let headers = response.headers();
-        assert_eq!(headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
+        assert_eq!(
+            headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+            "nosniff"
+        );
         assert_eq!(headers.get(header::X_FRAME_OPTIONS).unwrap(), "DENY");
         assert_eq!(headers.get(header::REFERRER_POLICY).unwrap(), "same-origin");
         let csp = headers
@@ -461,12 +462,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            response.headers().get(header::CONTENT_SECURITY_POLICY).unwrap(),
+            response
+                .headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .unwrap(),
             "sandbox"
         );
         // The layer still fills in headers the handler didn't set itself.
         assert_eq!(
-            response.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+            response
+                .headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .unwrap(),
             "nosniff"
         );
     }
@@ -522,8 +529,7 @@ mod tests {
         // first minute of a flaky connection; the generous ws-ticket limit
         // must absorb that without 429ing.
         let app = with_ws_ticket_rate_limit(
-            axum::Router::<Arc<AppState>>::new()
-                .route("/auth/ws-ticket", post(|| async { "ok" })),
+            axum::Router::<Arc<AppState>>::new().route("/auth/ws-ticket", post(|| async { "ok" })),
         )
         .with_state(app_state());
 
@@ -622,7 +628,11 @@ mod tests {
                 .unwrap();
             request.extensions_mut().insert(peer([10, 0, 0, 1]));
             let response = app.clone().oneshot(request).await.unwrap();
-            assert_eq!(response.status(), StatusCode::OK, "client {xff} should get its own bucket");
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "client {xff} should get its own bucket"
+            );
         }
 
         // The SAME forwarded client hitting again immediately does exhaust
