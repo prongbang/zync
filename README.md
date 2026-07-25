@@ -129,6 +129,34 @@ without it, credential operations are disabled with a clear error. For local
 development only, `ZYNC_DEV=1` falls back to a fixed all-zero key (never use it
 for real secrets — the database must not leave the dev machine).
 
+## Operations
+
+### Observability
+
+Every request gets an `X-Request-Id` header — honored if the caller already
+supplies one, generated otherwise, and always echoed back on the response —
+threaded into every log line for correlation. Set `ZYNC_LOG_FORMAT=json` to
+switch logging to structured JSON output (the same `RUST_LOG`/filtering rules
+apply either way). Three endpoints back monitoring and orchestration:
+
+- `GET /health` — liveness: no I/O, always `200`.
+- `GET /ready` — readiness: does a cheap, non-mutating DB read.
+- `GET /metrics` — Prometheus text metrics; requires an authenticated admin
+  session.
+
+In local dev, `/health` is proxied by Vite (see the proxy list above); `/ready`
+and `/metrics` aren't, so hit them directly against the API port, e.g.
+`http://127.0.0.1:58271/ready`.
+
+### Production deployment & backups
+
+- [docs/DEPLOY.md](docs/DEPLOY.md) — the full `ZYNC_*` environment variable
+  reference, a TLS-terminating reverse-proxy setup (nginx/Caddy), and
+  health/readiness probe wiring for an orchestrator.
+- [docs/BACKUP.md](docs/BACKUP.md) — backing up and restoring `zync.db`
+  (SQLite WAL-safe online backup, restore steps, and the `ZYNC_SECRET_KEY`
+  rotation caveat for encrypted credentials).
+
 ## Repository Flow
 
 Zync manages repositories that the server process can see on disk.

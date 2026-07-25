@@ -975,11 +975,15 @@ the operator believed was locked.
   (or a thin `FromRequestParts` newtype), replacing every hardcoded `DEFAULT_USER_ID`. Putting auth in one
   layer (not per-handler) means a newly-added route is authenticated by default — you must *opt out*, not
   remember to opt in.
-- **Unauthenticated allowlist (the only open routes):** `POST /auth/login`, `GET /health`, the setup-token
+- **Unauthenticated allowlist (the only open routes):** `POST /auth/login`, `GET /health`, `GET /ready`
+  (added by P5.3 — an orchestrator's readiness check must not itself require a session, same reasoning as
+  `/health`; unlike `/health` it does touch the DB, but that's a cheap read, not auth), the setup-token
   flow (`/setup*`), and the SPA static assets / index fallback (so the login page itself can load). The
   allowlist is matched inside the middleware by exact path; **everything else requires a session**, including
   `/auth/logout`, `/auth/me`, all `/repositories/*`, `/workspace/*`, `/files/*`, `/collaboration/*`,
-  `/credentials/*`, and the WS route.
+  `/credentials/*`, and the WS route. `GET /metrics` (also P5.3) is deliberately **not** in this allowlist —
+  it exposes internal operational state, so it requires a session plus an `admin` role check inside the
+  handler itself (see `crates/server/src/observability.rs`, and `docs/DEPLOY.md` §5 for probe wiring).
 - **`GET /auth/me`** returns the current `AuthUser` (id, email, name, role) or `401` — the frontend's
   session-probe on load and the seam for the 401-interceptor→login-redirect (P3.4).
 - **WebSocket auth — short-lived single-use ticket (recommended over cookie-on-WS).** The browser *does* send

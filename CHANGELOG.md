@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Observability (P5.3)** — per-request `X-Request-Id` correlation (honored
+  if the caller supplies a well-formed id, generated otherwise, always echoed
+  back on the response), `ZYNC_LOG_FORMAT=json` for structured log output,
+  `GET /health` (liveness, no I/O), `GET /ready` (readiness, a non-mutating DB
+  read), and `GET /metrics` (Prometheus text exposition, gated to
+  authenticated admins).
+- **Production docs** — `docs/BACKUP.md` (a `zync.db` backup/restore runbook
+  covering WAL-mode online-backup hazards, bare-metal and Docker Compose
+  variants, and the `ZYNC_SECRET_KEY` rotation caveat) and `docs/DEPLOY.md`
+  (the full `ZYNC_*` environment variable reference, nginx/Caddy TLS
+  reverse-proxy examples, and health/readiness probe wiring for an
+  orchestrator).
+
 ## [0.1.0] - 2026-07-25
 
 First tagged release. Zync is a Fork-inspired Git workspace client: a Rust/Axum
