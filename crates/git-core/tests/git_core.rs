@@ -968,6 +968,80 @@ fn rebase_branch_rejects_option_like_upstream_and_does_not_shell_out() {
         .is_empty());
 }
 
+/// `pull` shells out to `git pull` with a caller-supplied remote name. Before the `--` guard, a
+/// remote name of `--upload-pack=<cmd>` was parsed by git as an option, and with a *local*
+/// transport (`branch = "."` — the repo itself is a valid git repo) git runs `<cmd>` as the
+/// upload-pack program: remote-code-execution reachable from an effectively unauthenticated HTTP
+/// body. This asserts the injected command never runs.
+#[test]
+fn pull_rejects_upload_pack_argv_injection_and_runs_no_command() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    init_repo_with_commit(temp.path(), "README.md", "hello");
+
+    let marker = temp.path().join("PWNED");
+    let hostile_remote = format!("--upload-pack=touch {}", marker.display());
+
+    let result = zync_git_core::pull_with_credentials(
+        temp.path(),
+        Some(&hostile_remote),
+        Some("."),
+        zync_git_core::PullMode::Merge,
+        None,
+    );
+    // Post-fix the hostile remote is just a bogus repository positional, so the pull fails — but
+    // the only thing that matters for the vulnerability is that no command ran.
+    assert!(
+        result.is_err(),
+        "pull with an option-like remote name must fail, not succeed"
+    );
+    assert!(
+        !marker.exists(),
+        "pull must never let an --upload-pack=<cmd> remote name execute a command"
+    );
+}
+
+/// `set_upstream` shells out to `git branch --set-upstream-to=<x> <branch>` with caller-supplied,
+/// HTTP-sourced values. A branch value beginning with `-` (e.g. `-D`/`-m`) would be parsed by `git
+/// branch` as a destructive flag without the guard. Because `set_upstream` exposes only ONE trailing
+/// positional, a runtime "did it delete a branch" test proves nothing (bare `git branch -D` with no
+/// target errors either way) — so this asserts the constructed argv SHAPE via the pure
+/// `set_upstream_args` helper the real function uses: the upstream must be glued with `=`, and a `--`
+/// must sit immediately before the `branch` positional. Removing either guard fails this test.
+#[test]
+fn set_upstream_args_glues_upstream_and_terminates_options_before_branch() {
+    let args = zync_git_core::set_upstream_args("origin", "main", "-D");
+    assert_eq!(
+        args,
+        vec![
+            "branch".to_string(),
+            "--set-upstream-to=origin/main".to_string(),
+            "--".to_string(),
+            "-D".to_string(),
+        ],
+        "upstream must be glued with `=` and `--` must immediately precede the branch positional"
+    );
+
+    // Guard the two invariants explicitly so a future refactor that reorders args still trips.
+    let sep = args
+        .iter()
+        .position(|a| a == "--")
+        .expect("a `--` separator must be present");
+    assert_eq!(
+        args.last().map(String::as_str),
+        Some("-D"),
+        "the user-controlled branch must be the final positional"
+    );
+    assert_eq!(
+        sep,
+        args.len() - 2,
+        "`--` must sit immediately before the branch positional, nothing after it but the branch"
+    );
+    assert!(
+        !args.iter().any(|a| a == "--set-upstream-to"),
+        "the upstream must be glued (`--set-upstream-to=...`), never a separate option token"
+    );
+}
+
 #[test]
 fn revert_merge_commit_requires_mainline_and_succeeds_with_it() {
     let temp = tempfile::tempdir().expect("tempdir");

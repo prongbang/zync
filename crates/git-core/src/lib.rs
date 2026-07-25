@@ -560,6 +560,23 @@ fn pull_via_cli(
     mode: PullMode,
     spec: &CredentialSpec,
 ) -> anyhow::Result<String> {
+    // `remote_name` and `branch_name` both originate from an HTTP request body (effectively
+    // unauthenticated — auth is a stub) and are passed as positionals to `git pull`. A leading-dash
+    // value is parsed as an option: `--upload-pack=<cmd>` (and `--receive-pack=`) makes git run an
+    // arbitrary program over a local transport — e.g. `remote_name = "--upload-pack=sh -c '<cmd>'"`
+    // with `branch_name = "."` is remote-code-execution.
+    //
+    // Unlike every other porcelain here, `git pull` does NOT honor a `--` separator: it re-parses
+    // and forwards its positionals to `git fetch`, so `--upload-pack=<cmd>` still executes even
+    // after `--` (verified empirically — merge and rebase both). The only reliable guard is to
+    // refuse any positional that begins with `-`. That fully closes the surface: each slice element
+    // is exactly one argv token (git never word-splits within a token), so a value must literally
+    // start with `-` to be misread as an option, and a legitimate remote name or branch never does.
+    for (label, value) in [("remote", remote_name), ("branch", branch_name)] {
+        if value.starts_with('-') {
+            anyhow::bail!("invalid {label} '{value}': must not begin with '-'");
+        }
+    }
     let args: Vec<&str> = match mode {
         PullMode::Merge => vec!["pull", remote_name, branch_name],
         PullMode::Rebase => vec!["pull", "--rebase", remote_name, branch_name],
@@ -665,7 +682,10 @@ pub fn delete_remote(path: impl AsRef<Path>, name: &str) -> anyhow::Result<()> {
 }
 
 pub fn prune_remote(path: impl AsRef<Path>, remote_name: &str) -> anyhow::Result<String> {
-    run_git(path.as_ref(), &["remote", "prune", remote_name])
+    // `--`: `remote_name` comes from an HTTP request body. Terminate option parsing before it so
+    // a leading-dash value can't be misparsed as a `git remote prune` flag (defense in depth;
+    // `git remote prune` supports `--`).
+    run_git(path.as_ref(), &["remote", "prune", "--", remote_name])
 }
 
 pub fn delete_remote_branch(
@@ -719,17 +739,35 @@ pub fn push_tag_with_credentials(
     Ok(format!("pushed tag {tag} to {remote_name}"))
 }
 
+/// Builds the `git branch` argv for [`set_upstream`]. Extracted as a pure function so the argv
+/// *shape* — the security-critical part — can be asserted directly in a test (the runtime effect
+/// alone can't distinguish the hardened form from the vulnerable one, since `set_upstream` exposes
+/// only a single trailing positional). `remote_name`/`remote_branch`/`branch` all come from an HTTP
+/// request body, so two guards:
+///   1. The upstream is passed in the `--set-upstream-to=<value>` glued form, so a value beginning
+///      with `-` can't be consumed as a separate option.
+///   2. A `--` terminates option parsing before the `branch` positional, so a name like `-D` can't
+///      be reinterpreted as a `git branch` flag (which include destructive ones like `-D`/`-m`).
+///      `git branch` honors `--` (verified).
+#[doc(hidden)]
+pub fn set_upstream_args(remote_name: &str, remote_branch: &str, branch: &str) -> Vec<String> {
+    vec![
+        "branch".to_string(),
+        format!("--set-upstream-to={remote_name}/{remote_branch}"),
+        "--".to_string(),
+        branch.to_string(),
+    ]
+}
+
 pub fn set_upstream(
     path: impl AsRef<Path>,
     branch: &str,
     remote_name: &str,
     remote_branch: &str,
 ) -> anyhow::Result<String> {
-    let upstream = format!("{remote_name}/{remote_branch}");
-    run_git(
-        path.as_ref(),
-        &["branch", "--set-upstream-to", &upstream, branch],
-    )
+    let args = set_upstream_args(remote_name, remote_branch, branch);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_git(path.as_ref(), &arg_refs)
 }
 
 pub fn push_force_with_lease(
@@ -1865,11 +1903,14 @@ pub fn lfs_install(path: impl AsRef<Path>) -> anyhow::Result<String> {
 }
 
 pub fn lfs_track(path: impl AsRef<Path>, pattern: &str) -> anyhow::Result<String> {
-    run_git(path.as_ref(), &["lfs", "track", pattern])
+    // `--`: `pattern` comes from an HTTP request body; terminate flag parsing so a leading-dash
+    // value can't be misparsed as a `git lfs track` flag (git-lfs uses pflag, which honors `--`).
+    run_git(path.as_ref(), &["lfs", "track", "--", pattern])
 }
 
 pub fn lfs_untrack(path: impl AsRef<Path>, pattern: &str) -> anyhow::Result<String> {
-    run_git(path.as_ref(), &["lfs", "untrack", pattern])
+    // `--`: see `lfs_track`.
+    run_git(path.as_ref(), &["lfs", "untrack", "--", pattern])
 }
 
 pub fn lfs_pull(path: impl AsRef<Path>) -> anyhow::Result<String> {
@@ -1877,7 +1918,10 @@ pub fn lfs_pull(path: impl AsRef<Path>) -> anyhow::Result<String> {
 }
 
 pub fn lfs_push(path: impl AsRef<Path>, remote_name: &str, branch: &str) -> anyhow::Result<String> {
-    run_git(path.as_ref(), &["lfs", "push", remote_name, branch])
+    // `--`: `remote_name`/`branch` come from an HTTP request body; terminate flag parsing before
+    // the positionals so a leading-dash value can't be misparsed as a `git lfs push` flag
+    // (git-lfs uses pflag, which honors `--`).
+    run_git(path.as_ref(), &["lfs", "push", "--", remote_name, branch])
 }
 
 pub fn cherry_pick(path: impl AsRef<Path>, commit_ids: &[String]) -> anyhow::Result<()> {
