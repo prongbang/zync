@@ -45,6 +45,13 @@ pub fn list_workspace_files(root: impl AsRef<Path>) -> anyhow::Result<Vec<FileNo
 }
 
 fn spawn_workspace_watcher(workspace_id: String, root: PathBuf, hub: WorkspaceHub) {
+    // Resolve symlinks up front. On macOS the FSEvents backend reports every event
+    // path in canonical form (e.g. `/private/tmp/...` for a repo registered under
+    // `/tmp/...`), so if we strip against the raw, un-canonicalized root the prefix
+    // never matches and every raw file change is silently dropped. Canonicalizing the
+    // root here keeps `strip_prefix` in `event_for_path` aligned with what the watcher
+    // actually delivers (also covers `/var`, symlinked homes, and Docker mounts).
+    let root = resolve_watch_root(&root);
     thread::spawn(move || {
         let (tx, rx) = channel();
         let mut watcher = match RecommendedWatcher::new(tx, Config::default()) {
@@ -92,11 +99,20 @@ fn spawn_workspace_watcher(workspace_id: String, root: PathBuf, hub: WorkspaceHu
     });
 }
 
+/// Canonicalize the watch root so it matches the (symlink-resolved) paths the notify
+/// backend reports. Falls back to the raw path when canonicalization fails (e.g. the
+/// directory does not exist yet) so watching still starts and fails loudly at `watch()`
+/// for that non-existent-dir case.
+fn resolve_watch_root(root: &Path) -> PathBuf {
+    fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+}
+
 fn event_for_path(root: &Path, kind: &EventKind, path: PathBuf) -> Option<WorkspaceEvent> {
     let relative = path
         .strip_prefix(root)
         .ok()
-        .map(|relative| relative.to_string_lossy().to_string())?;
+        .map(|relative| relative.to_string_lossy().to_string())
+        .filter(|relative| !relative.is_empty())?;
     let event_kind = match kind {
         EventKind::Create(_) => {
             if path.is_dir() {
@@ -156,6 +172,78 @@ fn broadcast_batch(
     let mut batch = WorkspaceEvent::new("workspace_batch");
     batch.payload = serde_json::json!({ "events": events });
     hub.broadcast(workspace_id, batch);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::{CreateKind, ModifyKind};
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_watch_root_canonicalizes_symlinked_prefix() {
+        // A repo registered under a symlinked path (on macOS `/tmp` -> `/private/tmp`,
+        // but reproduced explicitly here so it also exercises symlink resolution on
+        // Linux CI where `temp_dir()` has no symlinked prefix): the FSEvents backend
+        // reports events under the canonical path, so the watch root must be
+        // canonicalized to keep `strip_prefix` matching. This is the regression that
+        // dropped every raw file-change event.
+        let base = std::env::temp_dir().join(format!("zync-sync-test-{}", std::process::id()));
+        fs::remove_dir_all(&base).ok();
+        let real = base.join("real-repo");
+        fs::create_dir_all(&real).unwrap();
+        let link = base.join("link-repo");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // Resolving the symlinked path must yield the canonical real target, not the
+        // link path notify was handed.
+        let resolved = resolve_watch_root(&link);
+        let canonical_real = fs::canonicalize(&real).unwrap();
+        assert_eq!(resolved, canonical_real);
+        assert_ne!(resolved, link);
+
+        // A file event delivered under the canonical (real) root must strip against the
+        // resolved root and yield the correct relative path — the end-to-end effect of
+        // the fix.
+        let file = canonical_real.join("changed.txt");
+        let event = event_for_path(
+            &resolved,
+            &EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content)),
+            file,
+        )
+        .expect("canonical event path should strip against resolved root");
+        assert_eq!(event.kind, "file_changed");
+        assert_eq!(event.path.as_deref(), Some("changed.txt"));
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn resolve_watch_root_falls_back_when_missing() {
+        let missing = PathBuf::from("/this/path/does/not/exist/zync");
+        assert_eq!(resolve_watch_root(&missing), missing);
+    }
+
+    #[test]
+    fn event_for_path_skips_the_root_itself() {
+        let root = PathBuf::from("/private/tmp/repo");
+        assert!(
+            event_for_path(&root, &EventKind::Create(CreateKind::Folder), root.clone()).is_none(),
+            "an event for the watched root itself must not produce an empty-path event"
+        );
+    }
+
+    #[test]
+    fn event_for_path_ignores_paths_outside_root() {
+        let root = PathBuf::from("/private/tmp/repo");
+        let outside = PathBuf::from("/private/tmp/other/file.txt");
+        assert!(event_for_path(
+            &root,
+            &EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content)),
+            outside
+        )
+        .is_none());
+    }
 }
 
 fn visit(root: &Path, current: &Path, nodes: &mut Vec<FileNode>) -> anyhow::Result<()> {
