@@ -4,6 +4,23 @@ services:
     environment:
       ZYNC_BIND: 0.0.0.0:58271
       ZYNC_DB: /data/zync.db
+      # Required for the encrypted credential store (HTTPS tokens / SSH keys).
+      # Without it, credential create/decrypt fails, so cloning/fetching private
+      # repos from the UI won't work. Generate one with: openssl rand -base64 32
+      # ZYNC_SECRET_KEY: "<base64-encoded 32-byte key>"
+      #
+      # Auth defaults to "enabled" (every request needs a session). Bootstrap the
+      # first admin via these, or the /setup page on first run. Set
+      # ZYNC_AUTH: "disabled" only for a trusted single-user host.
+      # ZYNC_ADMIN_USER: admin
+      # ZYNC_ADMIN_PASSWORD: "<choose a strong password>"
+      #
+      # Restrict which host paths may be registered as repositories (defense in
+      # depth). Colon-separated allowlist; should contain your mount below.
+      # ZYNC_REPOS_ROOT: /workspaces
+      #
+      # See docs/DEPLOY.md for the full environment-variable reference and a
+      # TLS-terminating reverse-proxy setup.
     ports:
       - "58271:58271"
     volumes:
