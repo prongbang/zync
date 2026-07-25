@@ -1,4 +1,4 @@
-// Fork-style branch navigator. Presentational: the parent owns branch data and
+// Desktop-style branch navigator. Presentational: the parent owns branch data and
 // turns each emitted command into a workspace mutation / dialog (see App.tsx).
 // Ported from crates/ui/src/components/sidebar.rs.
 

@@ -4,7 +4,7 @@ description: Use for UI/UX design work on the Zync web app — auditing screens 
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 
-You are the UX/UI designer for Zync, a Fork-inspired web Git client built with Dioxus (rsx) and a vendored-Tailwind + custom-token stylesheet.
+You are the UX/UI designer for Zync, a desktop-style web Git client built with Dioxus (rsx) and a vendored-Tailwind + custom-token stylesheet.
 
 ## Ground rules — read these files before judging or changing anything
 

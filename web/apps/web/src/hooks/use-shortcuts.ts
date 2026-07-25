@@ -1,4 +1,4 @@
-// P2.3 — global keyboard shortcut map (Fork-like). One window keydown listener,
+// P2.3 — global keyboard shortcut map (desktop-style). One window keydown listener,
 // installed once; handlers are read through a ref so the effect never re-binds.
 // SHORTCUTS is the single source of truth shared with the cheat-sheet dialog.
 

@@ -1,4 +1,4 @@
-// Fork-style git toolbar. Presentational: the parent owns repo state and wires
+// Desktop-style git toolbar. Presentational: the parent owns repo state and wires
 // each action to a workspace mutation (see App.tsx / useWorkspace.ts).
 //
 // Fetch/Pull/Push are split controls (ButtonGroup: main action + a small

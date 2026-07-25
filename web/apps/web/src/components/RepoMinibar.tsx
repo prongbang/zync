@@ -34,7 +34,7 @@ function readExpanded(): boolean {
 }
 
 // Persistent far-left rail for switching between registered repositories —
-// VS Code activity bar / Fork repo rail. Always visible on desktop (hidden on
+// VS Code activity bar / desktop Git client repo rail. Always visible on desktop (hidden on
 // mobile, where the branches sheet lists repositories instead). Collapsed it
 // shows monogram avatars with tooltips; expanded it shows avatar + repo name.
 // A "+" trigger above the collapse toggle opens the Add/Clone/Init dialog,

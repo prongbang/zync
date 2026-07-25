@@ -1,4 +1,4 @@
-// Barrel for the Fork-style git dialogs. Each is a presentational component:
+// Barrel for the desktop-style git dialogs. Each is a presentational component:
 // controlled open state in, typed payload out on submit.
 
 export { AddRepositoryDialog } from "./AddRepositoryDialog"

@@ -1,6 +1,6 @@
 # Zync
 
-A Fork-inspired Git workspace client you run yourself: a single Rust binary that
+A self-hosted, desktop-style Git workspace client: a single Rust binary that
 serves a fast React web UI — commit graph, diffs, branches, remotes, and live
 sync — over your Git repositories on disk.
 

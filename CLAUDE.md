@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Zync is a Fork-inspired Git workspace client: a Rust workspace with an Axum API server, a SQLite-backed repository registry, and a React 19 + Vite + TypeScript web app. The server operates on Git repositories that exist on disk where the server process runs (local paths in dev, mounted volumes in Docker) — there is no server-side clone storage beyond what the user registers.
+Zync is a self-hosted, desktop-style Git workspace client: a Rust workspace with an Axum API server, a SQLite-backed repository registry, and a React 19 + Vite + TypeScript web app. The server operates on Git repositories that exist on disk where the server process runs (local paths in dev, mounted volumes in Docker) — there is no server-side clone storage beyond what the user registers.
 
 ## Workspace layout
 

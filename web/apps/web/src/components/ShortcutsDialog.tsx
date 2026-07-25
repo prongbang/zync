@@ -26,7 +26,7 @@ export function ShortcutsDialog({
         <DialogHeader>
           <DialogTitle>Keyboard shortcuts</DialogTitle>
           <DialogDescription>
-            Fork-style shortcuts for mouse-free navigation.
+            Desktop-style shortcuts for mouse-free navigation.
           </DialogDescription>
         </DialogHeader>
         <dl className="flex flex-col gap-1">

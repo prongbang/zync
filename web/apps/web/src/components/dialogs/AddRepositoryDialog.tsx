@@ -350,7 +350,7 @@ export function AddRepositoryDialog({
 // Compact directory browser: text input (editable, commits on blur/Enter) +
 // a drill-down list backed by `api.directories()`. Selecting a row both
 // navigates into it and adopts it as the current value — there is no
-// separate "confirm" step, matching the Fork-style folder picker this ports.
+// separate "confirm" step, matching the desktop-style folder picker this ports.
 function DirectoryPicker({
   id,
   value,

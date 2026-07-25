@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2026-07-25
 
-First tagged release. Zync is a Fork-inspired Git workspace client: a Rust/Axum
+First tagged release. Zync is a self-hosted, desktop-style Git workspace client: a Rust/Axum
 API server backed by SQLite, operating on Git repositories on disk, with a
 React 19 + Vite web UI. This release folds together everything shipped across
 plan phases P0-P6.

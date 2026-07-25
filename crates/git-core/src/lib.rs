@@ -1993,7 +1993,7 @@ pub fn cherry_pick_abort(path: impl AsRef<Path>) -> anyhow::Result<()> {
 /// Rebases the currently checked-out branch onto `upstream` (a branch name, tag, or any revision
 /// `git rev-parse` can resolve) — the plain (non-interactive) counterpart to
 /// [`interactive_rebase`]. Implemented as a `git rebase <upstream>` shellout via [`run_git`]
-/// (Fork-parity pragmatism: replaying an entire branch's worth of commits one-by-one over
+/// (Pragmatism: replaying an entire branch's worth of commits one-by-one over
 /// libgit2, the way `interactive_rebase` does for an explicit step list, would just reimplement
 /// what the real `git rebase` already does correctly — including its own conflict bookkeeping —
 /// worse). `run_git` already hardens the shellout (`GIT_TERMINAL_PROMPT=0`, batch-mode SSH, a

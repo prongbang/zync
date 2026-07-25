@@ -2,11 +2,11 @@
 
 ## Product Direction
 
-Zync is a Fork-like Git workspace client for mounted repositories. The app should feel like a real desktop Git client first, with web access as a delivery surface.
+Zync is a desktop-style Git workspace client for mounted repositories. The app should feel like a real desktop Git client first, with web access as a delivery surface.
 
 Primary reference:
 
-- Fork desktop Git client UI from `https://git-fork.com/`
+- Established desktop Git client UI patterns.
 - Key reference surfaces: commit list, working directory changes, side-by-side diff, repository manager, merge conflict resolver, interactive rebase, history, blame, and line-by-line staging.
 
 Design goals:
@@ -171,7 +171,7 @@ Required UI:
 Purpose:
 
 - The daily Git client surface.
-- Match Fork's core feel: navigator + commit graph + working copy/diff.
+- Match a desktop Git client's core feel: navigator + commit graph + working copy/diff.
 
 Default desktop layout:
 
@@ -387,7 +387,7 @@ Validation:
 
 Purpose:
 
-- Visual rebase workflow similar to Fork.
+- Visual rebase workflow similar to desktop Git clients.
 
 Layout:
 
@@ -609,7 +609,7 @@ Keyboard shortcuts should be configurable later.
 
 ## Implementation Priority
 
-Priority 1: Fork-like main workspace
+Priority 1: Desktop-style main workspace
 
 - Make commit graph the center pane.
 - Move working copy and diff into a stronger bottom workflow area.
@@ -650,7 +650,7 @@ Priority 5: Polish and scale
 
 ## Definition Of Done
 
-The UI is Fork-like enough when:
+The UI feels like a desktop Git client when:
 
 - A user can open a mounted Git repository and immediately see branch tree, commit graph, working copy, and diff.
 - Fetch, pull, push, branch, commit, stash, cherry-pick, rebase, and conflict actions are reachable from the object they affect.
@@ -859,7 +859,7 @@ at all. The whole server acts as the one seeded `owner` user — `credentials` h
 (`crates/server/src/credentials/mod.rs:25`), `workspace_for_repository` seeds `workspace_members` with a
 literal `"owner"`/`"Owner"` row, and repositories have no owner column.
 
-Zync is a self-hosted, single-tenant tool (Fork-for-teams, not a SaaS). It needs **real password auth,
+Zync is a self-hosted, single-tenant Git client for teams (not a SaaS). It needs **real password auth,
 server-side sessions, and per-repository authorization** — while preserving today's zero-friction
 single-user LAN/dev experience so existing deploys don't break. Registration is **admin-invite, not open
 signup**: there is no public "create account" flow.

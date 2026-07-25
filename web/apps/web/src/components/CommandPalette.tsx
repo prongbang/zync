@@ -1,4 +1,4 @@
-// P2.3 — Fork-style command palette. Presentational: the parent (App) owns all
+// P2.3 — desktop-style command palette. Presentational: the parent (App) owns all
 // workspace state and passes the data to list plus one callback per action. The
 // palette itself only maps rows to shadcn Command primitives and closes on run.
 //

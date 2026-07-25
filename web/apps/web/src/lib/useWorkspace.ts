@@ -659,7 +659,7 @@ export function useWorkspace(): WorkspaceState {
     [runRemote],
   )
 
-  // Fork-style branch create with local-changes handling around the checkout.
+  // Desktop-style branch create with local-changes handling around the checkout.
   const createBranch = useCallback(
     (
       name: string,

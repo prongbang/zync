@@ -43,9 +43,9 @@ import type {
 // Which committed/working revision to preview for each side of an image diff.
 export type ImageDiffSide = "before" | "after"
 
-// Fork-style diff panel: inline / split / blame toolbar over a single file's
+// Desktop-style diff panel: inline / split / blame toolbar over a single file's
 // unified diff. Ported from crates/ui/src/components/diff.rs
-// (ForkCompactDiff / SplitDiffSection / BlameTable) — same hunk parser
+// (the compact-diff / split-diff / blame components) — same hunk parser
 // (diffHunks/splitDiffLines from @/lib/helpers). Neutral shadcn surfaces plus
 // functional --zync-diff-* highlight colors, per
 // web/.agents/skills/shadcn/SKILL.md.
