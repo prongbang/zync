@@ -84,6 +84,19 @@ impl AuthState {
         })
     }
 
+    /// Test-only constructor: other modules' tests (e.g. `repository::tests`)
+    /// need an `AuthState` but can't build the struct literal directly — the
+    /// `setup` field is private to this module.
+    #[cfg(test)]
+    pub(crate) fn disabled_for_test() -> Self {
+        Self {
+            mode: AuthMode::Disabled,
+            cookie_secure: false,
+            tickets: ticket::WsTicketStore::default(),
+            setup: Arc::new(Mutex::new(None)),
+        }
+    }
+
     fn set_setup_token(&self, token: String, expires_at: DateTime<Utc>) {
         *self.setup.lock().expect("setup token lock") = Some(SetupToken { token, expires_at });
     }
@@ -610,6 +623,7 @@ mod tests {
                 tickets: ticket::WsTicketStore::default(),
                 setup: Arc::new(Mutex::new(None)),
             },
+            repos_root: crate::repos_root::ReposRoot::default(),
         })
     }
 

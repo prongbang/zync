@@ -29,4 +29,5 @@ zeroize.workspace = true
 zync-git-core = { path = "../git-core" }
 
 [dev-dependencies]
+tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

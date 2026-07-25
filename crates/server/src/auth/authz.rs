@@ -456,6 +456,7 @@ mod tests {
                 tickets: crate::auth::ticket::WsTicketStore::default(),
                 setup: Arc::new(Mutex::new(None)),
             },
+            repos_root: crate::repos_root::ReposRoot::default(),
         })
     }
 

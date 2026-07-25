@@ -5,6 +5,7 @@ mod crypto;
 mod db;
 mod files;
 mod git;
+mod repos_root;
 mod repository;
 mod sync;
 mod websocket;
@@ -28,6 +29,10 @@ pub struct AppState {
     pub collaboration: collaboration::CollaborationState,
     pub secrets: crypto::KeyState,
     pub auth: auth::AuthState,
+    /// `ZYNC_REPOS_ROOT` filesystem boundary (P4.1). Empty/unconfigured
+    /// preserves today's unbounded behavior for existing single-user
+    /// deploys; see `repos_root` module docs.
+    pub repos_root: repos_root::ReposRoot,
 }
 
 #[tokio::main]
@@ -49,7 +54,21 @@ async fn main() -> anyhow::Result<()> {
         secrets: crypto::KeyState::load(),
         // Validates ZYNC_AUTH at boot — an unknown value refuses to start.
         auth: auth::AuthState::load()?,
+        // Validates ZYNC_REPOS_ROOT at boot — a configured-but-unresolvable
+        // root refuses to start (P4.1), same posture as ZYNC_AUTH above.
+        repos_root: repos_root::ReposRoot::load()?,
     });
+
+    // P4.1 rollout note: ZYNC_REPOS_ROOT is not required to boot (existing
+    // single-user LAN deploys keep working unbounded), but leaving it unset
+    // once auth is enabled means any authenticated user can register/clone/
+    // init an arbitrary host path. Warn loudly rather than silently allowing it.
+    if state.auth.mode == auth::AuthMode::Enabled && !state.repos_root.is_configured() {
+        tracing::warn!(
+            "multi-user without ZYNC_REPOS_ROOT lets any user mount arbitrary host paths — \
+             set ZYNC_REPOS_ROOT"
+        );
+    }
 
     // First-boot admin bootstrap (env or one-time /setup link) and the periodic
     // expired-session sweep (ADR-002).
