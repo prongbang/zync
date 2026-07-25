@@ -213,7 +213,7 @@ jobs:
           version="${{ needs.verify-version.outputs.version }}"
           target="${{ matrix.target }}"
           asset="zync-${version}-${target}.tar.gz"
-          tar -czf "$asset" -C "target/${target}/release" zync-server
+          tar -czf "$asset" -C "target/${target}/release" zync
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "$asset" > "${asset}.sha256"
           else

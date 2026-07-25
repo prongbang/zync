@@ -1,7 +1,7 @@
 #!/bin/sh
 # Zync installer.
 #
-# Downloads the prebuilt zync-server release binary (single binary, web UI
+# Downloads the prebuilt zync release binary (single binary, web UI
 # embedded) for the current OS/arch and installs it.
 #
 # Usage:
@@ -10,7 +10,7 @@
 # Environment overrides:
 #   ZYNC_VERSION      Install this version instead of the latest GitHub
 #                      release (e.g. ZYNC_VERSION=0.2.0). No leading "v".
-#   ZYNC_INSTALL_DIR   Install zync-server into this directory instead of the
+#   ZYNC_INSTALL_DIR   Install zync into this directory instead of the
 #                      default (/usr/local/bin if writable, else
 #                      $HOME/.local/bin).
 #
@@ -139,8 +139,8 @@ log "Verifying checksum..."
 log "Extracting..."
 tar -xzf "${TMP_DIR}/${ASSET}" -C "$TMP_DIR" || err "failed to extract ${ASSET}"
 
-[ -f "${TMP_DIR}/zync-server" ] || err "zync-server binary not found in ${ASSET} (unexpected archive layout)"
-chmod +x "${TMP_DIR}/zync-server"
+[ -f "${TMP_DIR}/zync" ] || err "zync binary not found in ${ASSET} (unexpected archive layout)"
+chmod +x "${TMP_DIR}/zync"
 
 # --- Choose install directory ----------------------------------------------
 
@@ -158,19 +158,19 @@ fi
 
 # --- Install -----------------------------------------------------------
 
-DEST="${INSTALL_DIR}/zync-server"
+DEST="${INSTALL_DIR}/zync"
 
 if [ -w "$INSTALL_DIR" ]; then
-  cp "${TMP_DIR}/zync-server" "$DEST"
+  cp "${TMP_DIR}/zync" "$DEST"
   chmod +x "$DEST"
 else
   log "Installing to ${INSTALL_DIR} requires elevated privileges."
-  sudo cp "${TMP_DIR}/zync-server" "$DEST"
+  sudo cp "${TMP_DIR}/zync" "$DEST"
   sudo chmod +x "$DEST"
 fi
 
 log ""
-log "Installed zync-server ${VERSION} to ${DEST}"
+log "Installed zync ${VERSION} to ${DEST}"
 
 case ":$PATH:" in
   *":${INSTALL_DIR}:"*) ;;
@@ -184,7 +184,7 @@ log "base64-encoded 32-byte key — generate one with:"
 log "  openssl rand -base64 32"
 log ""
 log "Quick start:"
-log "  ZYNC_SECRET_KEY=\$(openssl rand -base64 32) zync-server"
+log "  ZYNC_SECRET_KEY=\$(openssl rand -base64 32) zync serve"
 log "  # then open http://127.0.0.1:58271"
 log ""
 log "For production deployment (env vars, TLS, backups), see:"

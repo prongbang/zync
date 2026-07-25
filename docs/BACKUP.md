@@ -111,14 +111,14 @@ above is the practical option unless you add `sqlite3` to the image.
 
 SQLite is single-writer: **stop the server before replacing the DB file.**
 The server holds one shared `Arc<Mutex<Connection>>` for its own writes, but
-nothing stops a second process (a stray `zync-server`, a `sqlite3` shell)
+nothing stops a second process (a stray `zync`, a `sqlite3` shell)
 from opening the same file concurrently — always fully stop the service
 first.
 
 ### Bare-metal / systemd
 
 ```sh
-systemctl stop zync-server   # or however the process is supervised
+systemctl stop zync   # or however the process is supervised
 
 # Remove any WAL/SHM sidecars from the old file so nothing stale is replayed.
 rm -f /path/to/zync.db-wal /path/to/zync.db-shm
@@ -129,7 +129,7 @@ cp /backups/zync-20260725-020000.db /path/to/zync.db
 # credentials were encrypted — see §4. Confirm it's set in the environment
 # the service will start with (e.g. the systemd unit's EnvironmentFile),
 # then start the service.
-systemctl start zync-server
+systemctl start zync
 ```
 
 ### Docker Compose
@@ -263,7 +263,7 @@ up for the first time):
 - [ ] Restore the backup into a **scratch environment** (a throwaway
       container or a second `ZYNC_DB` path), not production — pointed at the
       matching `ZYNC_SECRET_KEY` from your secrets store.
-- [ ] Start `zync-server` against the restored file; `/health` returns
+- [ ] Start `zync` against the restored file; `/health` returns
       `{"status":"ok",...}`.
 - [ ] `/ready` returns `{"status":"ready"}` (confirms the restored DB opened
       and answered a real query).

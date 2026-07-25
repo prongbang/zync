@@ -40,14 +40,14 @@ pub struct AppState {
     pub metrics: Arc<observability::Metrics>,
 }
 
-/// `zync-server` command line. There is one real action — running the server —
-/// exposed as the `serve` subcommand. It is also the DEFAULT: invoking
-/// `zync-server` with no subcommand runs the server, so the container
-/// `CMD ["zync-server"]`, the install script, and `docker-compose.yml` keep
-/// working unchanged. `clap` also provides `--help` and `--version` for free.
+/// `zync` command line. There is one real action — running the server —
+/// exposed as the `serve` subcommand. It is also the DEFAULT: invoking `zync`
+/// with no subcommand runs the server, so the container `CMD ["zync", "serve"]`,
+/// the install script, and `docker-compose.yml` keep working unchanged. `clap`
+/// also provides `--help` and `--version` for free.
 #[derive(clap::Parser)]
 #[command(
-    name = "zync-server",
+    name = "zync",
     version,
     about = "Zync — a self-hosted Git workspace server"
 )]

@@ -131,7 +131,7 @@ jobs:
           ZYNC_DB="$(mktemp -d)/zync.db" \
           ZYNC_BIND=127.0.0.1:58271 \
           ZYNC_STATIC_DIR="${{ github.workspace }}/web/apps/web/dist" \
-          nohup ./target/release/zync-server > server.log 2>&1 &
+          nohup ./target/release/zync serve > server.log 2>&1 &
           echo "Waiting for server to become healthy..."
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:58271/health > /dev/null; then

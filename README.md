@@ -16,11 +16,11 @@ Linux and macOS (x86_64 and arm64):
 curl -fsSL https://raw.githubusercontent.com/prongbang/zync/main/install.sh | sh
 ```
 
-This installs the `zync-server` binary (the web UI is embedded in it). Then run
-it and open <http://127.0.0.1:58271>:
+This installs the `zync` binary (the web UI is embedded in it). Then run it and
+open <http://127.0.0.1:58271>:
 
 ```sh
-ZYNC_SECRET_KEY="$(openssl rand -base64 32)" zync-server
+ZYNC_SECRET_KEY="$(openssl rand -base64 32)" zync serve
 ```
 
 A system `git` (and `ssh` for SSH remotes) must be installed. Override the
@@ -42,7 +42,7 @@ Requires Rust and [bun](https://bun.sh):
 ```sh
 cd web && bun install && cd apps/web && bun run build    # build the web UI
 cargo build --release -p zync-server --features embed-ui # embed it into the binary
-ZYNC_SECRET_KEY="$(openssl rand -base64 32)" ./target/release/zync-server
+ZYNC_SECRET_KEY="$(openssl rand -base64 32)" ./target/release/zync serve
 ```
 
 ---

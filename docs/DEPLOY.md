@@ -1,13 +1,13 @@
 # Production Deployment & TLS Guide
 
-This guide covers running `zync-server` in production: the full `ZYNC_*`
+This guide covers running `zync` in production: the full `ZYNC_*`
 environment variable surface, a TLS-terminating reverse proxy in front of the
 container (nginx and Caddy), health/readiness wiring for an orchestrator, and
 the gotchas specific to Zync's WebSocket live-sync and IP-based rate limiting.
 
 It assumes the Docker image described in `Dockerfile` / `docker-compose.yml`
 (bun → rust → debian multi-stage build, server binary at
-`/usr/local/bin/zync-server`, static React build baked into `/app/public`).
+`/usr/local/bin/zync`, static React build baked into `/app/public`).
 Everything below is verified against `crates/server/src/main.rs`,
 `crates/server/src/net_hardening.rs`, `crates/server/src/auth/mod.rs`,
 `crates/server/src/crypto/mod.rs`, `crates/server/src/repos_root.rs`, and
@@ -184,7 +184,7 @@ make the nginx/Caddy configs symmetric.
 ## 3. TLS
 
 Terminate TLS at the proxy (Caddy's automatic HTTPS, or nginx + certbot) —
-`zync-server` itself speaks plain HTTP and has no TLS support built in.
+`zync` itself speaks plain HTTP and has no TLS support built in.
 
 - Do **not** set `ZYNC_COOKIE_INSECURE` in production. The `zync_session`
   cookie is `HttpOnly; SameSite=Lax` and `Secure` by default
@@ -311,7 +311,7 @@ proxy's own hop to any preexisting header rather than blindly trusting a
 client-supplied value as the final one, and — more importantly — they're the
 last hop before the app, so the header they set is authoritative). If you
 ever put an *additional*, less-trusted proxy in front of the one talking to
-`zync-server`, re-verify that a client can't spoof the header the app
+`zync`, re-verify that a client can't spoof the header the app
 ultimately reads. Terminating TLS at a proxy without setting
 `ZYNC_TRUSTED_PROXY=1` doesn't break anything functionally, it just silently
 makes the app's own rate limiting ineffective — enforce rate limiting at the

@@ -51,9 +51,9 @@ Docker (production-shaped build/run):
 docker compose up --build
 ```
 
-`Dockerfile` is a three-stage build: an `oven/bun` stage runs `bun install` and `bun run build` for `web/apps/web` (output `web/apps/web/dist`), a `rust` stage builds a release `zync-server` binary, and a `debian:bookworm-slim` final stage copies both — the server serves the static React build from `ZYNC_STATIC_DIR` (default `/app/public`) with an index.html SPA fallback for any unmatched route.
+`Dockerfile` is a three-stage build: an `oven/bun` stage runs `bun install` and `bun run build` for `web/apps/web` (output `web/apps/web/dist`), a `rust` stage builds a release `zync` binary (package `zync-server`, `[[bin]] name = "zync"`), and a `debian:bookworm-slim` final stage copies both — the server serves the static React build from `ZYNC_STATIC_DIR` (default `/app/public`) with an index.html SPA fallback for any unmatched route.
 
-End-to-end tests live in `tests/e2e` (Playwright, plain npm): with both dev servers running, `cd tests/e2e && npm install && npm run audit` clicks through the UI flows in `audit.cjs` against a self-registered fixture repo. The audit targets `E2E_BASE_URL` (default `http://127.0.0.1:5173`); CI can point it instead at `http://127.0.0.1:58271` to exercise the production build served by `zync-server`.
+End-to-end tests live in `tests/e2e` (Playwright, plain npm): with both dev servers running, `cd tests/e2e && npm install && npm run audit` clicks through the UI flows in `audit.cjs` against a self-registered fixture repo. The audit targets `E2E_BASE_URL` (default `http://127.0.0.1:5173`); CI can point it instead at `http://127.0.0.1:58271` to exercise the production build served by `zync`.
 
 ## Architecture notes that span files
 

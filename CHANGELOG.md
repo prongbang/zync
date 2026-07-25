@@ -53,7 +53,7 @@ plan phases P0-P6.
   read), and `GET /metrics` (Prometheus text exposition, gated to authenticated
   admins).
 - **Single-binary distribution (P6)** — an `embed-ui` build feature that bakes
-  the web UI into `zync-server`, prebuilt single binaries for Linux and macOS
+  the web UI into the `zync` binary, prebuilt single binaries for Linux and macOS
   (x86_64 + aarch64) attached to every GitHub Release, and a `curl … | sh`
   installer (`install.sh`) that verifies a SHA-256 checksum before installing.
   The binary needs only a system `git` at runtime.
