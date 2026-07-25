@@ -12,6 +12,7 @@ axum-extra.workspace = true
 base64.workspace = true
 chacha20poly1305.workspace = true
 chrono.workspace = true
+clap = { version = "4", features = ["derive"] }
 futures-util.workspace = true
 # `embed-ui`-only: bakes web/apps/web/dist into the binary (rust-embed) and
 # resolves per-asset Content-Type (mime_guess). Both are `optional` and pulled

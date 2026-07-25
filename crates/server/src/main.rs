@@ -40,8 +40,38 @@ pub struct AppState {
     pub metrics: Arc<observability::Metrics>,
 }
 
+/// `zync-server` command line. There is one real action — running the server —
+/// exposed as the `serve` subcommand. It is also the DEFAULT: invoking
+/// `zync-server` with no subcommand runs the server, so the container
+/// `CMD ["zync-server"]`, the install script, and `docker-compose.yml` keep
+/// working unchanged. `clap` also provides `--help` and `--version` for free.
+#[derive(clap::Parser)]
+#[command(
+    name = "zync-server",
+    version,
+    about = "Zync — a self-hosted Git workspace server"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Run the HTTP server (the default when no subcommand is given).
+    Serve,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    match <Cli as clap::Parser>::parse().command {
+        Some(Command::Serve) | None => serve().await,
+    }
+}
+
+/// Boot and run the Zync HTTP server. All configuration is read from the
+/// environment (`ZYNC_*`; see the module docs and `docs/DEPLOY.md`).
+async fn serve() -> anyhow::Result<()> {
     // `ZYNC_LOG_FORMAT=json` switches to `tracing_subscriber`'s JSON
     // formatter for log aggregation (P5.3); default stays today's human
     // format. `EnvFilter`/`RUST_LOG` behavior is unchanged either way — only
