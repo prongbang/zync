@@ -16,40 +16,66 @@ workspace with an Axum API and SQLite-backed repository registry, and a React
 
 ## Features
 
-- Add local repositories or clone a remote repository into a local path.
-- Watch opened repositories and refresh status, diffs, files, branches, stashes,
-  conflicts, and commit graph through workspace events.
-- Review local changes, stage or unstage files, inspect changed files, and commit
-  from the footer composer.
-- Commit with amend, sign-off, and optional push-after-commit controls.
-- Fetch, pull, and push against remotes.
-- Browse commit history with an SVG lane graph (curved merge connectors),
-  branch/tag badges on commit rows, author, short SHA, and formatted dates.
-- Inspect commits with author/committer identities, ref badges, SHA, and parent
-  links in the detail panel.
-- Review side-by-side diffs with aligned removal/addition pairs and word-level
-  change highlighting.
-- Scroll large histories smoothly: the commit list is virtualized and live
-  sync refreshes only the data each event actually changed.
-- View repository statistics (commit count, contributors, commits per month)
-  from the Repository tab, and branch ahead/behind markers in the sidebar.
-- Switch between registered repositories from a Fork-style tab strip.
-- Create branches with Fork-style local-changes handling: keep them in place,
-  stash and reapply after checkout, or discard.
-- Right-click any commit for Fork-style actions: new branch/tag, rebase or
-  interactive rebase to here, reword/edit/squash/fixup/drop, reset, checkout,
-  cherry-pick, revert, save as patch, compare to local changes, and copy SHA.
-- See Gravatar avatars for authors and committers, and inspect per-line blame
-  (commit, author, code) for any file from the diff panel.
-- Checkout branches, merge branches, rebase branches, create branches, create
-  tags, rename branches, delete branches, and copy branch names from the branch
-  menu.
-- Checkout a branch or revision, create a branch from a revision, create and
-  delete tags, cherry-pick commits, revert commits, and run rebase controls from
-  Git Tools.
-- Manage stashes, remotes, remote branches, upstreams, and submodules.
-- Remove repositories from the Zync registry without deleting the repository from
-  disk.
+**Repositories & onboarding**
+
+- Add an existing local repository, clone from a URL, or `git init` a new
+  repository — all from the UI, with a built-in directory browser.
+- Switch between registered repositories from a collapsible project rail
+  (monogram strip that expands to full names), favorite them, or remove them
+  from the registry without deleting anything on disk.
+- Watch opened repositories and live-refresh only the data each filesystem or
+  git event actually changed (status, diffs, files, branches, tags, stashes,
+  conflicts, commit graph) over a WebSocket.
+
+**Remotes & credentials**
+
+- Fetch, fetch-all, pull (fast-forward / merge / rebase), and push — with
+  ahead/behind badges, force-push (with lease) behind a confirm, and
+  publish-branch (set-upstream) prompts.
+- Per-user encrypted credential store (HTTPS token or SSH key), so cloning,
+  fetching, pulling, and pushing private repositories works from the UI on a
+  host with no ambient git credentials. Secrets are encrypted at rest
+  (XChaCha20Poly1305) and never returned, logged, or echoed in errors.
+- Manage remotes (add / edit URL / rename / delete / prune, per-remote
+  fetch/pull/push) from the Git Tools panel.
+
+**History, search & diff**
+
+- Browse commit history with a virtualized SVG lane graph (curved merge
+  connectors), ref badges, author, short SHA, and dates.
+- Select any commit to see its full multi-file diff with a navigable file tree,
+  per-file inline/split views, word-level highlighting, and image before/after
+  previews.
+- Search commits by message / author / SHA (with in-window dimming) and across
+  full history including by touched file path.
+- Per-file history and per-line blame, with blame → jump-to-commit and
+  "open file at revision".
+
+**Branching & rewriting**
+
+- Create branches with Fork-style local-changes handling (keep / stash-reapply /
+  discard); checkout, merge (fast-forward / no-ff / squash), rebase a branch,
+  rename, delete, and drag a branch onto the current one to merge or rebase.
+- Tags panel: create, checkout, push, copy SHA, and delete (annotated and
+  lightweight).
+- Commit context menu: new branch/tag, rebase / interactive rebase to here,
+  reword/edit/squash/fixup/drop, reset, checkout, cherry-pick, revert (including
+  reverting merge commits with a mainline picker), save as patch, compare to
+  local changes, copy SHA.
+- Interactive rebase editor: a draggable / keyboard-reorderable todo list with
+  per-row pick/reword/edit/squash/fixup/drop and precondition guards.
+
+**Power tools & ergonomics**
+
+- Git Tools panel: reflog (checkout / branch / reset here), submodules
+  (init/update/sync/add/remove), and Git LFS (track/untrack, pull/push).
+- Command palette (⌘/Ctrl-P) over repos, branches, recent commits, and every
+  action, plus a keyboard-shortcut map and cheat sheet.
+- `git bisect` with a status banner and mark-good/bad/skip/reset.
+- Repository statistics (commit count, contributors, commits per month) and a
+  conflict resolver (ours/theirs) for merges and rebases.
+- Responsive layout: resizable panels on desktop, a single-column + sheet layout
+  on mobile.
 
 ## Run
 
@@ -92,10 +118,16 @@ Then open:
 http://127.0.0.1:5173/
 ```
 
-Vite proxies `/repositories`, `/workspace`, `/files`, `/auth`, `/collaboration`,
-`/health`, and `/ws` to the API at `http://127.0.0.1:58271` in dev (see
-`web/apps/web/vite.config.ts`). In production the server serves the built app
-same-origin, so no proxy is involved.
+Vite proxies `/repositories`, `/workspace`, `/auth`, `/credentials`,
+`/directories`, `/health`, and `/ws` to the API at `http://127.0.0.1:58271` in
+dev (see `web/apps/web/vite.config.ts`). In production the server serves the
+built app same-origin, so no proxy is involved.
+
+To use the encrypted credential store, set `ZYNC_SECRET_KEY` (a base64-encoded
+32-byte key) so stored HTTPS tokens and SSH keys can be encrypted at rest;
+without it, credential operations are disabled with a clear error. For local
+development only, `ZYNC_DEV=1` falls back to a fixed all-zero key (never use it
+for real secrets — the database must not leave the dev machine).
 
 ## Repository Flow
 
