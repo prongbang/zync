@@ -100,9 +100,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  github-release:
+  create-release:
     name: Create GitHub Release
-    needs: [verify-version, build-and-push]
+    needs: verify-version
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -128,6 +128,14 @@ jobs:
             exit 1
           fi
 
+      # This is the single writer of the release: it creates the release and
+      # its body exactly once, before any matrix leg in `binaries` uploads an
+      # asset. Uploading assets from N parallel matrix legs that each also
+      # tried to create the release would race on tag_name (softprops/
+      # action-gh-release@v3.0.2 documents this as matrix-fan-out flakiness —
+      # a 422 "already_exists" on the losing legs can intermittently drop
+      # their asset upload). `binaries` below only ever appends assets to the
+      # release this step creates, never touches `name`/`body_path` again.
       - name: Create release
         uses: softprops/action-gh-release@v3.0.2
         with:
@@ -135,3 +143,90 @@ jobs:
           name: v${{ needs.verify-version.outputs.version }}
           body_path: release-notes.md
           generate_release_notes: false
+
+  binaries:
+    name: Build binary (${{ matrix.target }})
+    needs: [verify-version, create-release]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: false
+          # aarch64-linux is cross-compiled from the ubuntu-latest (x86_64)
+          # runner via `cross`, which supplies a Docker sysroot with the
+          # target's OpenSSL/libgit2 toolchain already wired up for pkg-config
+          # — plain `cargo build --target` would fail to link a gnu-target
+          # binary this way without a manually-installed cross toolchain.
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          # macos-latest runners are Apple Silicon; x86_64-apple-darwin is
+          # built by cross-compiling with the same Xcode toolchain (no
+          # separate cross tool needed for Apple targets).
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build web app
+        run: |
+          set -euo pipefail
+          cd web
+          bun install
+          cd apps/web
+          bun run build
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked --version 0.2.5
+
+      - name: Build zync-server
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release -p zync-server --features embed-ui --target ${{ matrix.target }}
+          else
+            cargo build --release -p zync-server --features embed-ui --target ${{ matrix.target }}
+          fi
+
+      - name: Package tarball and checksum
+        run: |
+          set -euo pipefail
+          version="${{ needs.verify-version.outputs.version }}"
+          target="${{ matrix.target }}"
+          asset="zync-${version}-${target}.tar.gz"
+          tar -czf "$asset" -C "target/${target}/release" zync-server
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$asset" > "${asset}.sha256"
+          else
+            shasum -a 256 "$asset" > "${asset}.sha256"
+          fi
+
+      # Uploads (appends) this leg's assets to the release `create-release`
+      # already created — no `name`/`body_path` here, so this never races to
+      # create the release or touch its body, only adds files to it.
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v3.0.2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            zync-${{ needs.verify-version.outputs.version }}-${{ matrix.target }}.tar.gz
+            zync-${{ needs.verify-version.outputs.version }}-${{ matrix.target }}.tar.gz.sha256

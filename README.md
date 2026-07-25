@@ -79,6 +79,31 @@ workspace with an Axum API and SQLite-backed repository registry, and a React
 
 ## Run
 
+### Install script
+
+Install a prebuilt `zync-server` binary — the web UI is baked in (built with
+the `embed-ui` cargo feature), so there's nothing else to build or serve:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/prongbang/zync/main/install.sh | sh
+```
+
+Supported platforms: `x86_64`/`aarch64` Linux (glibc) and `x86_64`/`aarch64`
+macOS. The script detects your OS/arch, downloads the matching release
+tarball and its `.sha256` checksum, verifies it, and installs `zync-server`
+to `/usr/local/bin` (or `$HOME/.local/bin` if that isn't writable).
+`ZYNC_VERSION=0.2.0` pins a specific release instead of the latest, and
+`ZYNC_INSTALL_DIR=/some/path` overrides the install location. A system `git`
+(and `ssh` for SSH remotes) must be installed for Zync to operate on
+repositories. Then run it, e.g.:
+
+```sh
+ZYNC_SECRET_KEY=$(openssl rand -base64 32) zync-server
+```
+
+and open `http://127.0.0.1:58271/`. See [docs/DEPLOY.md](docs/DEPLOY.md) for
+production configuration.
+
 ### Docker
 
 Start the full app with the API and web UI in one container:
