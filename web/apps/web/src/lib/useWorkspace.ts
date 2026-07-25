@@ -885,9 +885,34 @@ export function useWorkspace(): WorkspaceState {
 
     const isStale = () => stopped || myGen !== generation
 
-    const connect = () => {
+    // Shared backoff used for both a dropped socket and a failed ticket fetch.
+    const scheduleReconnect = () => {
       if (isStale()) return
-      socket = new WebSocket(api.websocketUrl(workspaceId))
+      setLiveSyncOk(false)
+      attempts += 1
+      const delay = Math.min(2 ** Math.min(attempts, 5), 30)
+      setNotice(`Live sync offline - reconnecting in ${delay}s`)
+      timer = setTimeout(() => void connect(), delay * 1000)
+    }
+
+    // In ZYNC_AUTH=enabled the WS handshake REQUIRES a `?ticket=`; in disabled
+    // mode the server ignores it, so we always fetch one (safe either way).
+    // A 401 here means the session expired — the api client's 401 interceptor
+    // already fired the login redirect, so we just stop; any other failure
+    // (network) gets the same backoff as a dropped socket.
+    const connect = async () => {
+      if (isStale()) return
+      let ticket: string
+      try {
+        ticket = (await api.wsTicket(workspaceId)).ticket
+      } catch {
+        scheduleReconnect()
+        return
+      }
+      if (isStale()) return
+      socket = new WebSocket(
+        `${api.websocketUrl(workspaceId)}?ticket=${encodeURIComponent(ticket)}`,
+      )
       socket.onopen = () => {
         attempts = 0
         setLiveSyncOk(true)
@@ -907,15 +932,11 @@ export function useWorkspace(): WorkspaceState {
       }
       socket.onclose = () => {
         if (isStale()) return
-        setLiveSyncOk(false)
-        attempts += 1
-        const delay = Math.min(2 ** Math.min(attempts, 5), 30)
-        setNotice(`Live sync offline - reconnecting in ${delay}s`)
-        timer = setTimeout(connect, delay * 1000)
+        scheduleReconnect()
       }
       socket.onerror = () => socket?.close()
     }
-    connect()
+    void connect()
 
     return () => {
       stopped = true

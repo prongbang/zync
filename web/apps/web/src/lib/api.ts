@@ -43,6 +43,8 @@ import type {
   RepoStats,
   RepositoryRecord,
   RepositoryWithWorkspace,
+  CurrentUser,
+  WsTicketResponse,
   RevisionRequest,
   StashRequest,
   StashSummary,
@@ -54,6 +56,36 @@ import type {
   WorkspaceResponse,
   WriteFileRequest,
 } from "./types"
+
+/**
+ * Centralized 401 interceptor (P3.4). The app registers a single handler
+ * (clear workspace state + show the Login screen) via `setUnauthorizedHandler`;
+ * every request funnels its 401 through here, so a session that expires
+ * mid-session redirects to Login no matter which call surfaced it. Idempotent:
+ * calling it while already on Login is a no-op transition.
+ */
+type UnauthorizedHandler = () => void
+let unauthorizedHandler: UnauthorizedHandler | null = null
+
+export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): void {
+  unauthorizedHandler = handler
+}
+
+/**
+ * The one fetch seam every helper goes through. `credentials: "include"` sends
+ * the same-origin `zync_session` cookie (harmless when there is none / auth is
+ * disabled). A `401` fires the interceptor before the caller sees the error, so
+ * the session-expired → Login flow is centralized rather than per-call.
+ */
+async function request(url: string, init?: RequestInit): Promise<Response> {
+  const response = await fetch(url, { credentials: "include", ...init })
+  if (response.status === 401) {
+    unauthorizedHandler?.()
+  }
+  return response
+}
+
+const JSON_HEADERS = { "Content-Type": "application/json" }
 
 /** Reads the response body as text and throws it verbatim on non-2xx. */
 async function readOkOrThrow(response: Response): Promise<string> {
@@ -69,20 +101,20 @@ async function readOkOrThrow(response: Response): Promise<string> {
 }
 
 async function getJson<T>(url: string): Promise<T> {
-  const response = await fetch(url)
+  const response = await request(url)
   const text = await readOkOrThrow(response)
   return JSON.parse(text) as T
 }
 
 async function getText(url: string): Promise<string> {
-  const response = await fetch(url)
+  const response = await request(url)
   return readOkOrThrow(response)
 }
 
 async function postJson<T>(url: string, body: unknown): Promise<T> {
-  const response = await fetch(url, {
+  const response = await request(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: JSON_HEADERS,
     body: JSON.stringify(body ?? {}),
   })
   const text = await readOkOrThrow(response)
@@ -90,34 +122,34 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
 }
 
 async function postText(url: string, body: unknown): Promise<string> {
-  const response = await fetch(url, {
+  const response = await request(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: JSON_HEADERS,
     body: JSON.stringify(body ?? {}),
   })
   return readOkOrThrow(response)
 }
 
 async function postEmpty(url: string, body: unknown): Promise<void> {
-  const response = await fetch(url, {
+  const response = await request(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: JSON_HEADERS,
     body: JSON.stringify(body ?? {}),
   })
   await readOkOrThrow(response)
 }
 
 async function putEmpty(url: string, body: unknown): Promise<void> {
-  const response = await fetch(url, {
+  const response = await request(url, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: JSON_HEADERS,
     body: JSON.stringify(body ?? {}),
   })
   await readOkOrThrow(response)
 }
 
 async function del(url: string): Promise<void> {
-  const response = await fetch(url, { method: "DELETE" })
+  const response = await request(url, { method: "DELETE" })
   await readOkOrThrow(response)
 }
 
@@ -137,6 +169,36 @@ export class ZyncApi {
 
   private url(path: string): string {
     return `${this.baseUrl.replace(/\/+$/, "")}${path}`
+  }
+
+  // ---- Auth (P3.4) ----
+  // The session cookie is HttpOnly + same-origin, so the browser attaches it
+  // automatically (`request` also sets `credentials: "include"`). In
+  // `ZYNC_AUTH=disabled` mode the server answers these against the synthetic
+  // `owner`, so an auth-aware frontend stays transparent.
+
+  /** Current user, or throws (401 body) when unauthenticated — the load-time
+   * session probe and the seam the 401 interceptor keys off. */
+  async me(): Promise<CurrentUser> {
+    return getJson(this.url("/auth/me"))
+  }
+
+  /** Verifies credentials + sets the session cookie; resolves to the user on
+   * success, throws the server's generic error body on a bad login. */
+  async login(identifier: string, password: string): Promise<CurrentUser> {
+    return postJson(this.url("/auth/login"), { identifier, password })
+  }
+
+  /** Deletes the server-side session + clears the cookie. No-op success in
+   * disabled mode. */
+  async logout(): Promise<void> {
+    return postEmpty(this.url("/auth/logout"), {})
+  }
+
+  /** Mints a short-lived single-use WS handshake ticket bound to
+   * `(user, workspace)` — fetched immediately before each socket connect. */
+  async wsTicket(workspaceId: string): Promise<WsTicketResponse> {
+    return postJson(this.url("/auth/ws-ticket"), { workspace_id: workspaceId })
   }
 
   // ---- Repositories ----

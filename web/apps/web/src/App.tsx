@@ -61,6 +61,7 @@ import { RepoMinibar } from "./components/RepoMinibar"
 import { RepoStatsPanel } from "./components/RepoStatsPanel"
 import { ShortcutsDialog } from "./components/ShortcutsDialog"
 import { Toolbar } from "./components/Toolbar"
+import { UserMenu } from "./components/UserMenu"
 import {
   AddRepositoryDialog,
   BisectStartDialog,
@@ -86,11 +87,13 @@ import { formatCommitTime, gravatarSrc, shortId } from "./lib/format"
 import type {
   CommitSummary,
   CreateRepositoryRequest,
+  CurrentUser,
   RepositoryRecord,
 } from "./lib/types"
 import { useWorkspace } from "./lib/useWorkspace"
 
 type CenterMode = "changes" | "commits"
+type DetailTab = "commit" | "repository" | "tools"
 
 // The dialog currently open, carrying the data it needs.
 type ActiveDialog =
@@ -110,10 +113,20 @@ type ActiveDialog =
   | { kind: "bisectStart"; commitId: string }
   | null
 
-export function App() {
+export function App({
+  currentUser,
+  onLogout,
+}: {
+  currentUser: CurrentUser
+  onLogout: () => void
+}) {
   const ws = useWorkspace()
   const [selectedCommit, setSelectedCommit] = useState<string | null>(null)
   const [mode, setMode] = useState<CenterMode>("commits")
+  // Detail-aside tab + the Git Tools sub-tab, controlled so the header user menu
+  // can deep-link into the Credentials settings (P3.4).
+  const [detailTab, setDetailTab] = useState<DetailTab>("commit")
+  const [toolsTab, setToolsTab] = useState("remotes")
   const [message, setMessage] = useState("")
   const [blame, setBlame] = useState<BlameRow[] | null>(null)
   const [dialog, setDialog] = useState<ActiveDialog>(null)
@@ -272,6 +285,15 @@ export function App() {
   function openFileHistory(path: string) {
     if (path === "") return
     setFileHistoryTarget(path)
+  }
+
+  // Deep-link from the header user menu into the Git Tools → Credentials tab,
+  // which only renders in All Commits mode's detail aside (P3.4).
+  function openCredentials() {
+    setMode("commits")
+    setDetailTab("tools")
+    setToolsTab("credentials")
+    if (isMobile) setDetailSheetOpen(true)
   }
 
   // P2.3 — palette + shortcut handlers. Toasts the outcome of a remote op the
@@ -627,9 +649,10 @@ export function App() {
             />
           ) : (
             <Tabs
-              defaultValue="commit"
+              value={detailTab}
               className="min-h-0 flex-1 gap-0"
               onValueChange={(v) => {
+                setDetailTab(v as DetailTab)
                 if (v === "repository") void ws.loadStats()
               }}
             >
@@ -698,7 +721,12 @@ export function App() {
                 value="tools"
                 className="min-h-0 flex-1 overflow-y-auto p-4"
               >
-                <GitToolsPanel repositoryId={currentRepoId} onRefresh={() => ws.refresh()} />
+                <GitToolsPanel
+                  repositoryId={currentRepoId}
+                  onRefresh={() => ws.refresh()}
+                  tab={toolsTab}
+                  onTabChange={setToolsTab}
+                />
               </TabsContent>
             </Tabs>
           )}
@@ -718,7 +746,19 @@ export function App() {
           onToggleFavorite={() => {}}
           onRemoveRepository={() => {}}
         />
-        <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center p-6">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <header className="border-border flex h-12 shrink-0 items-center gap-2 border-b px-3">
+            <span className="bg-primary size-2 rounded-full" />
+            <span className="text-sm font-semibold">Zync</span>
+            <div className="ml-auto">
+              <UserMenu
+                user={currentUser}
+                onLogout={onLogout}
+                onOpenCredentials={openCredentials}
+              />
+            </div>
+          </header>
+          <div className="flex min-h-0 flex-1 items-center justify-center p-6">
           {ws.repositoriesError !== null ? (
             // The load itself failed (server unreachable, etc.) — this is not the same as a
             // genuine zero-repositories registry, so say so instead of silently showing the
@@ -778,6 +818,7 @@ export function App() {
               </EmptyContent>
             </Empty>
           )}
+          </div>
         </div>
         <AddRepositoryDialog
           open={addRepoOpen}
@@ -819,15 +860,22 @@ export function App() {
           onPush={(opts) => ws.pushRemote(opts)}
           onStash={() => void ws.createStash("WIP from Zync")}
         />
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="ml-auto md:hidden"
-          aria-label="Open details"
-          onClick={() => setDetailSheetOpen(true)}
-        >
-          <Info />
-        </Button>
+        <div className="ml-auto flex items-center gap-1">
+          <UserMenu
+            user={currentUser}
+            onLogout={onLogout}
+            onOpenCredentials={openCredentials}
+          />
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="md:hidden"
+            aria-label="Open details"
+            onClick={() => setDetailSheetOpen(true)}
+          >
+            <Info />
+          </Button>
+        </div>
       </header>
 
       {ws.bisectStatus?.in_progress && (

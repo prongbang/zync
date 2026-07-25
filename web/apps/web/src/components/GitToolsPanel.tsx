@@ -120,6 +120,13 @@ export interface GitToolsPanelProps {
    */
   repositoryId?: string | null
   onRefresh: (kind: GitToolKind) => void
+  /**
+   * Optional controlled active tab. Lets the header user menu deep-link to the
+   * Credentials settings (P3.4). Omitted → the panel is uncontrolled and opens
+   * on "remotes" as before.
+   */
+  tab?: string
+  onTabChange?: (tab: string) => void
 }
 
 function errorText(error: unknown): string {
@@ -129,14 +136,22 @@ function errorText(error: unknown): string {
 export function GitToolsPanel({
   repositoryId = null,
   onRefresh,
+  tab,
+  onTabChange,
 }: GitToolsPanelProps): ReactElement {
+  // Controlled only when the caller supplies `tab` (deep-link to Credentials);
+  // otherwise fall back to the original uncontrolled "remotes" default.
+  const tabsProps =
+    tab !== undefined
+      ? { value: tab, onValueChange: onTabChange }
+      : { defaultValue: "remotes" }
   return (
     <Card size="sm" data-testid="git-tools-panel">
       <CardHeader>
         <CardTitle>Git tools</CardTitle>
       </CardHeader>
       <CardContent>
-        <Tabs defaultValue="remotes">
+        <Tabs {...tabsProps}>
           <div className="scroll-fade-x overflow-x-auto">
             <TabsList>
               <TabsTrigger value="remotes">Remotes</TabsTrigger>

@@ -12,6 +12,20 @@
 //     (defaults to the type's zero value, e.g. `""` for String, `[]` for Vec,
 //     when the server omits the key).
 
+// The authenticated principal, mirroring the server's `/auth/me` + `/auth/login`
+// `UserResponse` (crates/server/src/auth/mod.rs). In `ZYNC_AUTH=disabled` mode
+// this is the synthetic `owner`/`admin`, so the app is transparently "logged in".
+export interface CurrentUser {
+  id: string
+  email: string
+  name: string
+  role: string
+}
+
+export interface WsTicketResponse {
+  ticket: string
+}
+
 export interface RepositoryRecord {
   id: string
   name: string
