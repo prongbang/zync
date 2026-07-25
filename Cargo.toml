@@ -21,7 +21,7 @@ chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
 git2 = "0.18"
 notify = "6"
-rand = "0.8"
+rand = "0.10"
 sha2 = "0.10"
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
