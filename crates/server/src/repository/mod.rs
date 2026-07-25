@@ -591,6 +591,7 @@ mod tests {
             secrets: crate::crypto::KeyState::Unconfigured,
             auth: crate::auth::AuthState::disabled_for_test(),
             repos_root,
+            metrics: Arc::new(crate::observability::Metrics::default()),
         })
     }
 

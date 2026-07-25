@@ -457,6 +457,7 @@ mod tests {
                 setup: Arc::new(Mutex::new(None)),
             },
             repos_root: crate::repos_root::ReposRoot::default(),
+            metrics: Arc::new(crate::observability::Metrics::default()),
         })
     }
 

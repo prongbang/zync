@@ -24,7 +24,11 @@ tokio.workspace = true
 tower-http.workspace = true
 tower_governor.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
+# Augments the workspace-level `env-filter` feature with `json`, needed only
+# here (P5.3 `ZYNC_LOG_FORMAT=json`) for `tracing_subscriber::fmt::layer().json()`
+# in `main.rs`. Cargo unions member-declared features with the workspace
+# dependency's own, so this doesn't touch the root `Cargo.toml`.
+tracing-subscriber = { workspace = true, features = ["json"] }
 uuid.workspace = true
 zeroize.workspace = true
 zync-git-core = { path = "../git-core" }

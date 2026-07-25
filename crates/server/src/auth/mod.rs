@@ -263,11 +263,20 @@ fn owner_auth_user() -> AuthUser {
 /// To open a new route, add it here explicitly. Keep the list minimal:
 /// - `POST /auth/login` — the login endpoint itself,
 /// - `GET /health` — liveness probe,
+/// - `GET /ready` — readiness probe (P5.3): an orchestrator's readiness check
+///   must not itself require a session, same reasoning as `/health`; unlike
+///   `/health` it does touch the DB, but that's a cheap read, not auth,
 /// - `/setup*` — the one-time first-boot admin bootstrap flow,
 /// - `/ws/*` — the WS handshake, which is ticket-guarded inside
 ///   `workspace_socket` (cookies don't propagate reliably onto a WS upgrade).
+///
+/// `GET /metrics` is deliberately NOT here — it exposes internal operational
+/// state (request counts, latency, connection gauges) and is gated by
+/// requiring a session (via omission from this allowlist) plus an `admin`
+/// role check inside `observability::metrics` itself.
 fn is_public(method: &Method, path: &str) -> bool {
     (method == Method::GET && path == "/health")
+        || (method == Method::GET && path == "/ready")
         || (method == Method::POST && path == "/auth/login")
         || path == "/setup"
         || path.starts_with("/setup/")
@@ -756,6 +765,7 @@ mod tests {
                 setup: Arc::new(Mutex::new(None)),
             },
             repos_root: crate::repos_root::ReposRoot::default(),
+            metrics: Arc::new(crate::observability::Metrics::default()),
         })
     }
 
@@ -861,8 +871,9 @@ mod tests {
 
     #[test]
     fn public_allowlist_is_a_minimal_positive_list() {
-        // The four explicitly-open route classes.
+        // The explicitly-open route classes.
         assert!(is_public(&Method::GET, "/health"));
+        assert!(is_public(&Method::GET, "/ready"));
         assert!(is_public(&Method::POST, "/auth/login"));
         assert!(is_public(&Method::GET, "/setup"));
         assert!(is_public(&Method::POST, "/setup"));
@@ -879,6 +890,9 @@ mod tests {
         assert!(!is_public(&Method::POST, "/auth/logout"));
         assert!(!is_public(&Method::POST, "/credentials"));
         assert!(!is_public(&Method::GET, "/workspace/abc"));
+        // /metrics is intentionally NOT public — it's admin-gated instead
+        // (observability::metrics), not session-exempt.
+        assert!(!is_public(&Method::GET, "/metrics"));
         // A hypothetical future route under a brand-new prefix: closed by
         // default (the old inverted denylist would have leaked this as public).
         assert!(!is_public(&Method::GET, "/brand-new-feature"));

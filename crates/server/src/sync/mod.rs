@@ -34,6 +34,12 @@ impl WorkspaceSync {
         drop(watchers);
         spawn_workspace_watcher(workspace_id, root, hub);
     }
+
+    /// Number of active (workspace, root) file watchers — a gauge for
+    /// `/metrics` (P5.3, `observability::Metrics::render_prometheus`).
+    pub fn watcher_count(&self) -> usize {
+        self.watchers.lock().expect("workspace sync lock").len()
+    }
 }
 
 pub fn list_workspace_files(root: impl AsRef<Path>) -> anyhow::Result<Vec<FileNode>> {

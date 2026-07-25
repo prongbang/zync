@@ -804,6 +804,7 @@ mod tests {
             secrets: crypto::KeyState::Configured(crypto::test_key(9)),
             auth: crate::auth::AuthState::disabled_for_test(),
             repos_root: crate::repos_root::ReposRoot::default(),
+            metrics: Arc::new(crate::observability::Metrics::default()),
         });
         let auth = AuthUser {
             id: "owner".to_string(),

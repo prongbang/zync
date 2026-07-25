@@ -183,12 +183,30 @@ mod tests {
     }
 }
 
+/// RAII guard pairing [`observability::Metrics::ws_connection_opened`] with
+/// its `ws_connection_closed` — dropped at the end of [`handle_socket`]'s
+/// scope no matter how it exits (normal return, an early `break`, a panic
+/// such as a poisoned-mutex unwind in `state.hub.sender()`, or task
+/// cancellation), so the gauge can't leak upward the way an explicit
+/// tail-of-function decrement could.
+struct WsGauge(Arc<AppState>);
+
+impl Drop for WsGauge {
+    fn drop(&mut self) {
+        self.0.metrics.ws_connection_closed();
+    }
+}
+
 async fn handle_socket(
     state: Arc<AppState>,
     workspace_id: String,
     can_write: bool,
     socket: WebSocket,
 ) {
+    // Live connection gauge for `/metrics` (P5.3) — opened here, closed by
+    // `WsGauge`'s `Drop` impl regardless of how this function exits.
+    state.metrics.ws_connection_opened();
+    let _gauge = WsGauge(state.clone());
     let sender = state.hub.sender(&workspace_id);
     let mut receiver = sender.subscribe();
     let (mut ws_sender, mut ws_receiver) = socket.split();

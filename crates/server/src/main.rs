@@ -6,6 +6,7 @@ mod db;
 mod files;
 mod git;
 mod net_hardening;
+mod observability;
 mod repos_root;
 mod repository;
 mod sync;
@@ -34,17 +35,38 @@ pub struct AppState {
     /// preserves today's unbounded behavior for existing single-user
     /// deploys; see `repos_root` module docs.
     pub repos_root: repos_root::ReposRoot,
+    /// Request/latency/connection counters backing `/metrics` (P5.3, see
+    /// `observability` module docs).
+    pub metrics: Arc<observability::Metrics>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "zync_server=info,tower_http=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    // `ZYNC_LOG_FORMAT=json` switches to `tracing_subscriber`'s JSON
+    // formatter for log aggregation (P5.3); default stays today's human
+    // format. `EnvFilter`/`RUST_LOG` behavior is unchanged either way — only
+    // the *formatter* layer differs, not filtering. The request-id span field
+    // (`observability::make_span`, wired into the `TraceLayer` below) shows
+    // up in both: as `request_id=...` in the span context of the human
+    // format, and nested under the current span's fields in JSON.
+    let env_filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "zync_server=info,tower_http=info".into())
+    };
+    let json_logs = std::env::var("ZYNC_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+    if json_logs {
+        tracing_subscriber::registry()
+            .with(env_filter())
+            .with(tracing_subscriber::fmt::layer().json())
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(env_filter())
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
 
     let db_path = std::env::var("ZYNC_DB").unwrap_or_else(|_| "zync.db".to_string());
     let state = Arc::new(AppState {
@@ -58,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
         // Validates ZYNC_REPOS_ROOT at boot — a configured-but-unresolvable
         // root refuses to start (P4.1), same posture as ZYNC_AUTH above.
         repos_root: repos_root::ReposRoot::load()?,
+        metrics: Arc::new(observability::Metrics::default()),
     });
 
     // P4.1 rollout note: ZYNC_REPOS_ROOT is not required to boot (existing
@@ -87,7 +110,14 @@ async fn main() -> anyhow::Result<()> {
         .fallback(ServeFile::new(index_path));
 
     let app = Router::new()
-        .route("/health", get(|| async { "ok" }))
+        // Liveness (no I/O) vs readiness (a cheap DB touch) vs metrics
+        // (admin-gated internal state) — see `observability` module docs.
+        // Both `/health` and `/ready` are in `auth::is_public`'s allowlist;
+        // `/metrics` deliberately is not (it's gated by `admin` role inside
+        // the handler instead).
+        .route("/health", get(observability::health))
+        .route("/ready", get(observability::ready))
+        .route("/metrics", get(observability::metrics))
         .merge(auth::routes())
         .merge(repository::routes())
         .merge(workspace::routes())
@@ -143,7 +173,21 @@ async fn main() -> anyhow::Result<()> {
         .layer(RequestBodyLimitLayer::new(
             net_hardening::MAX_REQUEST_BODY_BYTES,
         ))
-        .layer(TraceLayer::new_for_http())
+        // `make_span_with` reads the request id assigned by
+        // `observability::request_id_middleware` below into every span — see
+        // that function's doc comment for why the middleware must be layered
+        // *after* (= outer to) `TraceLayer` for the extension to exist yet
+        // when this callback fires.
+        .layer(TraceLayer::new_for_http().make_span_with(observability::make_span))
+        .layer(axum::middleware::from_fn(
+            observability::request_id_middleware,
+        ))
+        // Total request latency for `/metrics` (P5.3), measured around
+        // everything below it (auth, authz, the route handler).
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            observability::metrics_middleware,
+        ))
         .layer(CompressionLayer::new())
         .with_state(state);
 
