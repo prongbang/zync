@@ -29,13 +29,13 @@ import {
   ResizablePanelGroup,
 } from "@workspace/ui/components/resizable"
 import { Separator } from "@workspace/ui/components/separator"
+import { Skeleton } from "@workspace/ui/components/skeleton"
 import {
   Sheet,
   SheetContent,
   SheetHeader,
   SheetTitle,
 } from "@workspace/ui/components/sheet"
-import { Spinner } from "@workspace/ui/components/spinner"
 import {
   Tabs,
   TabsContent,
@@ -61,6 +61,7 @@ import { GitToolsPanel } from "./components/GitToolsPanel"
 import { RepoMinibar } from "./components/RepoMinibar"
 import { RepoStatsPanel } from "./components/RepoStatsPanel"
 import { ShortcutsDialog } from "./components/ShortcutsDialog"
+import { SyncStatusBanner } from "./components/SyncStatusBanner"
 import { Toolbar } from "./components/Toolbar"
 import { UserMenu } from "./components/UserMenu"
 import {
@@ -544,6 +545,7 @@ export function App({
               onSearchAllHistory={() => void handleSearchAllHistory()}
               onClearHistoryResults={handleClearHistoryResults}
               searchingHistory={searchingHistory}
+              loading={ws.workspaceLoading}
               bisectActive={ws.bisectStatus?.in_progress ?? false}
               onMenuAction={(action, commitId) => {
                 const commit = ws.commits.find((c) => c.id === commitId)
@@ -682,8 +684,21 @@ export function App({
                     <Separator />
                     <div className="min-h-0 flex-1" data-testid="commit-diff-panel">
                       {ws.selectedCommitDiffLoading ? (
-                        <div className="text-muted-foreground flex items-center gap-2 p-4 text-sm">
-                          <Spinner /> Loading commit diff…
+                        <div
+                          data-testid="diff-loading-skeleton"
+                          aria-busy="true"
+                          aria-label="Loading commit diff"
+                          className="flex flex-col gap-2 p-4"
+                        >
+                          {["70%", "90%", "55%", "80%", "40%", "85%", "60%"].map(
+                            (width, index) => (
+                              <Skeleton
+                                key={index}
+                                className="h-3"
+                                style={{ width }}
+                              />
+                            ),
+                          )}
                         </div>
                       ) : ws.selectedCommitDiffError ? (
                         <div className="text-destructive p-4 text-sm">
@@ -883,6 +898,8 @@ export function App({
         </div>
       </header>
 
+      {ws.liveSyncReconnecting && <SyncStatusBanner />}
+
       {ws.bisectStatus?.in_progress && (
         <BisectBanner
           status={ws.bisectStatus}
@@ -907,6 +924,7 @@ export function App({
                 tags={ws.tags}
                 onCommand={onBranchCommand}
                 onTagCommand={onTagCommand}
+                loading={ws.workspaceLoading}
               />
             </aside>
           </ResizablePanel>
@@ -966,6 +984,7 @@ export function App({
               <BranchSidebar
                 branches={ws.branches}
                 tags={ws.tags}
+                loading={ws.workspaceLoading}
                 onCommand={(cmd) => {
                   onBranchCommand(cmd)
                   if (cmd.kind === "checkout") setBranchSheetOpen(false)

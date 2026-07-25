@@ -16,6 +16,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@workspace/ui/components/dialog"
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@workspace/ui/components/empty"
+import { FileClock } from "lucide-react"
 import { ScrollArea } from "@workspace/ui/components/scroll-area"
 import {
   Sheet,
@@ -185,9 +193,18 @@ export function FileHistorySheet({
                 ) : loadError ? (
                   <div className="text-destructive p-4 text-sm">{loadError}</div>
                 ) : entries && entries.length === 0 ? (
-                  <div className="text-muted-foreground p-4 text-sm">
-                    No history for this file.
-                  </div>
+                  <Empty data-testid="file-history-empty">
+                    <EmptyHeader>
+                      <EmptyMedia variant="icon">
+                        <FileClock />
+                      </EmptyMedia>
+                      <EmptyTitle>No history for this file</EmptyTitle>
+                      <EmptyDescription>
+                        No commit in the current history touched{" "}
+                        {pathBasename(path)}.
+                      </EmptyDescription>
+                    </EmptyHeader>
+                  </Empty>
                 ) : (
                   <ul className="flex flex-col">
                     {(entries ?? []).map((entry) => (

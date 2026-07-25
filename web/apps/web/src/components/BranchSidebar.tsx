@@ -5,6 +5,7 @@
 import { useState, type DragEvent, type ReactElement } from "react"
 
 import { Badge } from "@workspace/ui/components/badge"
+import { Skeleton } from "@workspace/ui/components/skeleton"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -362,16 +363,38 @@ function TagSection({
   )
 }
 
+// First-load placeholder: a couple of labelled sections of skeleton rows so the
+// sidebar reads as "branches are loading" instead of flashing "No branches".
+// Uses the shadcn Skeleton primitive (no custom animate-pulse), per the rules.
+function SidebarSkeletonSection({ title }: { title: string }): ReactElement {
+  return (
+    <section className="flex flex-col gap-0.5">
+      <div className="px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
+        {title}
+      </div>
+      {Array.from({ length: 4 }, (_, index) => (
+        <div key={index} className="flex h-[26px] items-center px-2">
+          <Skeleton className="h-3 w-[60%]" />
+        </div>
+      ))}
+    </section>
+  )
+}
+
 export function BranchSidebar({
   branches,
   tags,
   onCommand,
   onTagCommand,
+  loading = false,
 }: {
   branches: BranchSummary[]
   tags: TagSummary[]
   onCommand: (command: BranchCommand) => void
   onTagCommand: (command: TagCommand) => void
+  /** True while the workspace's first branch/tag batch is still loading — shows
+   * skeleton rows instead of an "empty" flash (P5.6). */
+  loading?: boolean
 }): ReactElement {
   const locals = branches.filter((branch) => branch.kind === "local")
   const remotes = branches.filter((branch) => branch.kind !== "local")
@@ -389,6 +412,22 @@ export function BranchSidebar({
   function handleDropTarget(source: string, target: string) {
     onCommand({ kind: "dropMergeChooser", source, target })
     resetDrag()
+  }
+
+  // Only skeleton the genuine first load (nothing yet), never once branches
+  // exist — a live refresh should never blank an already-populated sidebar.
+  if (loading && branches.length === 0) {
+    return (
+      <nav
+        data-testid="branches-loading-skeleton"
+        aria-busy="true"
+        aria-label="Loading branches and tags"
+        className="flex h-full min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-2"
+      >
+        <SidebarSkeletonSection title="Branches" />
+        <SidebarSkeletonSection title="Remotes" />
+      </nav>
+    )
   }
 
   return (

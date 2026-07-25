@@ -3,6 +3,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 
+import { toast } from "@workspace/ui/components/toast"
+
 import { ZyncApi } from "./api"
 import {
   buildBlameRows,
@@ -63,6 +65,16 @@ export type WorkspaceState = {
   diff: string
   notice: string
   liveSyncOk: boolean
+  /** True when live-sync dropped *after* having connected at least once and is
+   * now backing off to reconnect. Distinct from the initial pre-connect state
+   * (which must not flash the reconnect banner), so App can surface a legible
+   * "Live sync reconnecting…" banner only for a genuine drop, auto-dismissed on
+   * reconnect. */
+  liveSyncReconnecting: boolean
+  /** True while the currently-open workspace's first batch of data (commits /
+   * branches / diff) is still being fetched — drives the first-load skeletons in
+   * CommitGraph, BranchSidebar and the diff panel so there's no empty flash. */
+  workspaceLoading: boolean
   selectedFile: string
   /** Whole-commit patch for the commit currently selected in All Commits mode
    * (P1.4) — fetched via `loadCommitDiff`, independent of `diff`/`selectedFile`
@@ -82,7 +94,7 @@ export type WorkspaceState = {
   /** Unregisters a repository. If it was the open one, switches to another registered
    * repository (or clears the open workspace so the zero-repositories empty state shows). */
   removeRepository: (repositoryId: string) => Promise<void>
-  refresh: (scope?: number) => void
+  refresh: (scope?: number) => Promise<void>
   loadMore: () => void
   setDiff: (patch: string) => void
   setNotice: (message: string) => void
@@ -208,6 +220,8 @@ export function useWorkspace(): WorkspaceState {
   const [diff, setDiff] = useState("")
   const [notice, setNotice] = useState("Ready")
   const [liveSyncOk, setLiveSyncOk] = useState(false)
+  const [liveSyncReconnecting, setLiveSyncReconnecting] = useState(false)
+  const [workspaceLoading, setWorkspaceLoading] = useState(false)
   const [selectedFile, setSelectedFile] = useState("")
   const [selectedCommitDiff, setSelectedCommitDiff] = useState("")
   const [selectedCommitDiffLoading, setSelectedCommitDiffLoading] = useState(false)
@@ -252,13 +266,13 @@ export function useWorkspace(): WorkspaceState {
   // Concurrent scoped fetch (futures join! equivalent). Coalescing is handled by
   // React batching + the ref guards; a full port of the in-flight merge is not
   // needed because fetches are idempotent and the latest response wins.
-  const refresh = useCallback((scope: number = SCOPE_ALL) => {
+  const refresh = useCallback((scope: number = SCOPE_ALL): Promise<void> => {
     const repositoryId = repoIdRef.current
     const workspaceId = workspaceIdRef.current
-    if (!repositoryId || !workspaceId) return
+    if (!repositoryId || !workspaceId) return Promise.resolve()
     const limit = Math.max(graphLimitRef.current, commitsCountRef.current, 500)
 
-    void (async () => {
+    return (async () => {
       const jobs: Promise<void>[] = []
       const run = (bit: number, fn: () => Promise<void>) => {
         if (scope & bit) jobs.push(fn())
@@ -293,6 +307,7 @@ export function useWorkspace(): WorkspaceState {
       const myGeneration = ++openGenerationRef.current
       const isStale = () => openGenerationRef.current !== myGeneration
       setOpeningRepository(true)
+      setWorkspaceLoading(true)
       try {
         const opened = await api.openRepository(repositoryId)
         // A later openRepository() call started while this one was awaiting the
@@ -323,11 +338,16 @@ export function useWorkspace(): WorkspaceState {
         // The remaining scopes don't gate `workspace`/`openingRepository`, so a plain
         // fire-and-forget refresh is fine for them: repoIdRef/workspaceIdRef already
         // point at this call's repo (a stale call would have returned above instead of
-        // reaching here), so this can't clobber a newer switch.
-        refresh(SCOPE_ALL & ~SCOPE_WORKSPACE)
+        // reaching here), so this can't clobber a newer switch. Clear the first-load
+        // skeleton flag once this initial batch settles (still generation-guarded, so a
+        // slower earlier open can't flip the flag for the repo the user already switched to).
+        void refresh(SCOPE_ALL & ~SCOPE_WORKSPACE).finally(() => {
+          if (!isStale()) setWorkspaceLoading(false)
+        })
       } catch (error) {
         if (isStale()) return
         setNotice(error instanceof Error ? error.message : String(error))
+        setWorkspaceLoading(false)
       } finally {
         if (!isStale()) setOpeningRepository(false)
       }
@@ -398,15 +418,26 @@ export function useWorkspace(): WorkspaceState {
     return repositoryId
   }, [])
 
+  // Every `run`-based mutation (commit, stage/unstage, branch/tag CRUD, stash,
+  // conflict resolve, interactive rebase, reset, cherry-pick, revert, bisect…)
+  // surfaces BOTH a success and an error toast in addition to the footer notice.
+  // Previously the outcome only landed in the footer, so a thrown api error was
+  // effectively silent; toasting here fills that gap for all of them at once
+  // (P5.6). Remote ops go through `runRemote`, which rethrows so its callers can
+  // drive their own toast/busy state — kept separate to avoid double-toasting.
   const run = useCallback(
     async (fn: (repositoryId: string) => Promise<string>, scope: number) => {
       const repositoryId = guard()
       if (!repositoryId) return
       try {
-        setNotice(await fn(repositoryId))
+        const message = await fn(repositoryId)
+        setNotice(message)
+        toast.add({ title: message, type: "success" })
         refresh(scope)
       } catch (error) {
-        setNotice(error instanceof Error ? error.message : String(error))
+        const message = error instanceof Error ? error.message : String(error)
+        setNotice(message)
+        toast.add({ title: message, type: "error" })
       }
     },
     [guard, refresh],
@@ -889,6 +920,9 @@ export function useWorkspace(): WorkspaceState {
     const scheduleReconnect = () => {
       if (isStale()) return
       setLiveSyncOk(false)
+      // Only a drop *after* a successful connect is a "reconnecting" state worth
+      // surfacing; the initial pre-connect backoff stays quiet (footer only).
+      if (connectedBefore) setLiveSyncReconnecting(true)
       attempts += 1
       const delay = Math.min(2 ** Math.min(attempts, 5), 30)
       setNotice(`Live sync offline - reconnecting in ${delay}s`)
@@ -916,6 +950,7 @@ export function useWorkspace(): WorkspaceState {
       socket.onopen = () => {
         attempts = 0
         setLiveSyncOk(true)
+        setLiveSyncReconnecting(false)
         if (connectedBefore) {
           setNotice("Live sync reconnected")
           refresh(SCOPE_ALL)
@@ -943,6 +978,10 @@ export function useWorkspace(): WorkspaceState {
       generation++
       if (timer) clearTimeout(timer)
       socket?.close()
+      // Clear any "reconnecting" state as this socket loop retires (workspace
+      // switch / unmount) so a stale banner can't carry over to the next
+      // workspace before its own socket has had a chance to connect.
+      setLiveSyncReconnecting(false)
     }
   }, [workspace?.workspace.id, refresh])
 
@@ -966,6 +1005,8 @@ export function useWorkspace(): WorkspaceState {
     diff,
     notice,
     liveSyncOk,
+    liveSyncReconnecting,
+    workspaceLoading,
     selectedFile,
     selectedCommitDiff,
     selectedCommitDiffLoading,

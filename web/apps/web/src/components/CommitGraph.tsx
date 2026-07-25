@@ -5,9 +5,17 @@
 import * as React from "react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
-import { SearchIcon, XIcon } from "lucide-react"
+import { SearchIcon, SearchX, XIcon } from "lucide-react"
 
 import { Button } from "@workspace/ui/components/button"
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@workspace/ui/components/empty"
+import { Skeleton } from "@workspace/ui/components/skeleton"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -318,6 +326,28 @@ function CommitRow({
   )
 }
 
+// First-load placeholder row — same 34px height + column grid as CommitRow so
+// the skeleton reads as "commits are arriving here", not an empty flash. Uses
+// the shadcn Skeleton primitive (no custom animate-pulse), per the styling rules.
+function CommitRowSkeleton(): React.ReactElement {
+  return (
+    <div
+      className={cn(
+        "grid h-[34px] items-center gap-2 border-b border-border/60 px-2",
+        GRID_COLUMNS_CLASS,
+      )}
+    >
+      <div className="flex h-[34px] items-center" style={{ width: GRAPH_COLUMN_WIDTH }}>
+        <Skeleton className="size-2 rounded-full" />
+      </div>
+      <Skeleton className="h-3 w-[70%]" />
+      <Skeleton className="hidden h-3 w-16 md:block" />
+      <Skeleton className="h-3 w-12" />
+      <Skeleton className="hidden h-3 w-14 md:block" />
+    </div>
+  )
+}
+
 // Below this many in-window matches, a query is treated as likely having more
 // hits outside the loaded graph page, so the "Search all history" offer appears.
 const FEW_MATCHES_THRESHOLD = 5
@@ -355,6 +385,9 @@ export function CommitGraph(props: {
   searchingHistory: boolean
   /** P2.6 — a bisect session is currently active; passed through to every row's context menu. */
   bisectActive?: boolean
+  /** True while the workspace's first commit batch is still loading — swaps the
+   * row list for 34px skeleton rows so there's no empty flash (P5.6). */
+  loading?: boolean
 }): React.ReactElement {
   const {
     rows,
@@ -369,6 +402,7 @@ export function CommitGraph(props: {
     onClearHistoryResults,
     searchingHistory,
     bisectActive,
+    loading,
   } = props
 
   const listRef = useRef<HTMLOListElement>(null)
@@ -443,6 +477,13 @@ export function CommitGraph(props: {
   }, [displayRows.length, scrollTop, viewportHeight])
 
   const visibleRows = displayRows.slice(firstRow, lastRow)
+
+  // First-load skeleton only for the real graph (never over a returned search
+  // result set — an empty history search is a "no matches" empty state, below).
+  const showFirstLoadSkeleton =
+    (loading ?? false) && !showingHistoryResults && rows.length === 0
+  const showEmptyResults =
+    showingHistoryResults && (historyResults?.length ?? 0) === 0
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
@@ -531,6 +572,33 @@ export function CommitGraph(props: {
           <span className="hidden md:inline">Date</span>
         </div>
       </header>
+      {showFirstLoadSkeleton ? (
+        <div
+          data-testid="commits-loading-skeleton"
+          aria-busy="true"
+          aria-label="Loading commits"
+          className="min-h-0 flex-1 overflow-hidden"
+        >
+          {Array.from({ length: 14 }, (_, index) => (
+            <CommitRowSkeleton key={index} />
+          ))}
+        </div>
+      ) : showEmptyResults ? (
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <Empty data-testid="search-empty">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <SearchX />
+              </EmptyMedia>
+              <EmptyTitle>No commits found</EmptyTitle>
+              <EmptyDescription>
+                No commit in this repository&rsquo;s history matches “
+                {trimmedQuery}”.
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        </div>
+      ) : (
       <ol
         ref={listRef}
         data-testid="commit-list"
@@ -558,6 +626,7 @@ export function CommitGraph(props: {
           <li style={{ height: bottomSpacer }} />
         ) : null}
       </ol>
+      )}
     </div>
   )
 }
