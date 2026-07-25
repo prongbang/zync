@@ -42,6 +42,7 @@ import {
   RotateCcw,
   Server,
   Trash2,
+  Users,
 } from "lucide-react"
 
 import {
@@ -79,6 +80,14 @@ import {
   InputGroupButton,
   InputGroupInput,
 } from "@workspace/ui/components/input-group"
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@workspace/ui/components/select"
 import { Spinner } from "@workspace/ui/components/spinner"
 import {
   Tabs,
@@ -93,16 +102,22 @@ import {
   TooltipTrigger,
 } from "@workspace/ui/components/tooltip"
 
-import { zyncApi } from "@/lib/api"
+import { ApiError, zyncApi } from "@/lib/api"
 import { formatCommitTime, shortId } from "@/lib/helpers"
 import type {
   CredentialRecord,
   LfsSummary,
   ReflogEntrySummary,
   RemoteSummary,
+  RepoMember,
   SubmoduleSummary,
 } from "@/lib/types"
 
+import {
+  AddMemberDialog,
+  MEMBER_ROLE_LABEL,
+  type MemberRole,
+} from "./dialogs/AddMemberDialog"
 import { BranchAtRevisionDialog } from "./dialogs/BranchAtRevisionDialog"
 import { ConfirmDialog } from "./dialogs/ConfirmDialog"
 import { CredentialDialog } from "./dialogs/CredentialDialog"
@@ -155,6 +170,7 @@ export function GitToolsPanel({
           <div className="scroll-fade-x overflow-x-auto">
             <TabsList>
               <TabsTrigger value="remotes">Remotes</TabsTrigger>
+              <TabsTrigger value="members">Members</TabsTrigger>
               <TabsTrigger value="credentials">Credentials</TabsTrigger>
               <TabsTrigger value="reflog">Reflog</TabsTrigger>
               <TabsTrigger value="submodules">Submodules</TabsTrigger>
@@ -166,6 +182,9 @@ export function GitToolsPanel({
               repositoryId={repositoryId}
               onWorkspaceRefresh={() => onRefresh("remotes")}
             />
+          </TabsContent>
+          <TabsContent value="members">
+            <MembersTab repositoryId={repositoryId} />
           </TabsContent>
           <TabsContent value="credentials">
             <CredentialsTab />
@@ -619,6 +638,360 @@ function RemotesTab({
               },
             )
           }
+        />
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Members tab (P3.5)
+// ---------------------------------------------------------------------------
+//
+// Owner/admin-only server-side (the repo-scope authz guard 403s the whole
+// `/repositories/:id/members*` subtree for a member/viewer caller). A member
+// or viewer opening this tab is an expected, non-error case, so a 403 on load
+// degrades to a friendly "owner-only" empty state rather than a destructive
+// Alert — everything else (add/role-change/remove failing mid-session, e.g. a
+// role change racing a concurrent removal) still surfaces as an Alert.
+//
+// The repository's own `owner_id` can't be demoted or removed (the server
+// returns 409 Conflict for both) — the member row carrying `role === "owner"`
+// is that owner, so its role Select and remove button are disabled with an
+// explanatory tooltip rather than left to fail server-side.
+
+type MembersDialogState = { kind: "remove"; member: RepoMember } | null
+
+function isProtectedOwner(member: RepoMember): boolean {
+  return member.role === "owner"
+}
+
+function memberDisplayName(member: RepoMember): string {
+  return member.name || member.email || member.user_id
+}
+
+function MembersTab({
+  repositoryId,
+}: {
+  repositoryId: string | null
+}): ReactElement {
+  const [members, setMembers] = useState<RepoMember[] | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [restricted, setRestricted] = useState(false)
+  const [busyUserId, setBusyUserId] = useState<string | null>(null)
+  const [addOpen, setAddOpen] = useState(false)
+  const [adding, setAdding] = useState(false)
+  const [dialog, setDialog] = useState<MembersDialogState>(null)
+
+  const load = useCallback(async () => {
+    if (!repositoryId) return
+    setLoading(true)
+    setError(null)
+    setRestricted(false)
+    try {
+      setMembers(await zyncApi.listMembers(repositoryId))
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 403) {
+        setMembers(null)
+        setRestricted(true)
+      } else {
+        setError(errorText(err))
+      }
+    } finally {
+      setLoading(false)
+    }
+  }, [repositoryId])
+
+  useEffect(() => {
+    setMembers(null)
+    setError(null)
+    setRestricted(false)
+    void load()
+  }, [load])
+
+  async function addMember(identifier: string, role: MemberRole) {
+    if (!repositoryId) return
+    setAdding(true)
+    setError(null)
+    try {
+      await zyncApi.addMember(repositoryId, identifier, role)
+      await load()
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setAdding(false)
+    }
+  }
+
+  async function changeRole(member: RepoMember, role: string) {
+    if (!repositoryId || role === member.role) return
+    setBusyUserId(member.user_id)
+    setError(null)
+    try {
+      await zyncApi.updateMemberRole(repositoryId, member.user_id, role)
+      await load()
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setBusyUserId(null)
+    }
+  }
+
+  async function removeMember(member: RepoMember) {
+    if (!repositoryId) return
+    setBusyUserId(member.user_id)
+    setError(null)
+    try {
+      await zyncApi.removeMember(repositoryId, member.user_id)
+      await load()
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setBusyUserId(null)
+    }
+  }
+
+  if (!repositoryId) {
+    return (
+      <Empty className="border">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <Users />
+          </EmptyMedia>
+          <EmptyTitle>No repository connected</EmptyTitle>
+          <EmptyDescription>
+            Open a repository to manage its members.
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    )
+  }
+
+  if (restricted) {
+    return (
+      <Empty className="border">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <Users />
+          </EmptyMedia>
+          <EmptyTitle>Members are owner-only</EmptyTitle>
+          <EmptyDescription>
+            Only the repository owner or an admin can view and manage
+            members.
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-between gap-2">
+        <Button
+          data-testid="add-member-btn"
+          variant="outline"
+          size="xs"
+          disabled={adding || busyUserId !== null}
+          onClick={() => setAddOpen(true)}
+        >
+          {adding ? (
+            <Spinner data-icon="inline-start" />
+          ) : (
+            <Plus data-icon="inline-start" />
+          )}
+          Add member
+        </Button>
+        <Button
+          variant="ghost"
+          size="xs"
+          disabled={loading || busyUserId !== null}
+          onClick={() => void load()}
+        >
+          {loading ? (
+            <Spinner data-icon="inline-start" />
+          ) : (
+            <RefreshCw data-icon="inline-start" />
+          )}
+          Refresh
+        </Button>
+      </div>
+
+      {error !== null && (
+        <Alert variant="destructive">
+          <AlertTitle>Member operation failed</AlertTitle>
+          <AlertDescription className="break-words">{error}</AlertDescription>
+        </Alert>
+      )}
+
+      {members !== null && members.length === 0 ? (
+        <Empty className="border">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <Users />
+            </EmptyMedia>
+            <EmptyTitle>No members yet</EmptyTitle>
+            <EmptyDescription>
+              Add an existing Zync user to grant them access.
+            </EmptyDescription>
+          </EmptyHeader>
+          <EmptyContent>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setAddOpen(true)}
+            >
+              <Plus data-icon="inline-start" />
+              Add member
+            </Button>
+          </EmptyContent>
+        </Empty>
+      ) : (
+        <TooltipProvider>
+          <ul className="flex flex-col">
+            {(members ?? []).map((member) => {
+              const protectedOwner = isProtectedOwner(member)
+              const rowBusy = busyUserId === member.user_id
+              return (
+                <li
+                  key={member.user_id}
+                  data-testid="member-row"
+                  data-user-id={member.user_id}
+                  className="flex items-center gap-1.5 border-b py-1.5"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-xs font-medium">
+                      {memberDisplayName(member)}
+                    </div>
+                    {member.email && (
+                      <div className="text-muted-foreground truncate text-xs">
+                        {member.email}
+                      </div>
+                    )}
+                  </div>
+                  {protectedOwner ? (
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <span>
+                            <Select
+                              value={member.role}
+                              disabled
+                              onValueChange={(value) => {
+                                if (value) void changeRole(member, value)
+                              }}
+                            >
+                              <SelectTrigger
+                                data-testid="member-role-select"
+                                aria-label={`Role for ${memberDisplayName(member)}`}
+                                size="sm"
+                                className="w-24 shrink-0"
+                              >
+                                <SelectValue>
+                                  {(value: string) =>
+                                    MEMBER_ROLE_LABEL[value as MemberRole] ??
+                                    value
+                                  }
+                                </SelectValue>
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectGroup>
+                                  {(
+                                    Object.keys(
+                                      MEMBER_ROLE_LABEL,
+                                    ) as MemberRole[]
+                                  ).map((r) => (
+                                    <SelectItem key={r} value={r}>
+                                      {MEMBER_ROLE_LABEL[r]}
+                                    </SelectItem>
+                                  ))}
+                                </SelectGroup>
+                              </SelectContent>
+                            </Select>
+                          </span>
+                        }
+                      />
+                      <TooltipContent>
+                        The repository owner&rsquo;s role can&rsquo;t be
+                        changed here.
+                      </TooltipContent>
+                    </Tooltip>
+                  ) : (
+                    <Select
+                      value={member.role}
+                      disabled={rowBusy}
+                      onValueChange={(value) => {
+                        if (value) void changeRole(member, value)
+                      }}
+                    >
+                      <SelectTrigger
+                        data-testid="member-role-select"
+                        aria-label={`Role for ${memberDisplayName(member)}`}
+                        size="sm"
+                        className="w-24 shrink-0"
+                      >
+                        <SelectValue>
+                          {(value: string) =>
+                            MEMBER_ROLE_LABEL[value as MemberRole] ?? value
+                          }
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          {(
+                            Object.keys(MEMBER_ROLE_LABEL) as MemberRole[]
+                          ).map((r) => (
+                            <SelectItem key={r} value={r}>
+                              {MEMBER_ROLE_LABEL[r]}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                  )}
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`Remove ${memberDisplayName(member)}`}
+                          disabled={protectedOwner || rowBusy}
+                          onClick={() => setDialog({ kind: "remove", member })}
+                        />
+                      }
+                    >
+                      {rowBusy ? <Spinner /> : <Trash2 />}
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {protectedOwner
+                        ? "The repository owner can't be removed."
+                        : `Remove ${memberDisplayName(member)}`}
+                    </TooltipContent>
+                  </Tooltip>
+                </li>
+              )
+            })}
+          </ul>
+        </TooltipProvider>
+      )}
+
+      <AddMemberDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        onSubmit={({ identifier, role }) => void addMember(identifier, role)}
+      />
+      {dialog?.kind === "remove" && (
+        <ConfirmDialog
+          open
+          onOpenChange={(open) => !open && setDialog(null)}
+          title="Remove Member"
+          description="Revokes this user's access to the repository. They can be re-added later."
+          subject={`${memberDisplayName(dialog.member)} — ${MEMBER_ROLE_LABEL[dialog.member.role as MemberRole] ?? dialog.member.role}`}
+          confirmLabel="Remove Member"
+          destructive
+          testId="remove-member-dialog"
+          onConfirm={() => void removeMember(dialog.member)}
         />
       )}
     </div>

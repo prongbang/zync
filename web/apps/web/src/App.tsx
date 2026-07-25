@@ -50,6 +50,7 @@ import {
   type BranchCommand,
   type TagCommand,
 } from "./components/BranchSidebar"
+import { AdminUsersSheet } from "./components/AdminUsersSheet"
 import { BisectBanner } from "./components/BisectBanner"
 import { CommandPalette } from "./components/CommandPalette"
 import { CommitGraph } from "./components/CommitGraph"
@@ -131,6 +132,8 @@ export function App({
   const [blame, setBlame] = useState<BlameRow[] | null>(null)
   const [dialog, setDialog] = useState<ActiveDialog>(null)
   const [addRepoOpen, setAddRepoOpen] = useState(false)
+  // P3.5 admin user management, opened from the header UserMenu.
+  const [adminUsersOpen, setAdminUsersOpen] = useState(false)
   // P2.3 command palette + keyboard-shortcuts cheat sheet.
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
@@ -755,6 +758,7 @@ export function App({
                 user={currentUser}
                 onLogout={onLogout}
                 onOpenCredentials={openCredentials}
+                onOpenAdminUsers={() => setAdminUsersOpen(true)}
               />
             </div>
           </header>
@@ -865,6 +869,7 @@ export function App({
             user={currentUser}
             onLogout={onLogout}
             onOpenCredentials={openCredentials}
+            onOpenAdminUsers={() => setAdminUsersOpen(true)}
           />
           <Button
             variant="ghost"
@@ -1177,6 +1182,7 @@ export function App({
         onOpenChange={setAddRepoOpen}
         onCreate={handleCreateRepository}
       />
+      <AdminUsersSheet open={adminUsersOpen} onOpenChange={setAdminUsersOpen} />
       <FileHistorySheet
         open={fileHistoryTarget !== null}
         onOpenChange={(open) => !open && setFileHistoryTarget(null)}

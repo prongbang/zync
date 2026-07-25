@@ -1,4 +1,4 @@
-import { KeyRound, LogOut } from "lucide-react"
+import { KeyRound, LogOut, ShieldUser } from "lucide-react"
 
 import {
   Avatar,
@@ -26,13 +26,18 @@ export function UserMenu({
   user,
   onLogout,
   onOpenCredentials,
+  onOpenAdminUsers,
 }: {
   user: CurrentUser
   onLogout: () => void
   onOpenCredentials: () => void
+  /** Omitted -> no "Admin: Users" entry (e.g. render sites that don't wire it
+   * up yet). Also gated on `user.role === "admin"` below regardless. */
+  onOpenAdminUsers?: () => void
 }) {
   const label = user.name || user.email || user.id
   const initial = (label.charAt(0) || "Z").toUpperCase()
+  const isAdmin = user.role === "admin"
 
   return (
     <DropdownMenu>
@@ -53,13 +58,27 @@ export function UserMenu({
         <span className="max-w-32 truncate">{label}</span>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuLabel>{user.email || label}</DropdownMenuLabel>
+        {/* DropdownMenuLabel (Menu.GroupLabel) requires a DropdownMenuGroup
+            ancestor — see web/.agents/skills/shadcn/rules/composition.md —
+            or base-ui throws "MenuGroupContext is missing" on open. */}
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>{user.email || label}</DropdownMenuLabel>
+        </DropdownMenuGroup>
         <DropdownMenuSeparator />
         <DropdownMenuGroup>
           <DropdownMenuItem onClick={onOpenCredentials}>
             <KeyRound data-icon="inline-start" />
             Credentials
           </DropdownMenuItem>
+          {isAdmin && onOpenAdminUsers && (
+            <DropdownMenuItem
+              data-testid="admin-users-menu-item"
+              onClick={onOpenAdminUsers}
+            >
+              <ShieldUser data-icon="inline-start" />
+              Admin: Users
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem data-testid="logout-btn" onClick={onLogout}>
             <LogOut data-icon="inline-start" />
             Log out

@@ -122,6 +122,13 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/auth/logout", post(logout))
         .route("/auth/me", get(me))
         .route("/auth/ws-ticket", post(ws_ticket))
+        // Admin user provisioning (P3.5, ADR-002 Decision 1: "User creation is
+        // admin-only"). Deliberately NOT in `is_public`'s allowlist below — a
+        // session is required — and each handler additionally checks
+        // `auth.role == ADMIN_ROLE` itself (the repo-scope authz middleware
+        // only classifies `/repositories/*` and `/workspace/*`, so admin-only
+        // `/auth/*` routes gate in the handler, same as `ws_ticket` above).
+        .route("/auth/users", get(list_users).post(create_user))
         .route("/setup", get(setup_get).post(setup_post))
 }
 
@@ -455,6 +462,117 @@ async fn ws_ticket(
     }
     let ticket = state.auth.tickets.mint(&auth.id, &request.workspace_id);
     Ok(Json(WsTicketResponse { ticket }))
+}
+
+// ---- Admin user provisioning (P3.5) ----
+
+#[derive(Deserialize)]
+struct CreateUserRequest {
+    /// The new user's login email.
+    identifier: String,
+    password: String,
+    name: Option<String>,
+    /// Defaults to `"user"`. Must be `"admin"` or `"user"`.
+    role: Option<String>,
+}
+
+fn validate_global_role(role: &str) -> Result<(), (StatusCode, String)> {
+    match role {
+        "admin" | "user" => Ok(()),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "role must be 'admin' or 'user'".to_string(),
+        )),
+    }
+}
+
+/// `POST /auth/users { identifier, password, name?, role? }` — admin-only user
+/// provisioning (ADR-002 Decision 1: "User creation is admin-only"; P3.5).
+/// `identifier` is the new user's login email; the password is argon2id-hashed
+/// (reusing the login/bootstrap `password` module) before it ever reaches the
+/// DB. Returns the created user — never the password hash.
+async fn create_user(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Json(request): Json<CreateUserRequest>,
+) -> Result<Json<UserResponse>, (StatusCode, String)> {
+    if auth.role != ADMIN_ROLE {
+        return Err((StatusCode::FORBIDDEN, "admin role required".to_string()));
+    }
+    let identifier = request.identifier.trim();
+    if identifier.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "identifier is required".to_string(),
+        ));
+    }
+    if request.password.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "password is required".to_string()));
+    }
+    let role = request.role.as_deref().unwrap_or("user");
+    validate_global_role(role)?;
+    if state
+        .db
+        .find_user_by_identifier(identifier)
+        .map_err(internal_error)?
+        .is_some()
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "a user with that identifier already exists".to_string(),
+        ));
+    }
+    let name = request
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(identifier)
+        .to_string();
+
+    // Hash on a blocking thread — argon2 is deliberately CPU/memory-heavy, same
+    // posture as login/bootstrap (ADR-002 Decision 1).
+    let password = Zeroizing::new(request.password);
+    let hash = tokio::task::spawn_blocking(move || password::hash_password(&password))
+        .await
+        .map_err(|e| internal_error(anyhow::anyhow!("password hash task failed: {e}")))?
+        .map_err(internal_error)?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    if let Err(err) = state
+        .db
+        .create_user_with_password(&id, identifier, &name, role, &hash)
+    {
+        if err.downcast_ref::<crate::db::UserConflict>().is_some() {
+            return Err((
+                StatusCode::CONFLICT,
+                "a user with that identifier already exists".to_string(),
+            ));
+        }
+        tracing::error!("failed to create user: {err:#}");
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to create user".to_string(),
+        ));
+    }
+    let user = state
+        .db
+        .user_by_id(&id)
+        .map_err(internal_error)?
+        .ok_or_else(|| internal_error(anyhow::anyhow!("created user vanished")))?;
+    Ok(Json(UserResponse::from(user)))
+}
+
+/// `GET /auth/users` — admin-only list of every user (id/email/name/role/
+/// created_at), never `password_hash` (P3.5).
+async fn list_users(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+) -> Result<Json<Vec<crate::db::UserSummary>>, (StatusCode, String)> {
+    if auth.role != ADMIN_ROLE {
+        return Err((StatusCode::FORBIDDEN, "admin role required".to_string()));
+    }
+    state.db.list_users().map(Json).map_err(internal_error)
 }
 
 // ---- First-boot setup token flow ----
@@ -893,6 +1011,123 @@ mod tests {
         .err()
         .expect("unknown workspace must be rejected");
         assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    // ---- Admin user provisioning (P3.5) ----
+
+    fn user_auth(id: &str, role: &str) -> AuthUser {
+        AuthUser {
+            id: id.to_string(),
+            role: role.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_user_requires_admin_role() {
+        let state = app_state(AuthMode::Enabled);
+        let request = CreateUserRequest {
+            identifier: "new@zync.local".to_string(),
+            password: "correct horse battery staple".to_string(),
+            name: None,
+            role: None,
+        };
+        let err = create_user(State(state), user_auth("bob", "user"), Json(request))
+            .await
+            .err()
+            .expect("non-admin must be rejected");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn list_users_requires_admin_role() {
+        let state = app_state(AuthMode::Enabled);
+        let err = list_users(State(state), user_auth("bob", "user"))
+            .await
+            .err()
+            .expect("non-admin must be rejected");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    /// The full loop the P3.5 review will check: an admin provisions a user
+    /// (identifier/password/name/role), the new user shows up in the admin
+    /// list without a password hash anywhere in sight, and the created user
+    /// can immediately log in with the password the admin set.
+    #[tokio::test]
+    async fn admin_creates_lists_and_new_user_can_log_in() {
+        let state = app_state(AuthMode::Enabled);
+        let admin = user_auth(OWNER_ID, ADMIN_ROLE);
+
+        let request = CreateUserRequest {
+            identifier: "new@zync.local".to_string(),
+            password: "correct horse battery staple".to_string(),
+            name: Some("New User".to_string()),
+            role: Some("user".to_string()),
+        };
+        let created = create_user(State(state.clone()), admin.clone(), Json(request))
+            .await
+            .expect("admin can create a user");
+        assert_eq!(created.email, "new@zync.local");
+        assert_eq!(created.name, "New User");
+        assert_eq!(created.role, "user");
+
+        let users = list_users(State(state.clone()), admin.clone())
+            .await
+            .expect("admin can list users");
+        assert!(
+            users.iter().any(|u| u.email == "new@zync.local"),
+            "created user is listed"
+        );
+
+        // The new user authenticates with the password the admin set.
+        let login_result = login(
+            State(state.clone()),
+            Json(LoginRequest {
+                identifier: "new@zync.local".to_string(),
+                password: "correct horse battery staple".to_string(),
+            }),
+        )
+        .await;
+        assert!(
+            login_result.is_ok(),
+            "the admin-created user can log in with its initial password"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_user_rejects_duplicate_identifier() {
+        let state = app_state(AuthMode::Enabled);
+        let admin = user_auth(OWNER_ID, ADMIN_ROLE);
+        let request = || CreateUserRequest {
+            identifier: "dup@zync.local".to_string(),
+            password: "correct horse battery staple".to_string(),
+            name: None,
+            role: None,
+        };
+        let _ = create_user(State(state.clone()), admin.clone(), Json(request()))
+            .await
+            .expect("first create succeeds");
+        let err = create_user(State(state.clone()), admin, Json(request()))
+            .await
+            .err()
+            .expect("duplicate identifier must be rejected");
+        assert_eq!(err.0, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn create_user_rejects_invalid_role() {
+        let state = app_state(AuthMode::Enabled);
+        let admin = user_auth(OWNER_ID, ADMIN_ROLE);
+        let request = CreateUserRequest {
+            identifier: "weird-role@zync.local".to_string(),
+            password: "correct horse battery staple".to_string(),
+            name: None,
+            role: Some("superuser".to_string()),
+        };
+        let err = create_user(State(state), admin, Json(request))
+            .await
+            .err()
+            .expect("invalid role must be rejected");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
     }
 
     #[test]

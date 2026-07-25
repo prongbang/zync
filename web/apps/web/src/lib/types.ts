@@ -26,6 +26,42 @@ export interface WsTicketResponse {
   ticket: string
 }
 
+// Admin user-list projection, mirrors the server's `db::UserSummary`
+// (crates/server/src/db/mod.rs) — never carries `password_hash` (P3.5).
+export interface AdminUser {
+  id: string
+  email: string
+  name: string
+  role: string
+  created_at: string
+}
+
+export interface CreateUserRequest {
+  identifier: string
+  password: string
+  name?: string | null
+  role?: string | null
+}
+
+// A repository's workspace member (ADR-002 Decision 5 / P3.5), mirrors the
+// server's `db::RepoMember`. `role` is 'owner' | 'member' | 'viewer'.
+export interface RepoMember {
+  user_id: string
+  role: string
+  email: string | null
+  name: string | null
+}
+
+export interface AddMemberRequest {
+  /** User id or email of an existing user to grant access to. */
+  user: string
+  role: string
+}
+
+export interface UpdateMemberRequest {
+  role: string
+}
+
 export interface RepositoryRecord {
   id: string
   name: string

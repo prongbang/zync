@@ -29,6 +29,19 @@ pub struct UserWithHash {
     pub password_hash: Option<String>,
 }
 
+/// The admin user-list projection (P3.5) — adds `created_at` to [`User`]'s
+/// fields without touching every existing `User` SELECT (`user_from_row` stays
+/// the lean 4-column shape login/`/auth/me`/authz use). Never carries
+/// `password_hash`; the only shape `GET /auth/users` may return.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserSummary {
+    pub id: String,
+    pub email: String,
+    pub name: String,
+    pub role: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepositoryRecord {
     pub id: String,
@@ -121,6 +134,31 @@ impl std::fmt::Debug for CredentialSecretRow {
             .field("created_at", &self.created_at)
             .finish()
     }
+}
+
+/// Sentinel error for [`Database::create_user_with_password`]'s race path:
+/// the identifier passed the caller's pre-check but a concurrent insert won
+/// the `email` UNIQUE constraint first. Callers can `downcast_ref` for this
+/// on the returned `anyhow::Error` to map it to `409 Conflict` instead of a
+/// generic `500`.
+#[derive(Debug, thiserror::Error)]
+#[error("a user with that identifier already exists")]
+pub struct UserConflict;
+
+/// Whether `err` is a SQLite UNIQUE (or other) constraint-violation error,
+/// as opposed to a connection/IO/syntax failure that genuinely warrants a
+/// `500`.
+fn is_unique_constraint_violation(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::ConstraintViolation,
+                ..
+            },
+            _
+        )
+    )
 }
 
 impl Database {
@@ -350,7 +388,7 @@ impl Database {
     }
 
     /// Insert a user (no password — password-set is a separate bootstrap/admin
-    /// path). Used by tests and the future admin user-creation route (P3.5).
+    /// path). Used by tests and the bootstrap seed.
     pub fn create_user(
         &self,
         id: &str,
@@ -364,6 +402,60 @@ impl Database {
             params![id, email, name, role, Utc::now().to_rfc3339()],
         )?;
         Ok(())
+    }
+
+    /// Insert an admin-created user with an initial password already hashed
+    /// (P3.5 — `POST /auth/users`, ADR-002 Decision 1: "User creation is
+    /// admin-only"). Unlike [`create_user`](Self::create_user), this always
+    /// sets `password_hash` so the new user can log in immediately. The
+    /// caller should already have checked the identifier is free (e.g. via
+    /// [`find_user_by_identifier`](Self::find_user_by_identifier)) so the
+    /// common case surfaces as a clean `409`; a concurrent insert that races
+    /// past that pre-check instead trips the `email` UNIQUE constraint here,
+    /// which is reported as [`UserConflict`] so the caller can still map it
+    /// to `409` rather than a generic `500`.
+    pub fn create_user_with_password(
+        &self,
+        id: &str,
+        email: &str,
+        name: &str,
+        role: &str,
+        password_hash: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().expect("database lock");
+        conn.execute(
+            "INSERT INTO users (id, email, name, role, password_hash, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, email, name, role, password_hash, Utc::now().to_rfc3339()],
+        )
+        .map_err(|err| {
+            if is_unique_constraint_violation(&err) {
+                anyhow::Error::new(UserConflict)
+            } else {
+                anyhow::Error::from(err)
+            }
+        })?;
+        Ok(())
+    }
+
+    /// List every user (id/email/name/role/created_at, never
+    /// `password_hash`) for the admin user-management UI (P3.5). Ordered by
+    /// creation so the bootstrap admin appears first.
+    pub fn list_users(&self) -> anyhow::Result<Vec<UserSummary>> {
+        let conn = self.conn.lock().expect("database lock");
+        let mut stmt = conn.prepare(
+            "SELECT id, email, name, role, created_at FROM users ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(UserSummary {
+                id: row.get(0)?,
+                email: row.get(1)?,
+                name: row.get(2)?,
+                role: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     // ---- Authz: repo membership (ADR-002 Decision 5) ----
@@ -1057,6 +1149,38 @@ mod tests {
         // Removal revokes access.
         db.remove_repo_member(&repo.id, "mem").unwrap();
         assert_eq!(db.repo_role_for_user(&repo.id, "mem").unwrap(), None);
+    }
+
+    /// `create_user_with_password` sets a real password hash (unlike the bare
+    /// `create_user` test helper) and the row shows up in `list_users` without
+    /// ever exposing the hash (P3.5).
+    #[test]
+    fn create_user_with_password_is_listed_without_hash() {
+        let db = test_db();
+        db.create_user_with_password("u1", "u1@zync.local", "User One", "user", "$argon2id$fake")
+            .expect("create_user_with_password");
+
+        let users = db.list_users().expect("list_users");
+        let created = users
+            .iter()
+            .find(|u| u.id == "u1")
+            .expect("new user is listed");
+        assert_eq!(created.email, "u1@zync.local");
+        assert_eq!(created.name, "User One");
+        assert_eq!(created.role, "user");
+        assert!(!created.created_at.is_empty());
+
+        // The seeded owner is listed too, and the password hash never leaks
+        // through `UserSummary` (the struct has no such field to leak).
+        assert!(users.iter().any(|u| u.id == "owner"));
+
+        // The hash is real and only reachable via the by-email lookup used
+        // for login — not via list_users.
+        let with_hash = db
+            .user_with_hash_by_email("u1@zync.local")
+            .expect("user_with_hash_by_email")
+            .expect("user exists");
+        assert_eq!(with_hash.password_hash.as_deref(), Some("$argon2id$fake"));
     }
 
     #[test]

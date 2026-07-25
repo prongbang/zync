@@ -6,6 +6,8 @@
 // already correct.
 
 import type {
+  AddMemberRequest,
+  AdminUser,
   BisectMarkRequest,
   BisectStartRequest,
   BisectStatus,
@@ -22,6 +24,7 @@ import type {
   CreateCredentialRequest,
   CreateFileRequest,
   CreateRepositoryRequest,
+  CreateUserRequest,
   CredentialRecord,
   DirectoryList,
   FavoriteRepositoryRequest,
@@ -40,6 +43,7 @@ import type {
   RemoteRequest,
   RemoteSummary,
   RenameFileRequest,
+  RepoMember,
   RepoStats,
   RepositoryRecord,
   RepositoryWithWorkspace,
@@ -53,6 +57,7 @@ import type {
   TagRequest,
   TagSummary,
   TreeEntrySummary,
+  UpdateMemberRequest,
   WorkspaceResponse,
   WriteFileRequest,
 } from "./types"
@@ -87,14 +92,31 @@ async function request(url: string, init?: RequestInit): Promise<Response> {
 
 const JSON_HEADERS = { "Content-Type": "application/json" }
 
+/**
+ * Thrown by `readOkOrThrow` on any non-2xx response. Still a plain `Error`
+ * (`error.message` is the server's raw body, same as before) so existing
+ * `error instanceof Error ? error.message : String(error)` call sites need no
+ * changes; `status` is additive, for callers that need to distinguish e.g. a
+ * 403 (expected — insufficient role) from a real failure (P3.5's Members tab).
+ */
+export class ApiError extends Error {
+  readonly status: number
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = "ApiError"
+    this.status = status
+  }
+}
+
 /** Reads the response body as text and throws it verbatim on non-2xx. */
 async function readOkOrThrow(response: Response): Promise<string> {
   const text = await response.text()
   if (!response.ok) {
-    throw new Error(
+    throw new ApiError(
       text.trim().length > 0
         ? text
-        : `request failed with status ${response.status}`
+        : `request failed with status ${response.status}`,
+      response.status,
     )
   }
   return text
@@ -201,6 +223,18 @@ export class ZyncApi {
     return postJson(this.url("/auth/ws-ticket"), { workspace_id: workspaceId })
   }
 
+  // ---- Admin: user provisioning (P3.5) ----
+  // Admin-only server-side (403 for any other caller); there is no
+  // self-service registration route.
+
+  async listUsers(): Promise<AdminUser[]> {
+    return getJson(this.url("/auth/users"))
+  }
+
+  async createUser(request: CreateUserRequest): Promise<CurrentUser> {
+    return postJson(this.url("/auth/users"), request)
+  }
+
   // ---- Repositories ----
 
   async repositories(): Promise<RepositoryRecord[]> {
@@ -238,6 +272,37 @@ export class ZyncApi {
 
   async workspace(id: string): Promise<WorkspaceResponse> {
     return getJson(this.url(`/workspace/${id}`))
+  }
+
+  // ---- Members (ADR-002 Decision 5 / P3.5) ----
+  // Owner/admin-only server-side (403 for a member/viewer caller — degrade
+  // gracefully rather than treating that as a hard error).
+
+  async listMembers(repositoryId: string): Promise<RepoMember[]> {
+    return getJson(this.url(`/repositories/${repositoryId}/members`))
+  }
+
+  async addMember(repositoryId: string, user: string, role: string): Promise<void> {
+    const request: AddMemberRequest = { user, role }
+    return postEmpty(this.url(`/repositories/${repositoryId}/members`), request)
+  }
+
+  async updateMemberRole(
+    repositoryId: string,
+    userId: string,
+    role: string,
+  ): Promise<void> {
+    const request: UpdateMemberRequest = { role }
+    return putEmpty(
+      this.url(`/repositories/${repositoryId}/members/${encodeURIComponent(userId)}`),
+      request,
+    )
+  }
+
+  async removeMember(repositoryId: string, userId: string): Promise<void> {
+    return del(
+      this.url(`/repositories/${repositoryId}/members/${encodeURIComponent(userId)}`),
+    )
   }
 
   // ---- Credentials ----
