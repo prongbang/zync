@@ -121,6 +121,12 @@ export type WorkspaceState = {
   deleteBranch: (name: string) => Promise<void>
   checkoutBranch: (name: string) => Promise<void>
   mergeBranch: (name: string, strategy?: MergeStrategy) => Promise<void>
+  /** Plain (non-interactive) rebase of the current branch onto `name` (P2.4) — the branch
+   * context menu's "Rebase on '<name>'..." and the drag-and-drop chooser's Rebase option both
+   * call this. On conflict the promise rejects (the caller's `run()` surfaces the message as a
+   * notice) but the repo is left mid-rebase; the server broadcasts the `conflicts` scope
+   * regardless so ConflictResolver picks it up over the websocket. */
+  rebaseBranch: (name: string) => Promise<void>
   createTag: (name: string, target?: string) => Promise<void>
   deleteTag: (name: string) => Promise<void>
   /** Pushes `refs/tags/<name>` to `remote` (defaults to `"origin"`). Same shape as
@@ -667,6 +673,11 @@ export function useWorkspace(): WorkspaceState {
       }, SCOPE_ALL),
     [run],
   )
+  const rebaseBranch = useCallback(
+    (name: string) =>
+      run((id) => api.rebaseBranch(id, name).then(() => `Rebased onto ${name}`), SCOPE_ALL),
+    [run],
+  )
   const createTag = useCallback(
     (name: string, target?: string) =>
       run(
@@ -892,6 +903,7 @@ export function useWorkspace(): WorkspaceState {
     deleteBranch,
     checkoutBranch,
     mergeBranch,
+    rebaseBranch,
     createTag,
     deleteTag,
     pushTag,

@@ -62,6 +62,7 @@ import { ShortcutsDialog } from "./components/ShortcutsDialog"
 import { Toolbar } from "./components/Toolbar"
 import {
   AddRepositoryDialog,
+  BranchMergeChooserDialog,
   DeleteDialog,
   DeleteTagDialog,
   DropDialog,
@@ -103,6 +104,7 @@ type ActiveDialog =
   | { kind: "stashApply"; index: number }
   | { kind: "revertParent"; commitId: string; parents: string[] }
   | { kind: "interactiveRebase"; commitId: string }
+  | { kind: "branchMergeChooser"; source: string; target: string }
   | null
 
 export function App() {
@@ -339,8 +341,20 @@ export function App() {
         setDialog({ kind: "tag", target: cmd.name })
         break
       case "rebase":
+        void ws.rebaseBranch(cmd.name)
+        break
       case "interactiveRebase":
-        ws.setNotice("Rebase onto a branch is available from a commit menu")
+        // The commit-menu interactive rebase editor (P1.6, InteractiveRebaseDialog) targets a
+        // single commit's range, not "onto a whole other branch" — no equivalent flow exists yet
+        // for a branch-onto-branch interactive rebase, so this stays a stub.
+        ws.setNotice("Interactive rebase onto a branch is available from a commit menu")
+        break
+      case "dropMergeChooser":
+        setDialog({
+          kind: "branchMergeChooser",
+          source: cmd.source,
+          target: cmd.target,
+        })
         break
     }
   }
@@ -969,6 +983,21 @@ export function App() {
           onSubmit={(p) => {
             void ws.mergeBranch(dialog.name, p.strategy)
             setDialog(null)
+          }}
+        />
+      )}
+      {dialog?.kind === "branchMergeChooser" && (
+        <BranchMergeChooserDialog
+          open
+          source={dialog.source}
+          target={dialog.target}
+          onOpenChange={(o) => !o && setDialog(null)}
+          onChoose={(choice) => {
+            // Reuses the exact BranchCommand the right-click context menu
+            // already emits for `source` — merge opens MergeDialog, rebase
+            // runs ws.rebaseBranch directly (P2.4).
+            setDialog(null)
+            onBranchCommand({ kind: choice, name: dialog.source })
           }}
         />
       )}

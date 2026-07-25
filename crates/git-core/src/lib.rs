@@ -1922,6 +1922,42 @@ pub fn cherry_pick_abort(path: impl AsRef<Path>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Rebases the currently checked-out branch onto `upstream` (a branch name, tag, or any revision
+/// `git rev-parse` can resolve) — the plain (non-interactive) counterpart to
+/// [`interactive_rebase`]. Implemented as a `git rebase <upstream>` shellout via [`run_git`]
+/// (Fork-parity pragmatism: replaying an entire branch's worth of commits one-by-one over
+/// libgit2, the way `interactive_rebase` does for an explicit step list, would just reimplement
+/// what the real `git rebase` already does correctly — including its own conflict bookkeeping —
+/// worse). `run_git` already hardens the shellout (`GIT_TERMINAL_PROMPT=0`, batch-mode SSH, a
+/// timeout) and classifies failures into a [`GitCommandError`] via [`classify_git_stderr`].
+///
+/// On conflict, `git rebase` stops mid-rebase with the conflicted state left in the working
+/// tree/index — exactly like a real terminal `git rebase` would. This function does NOT
+/// auto-abort: the conflict is returned as an error (classified `GitErrorKind::Conflict`, since
+/// `classify_git_stderr` matches "conflict" in git's stderr) so the caller can surface it and the
+/// repo is left mid-rebase for the caller to resolve and [`rebase_continue`], or bail out via
+/// [`rebase_abort`] — the same recovery path already used for [`interactive_rebase`] conflicts.
+pub fn rebase_branch(path: impl AsRef<Path>, upstream: &str) -> anyhow::Result<String> {
+    let repo = Repository::open(path.as_ref())?;
+    ensure_clean_for_history_rewrite(&repo)?;
+
+    // `upstream` comes straight from an HTTP request body (effectively unauthenticated — auth is
+    // a stub) with no shape restriction. Without a guard, a value like `--exec=<cmd>` or
+    // `--onto=...`/`--root` would be parsed by `git rebase` as an option rather than a revision —
+    // `--exec` runs arbitrary commands via the merge backend (default since git 2.26), and
+    // `--onto`/`--root` enable other destructive rewrites. Defense in depth, same as
+    // `submodule_add`'s `--`:
+    //   1. Resolve `upstream` with libgit2 first, entirely independent of the `git` CLI's own
+    //      option parser — a string like `--exec=...` does not `revparse` to a real object, so
+    //      this fails cleanly before the shellout is ever reached.
+    //   2. Pass `--` before `upstream` in the shellout too, so even a value that *does* revparse
+    //      (e.g. a ref literally named `--foo` is technically legal in git) can never be
+    //      misparsed as an option by `git rebase` itself.
+    repo.revparse_single(upstream)
+        .map_err(|_| anyhow::anyhow!("'{upstream}' is not a valid revision"))?;
+    run_git(path.as_ref(), &["rebase", "--", upstream])
+}
+
 pub fn interactive_rebase(
     path: impl AsRef<Path>,
     base: &str,
@@ -2192,13 +2228,26 @@ enum ReplayMode {
     Fixup,
 }
 
+/// Shared dirty-tree guard for anything that rewrites history in place (interactive rebase, plain
+/// branch-onto-branch rebase): a dirty working tree can't safely be `reset --hard`/replayed over.
+///
+/// Returns a `GitCommandError` (kind `Precondition`) rather than a plain `anyhow` error so HTTP
+/// callers that downcast via `map_git_error` (like `rebase_branch`'s server handler) can map this
+/// to 409 instead of falling back to 500 — while callers that still use a blanket
+/// `.map_err(internal_error)` (like `interactive_rebase`'s handler) are unaffected: the message
+/// text is unchanged and `internal_error` never looks at `kind`.
 fn ensure_clean_for_history_rewrite(repo: &Repository) -> anyhow::Result<()> {
     let mut options = StatusOptions::new();
     options.include_untracked(true).recurse_untracked_dirs(true);
     if repo.statuses(Some(&mut options))?.is_empty() {
         Ok(())
     } else {
-        anyhow::bail!("working tree must be clean before interactive rebase")
+        Err(GitCommandError {
+            command: "git rebase".to_string(),
+            stderr: "working tree must be clean before rebasing".to_string(),
+            kind: GitErrorKind::Precondition,
+        }
+        .into())
     }
 }
 
@@ -2344,6 +2393,9 @@ pub enum GitErrorKind {
     NonFastForward,
     /// Merge/rebase/checkout produced a conflict.
     Conflict,
+    /// A precondition the caller could have avoided (e.g. a dirty working tree before a
+    /// history-rewriting operation) rather than a git/transport failure.
+    Precondition,
     /// The child process did not exit within the allotted timeout and was killed.
     Timeout,
     /// Anything else; `GitCommandError::stderr` carries the raw detail.

@@ -846,6 +846,21 @@ export class ZyncApi {
     )
   }
 
+  // Plain (non-interactive) branch-onto-branch rebase (P2.4): rebases the current branch onto
+  // `name`. Reuses BranchRequest the same way mergeBranch does — `name` is the upstream branch.
+  async rebaseBranch(repositoryId: string, name: string): Promise<void> {
+    const request: BranchRequest = {
+      name,
+      new_name: null,
+      checkout: null,
+      revision: null,
+    }
+    return postEmpty(
+      this.url(`/repositories/${repositoryId}/git/rebase/branch`),
+      request
+    )
+  }
+
   websocketUrl(workspaceId: string): string {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:"
     const base = this.baseUrl.replace(/\/+$/, "")

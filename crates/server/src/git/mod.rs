@@ -101,6 +101,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/repositories/:id/git/lfs/pull", post(lfs_pull))
         .route("/repositories/:id/git/lfs/push", post(lfs_push))
         .route("/repositories/:id/git/rebase/plan", get(rebase_plan))
+        .route("/repositories/:id/git/rebase/branch", post(rebase_branch))
         .route(
             "/repositories/:id/git/rebase/interactive",
             post(interactive_rebase),
@@ -1303,6 +1304,33 @@ async fn lfs_push(
     Ok(result)
 }
 
+/// Plain (non-interactive) branch-onto-branch rebase — the counterpart to `interactive_rebase`
+/// for the BranchSidebar drag-and-drop chooser and the branch context menu's "Rebase on
+/// '<name>'..." action (P2.4). Reuses `BranchRequest.name` as the upstream branch name, matching
+/// `merge_branch`'s reuse of the same field for the branch being merged in.
+///
+/// Unlike most mutating routes here, this broadcasts the change *before* mapping a failure to an
+/// HTTP error rather than after: `zync_git_core::rebase_branch` shells out to real `git rebase`,
+/// which on conflict stops mid-rebase with the repo left in a conflicted state rather than
+/// rolling back. The caller's HTTP response surfaces the conflict as an error, but the UI only
+/// learns to render `ConflictResolver` from the websocket `conflicts` scope refresh — so that
+/// scope has to go out regardless of whether the rebase itself succeeded.
+async fn rebase_branch(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<BranchRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let result = zync_git_core::rebase_branch(repository.path, &request.name);
+    broadcast_git_change(
+        &state,
+        &id,
+        &["status", "diff", "branches", "commits", "conflicts"],
+    );
+    result.map_err(map_git_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn interactive_rebase(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1606,9 +1634,9 @@ fn git_error_kind_status(kind: zync_git_core::GitErrorKind) -> StatusCode {
     match kind {
         zync_git_core::GitErrorKind::Auth => StatusCode::UNAUTHORIZED,
         zync_git_core::GitErrorKind::Network => StatusCode::BAD_GATEWAY,
-        zync_git_core::GitErrorKind::NonFastForward | zync_git_core::GitErrorKind::Conflict => {
-            StatusCode::CONFLICT
-        }
+        zync_git_core::GitErrorKind::NonFastForward
+        | zync_git_core::GitErrorKind::Conflict
+        | zync_git_core::GitErrorKind::Precondition => StatusCode::CONFLICT,
         zync_git_core::GitErrorKind::Timeout => StatusCode::GATEWAY_TIMEOUT,
         zync_git_core::GitErrorKind::Other => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -1695,6 +1723,14 @@ mod tests {
     fn conflict_maps_to_409() {
         assert_eq!(
             git_error_status(&git_error(zync_git_core::GitErrorKind::Conflict)),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn precondition_maps_to_409() {
+        assert_eq!(
+            git_error_status(&git_error(zync_git_core::GitErrorKind::Precondition)),
             StatusCode::CONFLICT
         );
     }

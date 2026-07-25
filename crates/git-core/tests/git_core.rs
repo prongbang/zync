@@ -855,6 +855,120 @@ fn merge_ff_only_errors_on_diverged_branches() {
 }
 
 #[test]
+fn rebase_branch_replays_diverged_commit_onto_upstream_tip() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let feature = repo_with_ff_possible_feature_branch(temp.path());
+
+    // `rebase_branch` shells out to the real `git rebase`, which needs a committer identity to
+    // create the replayed commit; set it repo-locally so the test doesn't depend on the
+    // environment's global git config.
+    {
+        let repo = Repository::open(temp.path()).expect("open repo for config");
+        let mut config = repo.config().expect("repo config");
+        config.set_str("user.name", "Zync Test").expect("set user.name");
+        config
+            .set_str("user.email", "zync@test.local")
+            .expect("set user.email");
+    }
+
+    // Advance the checked-out branch too, so the rebase actually has to replay a commit rather
+    // than just fast-forwarding.
+    fs::write(temp.path().join("main-only.txt"), "main").expect("write main-only file");
+    zync_git_core::add(temp.path(), &["main-only.txt".to_string()]).expect("add main-only file");
+    let original_commit =
+        zync_git_core::commit(temp.path(), "Diverge", "Zync Test", "zync@test.local")
+            .expect("diverging commit");
+
+    let feature_tip = {
+        let repo = Repository::open(temp.path()).expect("open repo");
+        let branch = repo
+            .find_branch("feature", BranchType::Local)
+            .expect("find feature branch");
+        branch.get().target().expect("feature target").to_string()
+    };
+
+    zync_git_core::rebase_branch(temp.path(), &feature).expect("rebase onto feature");
+
+    let repo = Repository::open(temp.path()).expect("reopen repo after rebase");
+    let head = repo.head().expect("head").peel_to_commit().expect("head commit");
+    assert_ne!(
+        head.id().to_string(),
+        original_commit,
+        "rebase must replay the diverging commit as a new commit, not keep the old one"
+    );
+    assert_eq!(head.message().unwrap_or_default().trim(), "Diverge");
+    let parent = head.parent(0).expect("head parent");
+    assert_eq!(
+        parent.id().to_string(),
+        feature_tip,
+        "the replayed commit's parent must be feature's tip"
+    );
+    assert!(temp.path().join("feature.txt").exists());
+    assert!(temp.path().join("main-only.txt").exists());
+    assert!(zync_git_core::status(temp.path())
+        .expect("status")
+        .is_empty());
+}
+
+#[test]
+fn rebase_branch_requires_clean_working_tree() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let feature = repo_with_ff_possible_feature_branch(temp.path());
+    fs::write(temp.path().join("base.txt"), "dirty").expect("dirty working tree");
+
+    let error = zync_git_core::rebase_branch(temp.path(), &feature)
+        .expect_err("rebase must refuse to run against a dirty working tree");
+    assert!(
+        error.to_string().contains("clean"),
+        "error should explain the dirty-tree guard: {error}"
+    );
+}
+
+#[test]
+fn rebase_branch_rejects_option_like_upstream_and_does_not_shell_out() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    // Working tree must be clean for the dirty-tree guard not to pre-empt the ref check.
+    let _ = repo_with_ff_possible_feature_branch(temp.path());
+
+    let repo = Repository::open(temp.path()).expect("open repo");
+    let head_before = repo.head().expect("head").target().expect("head target");
+    drop(repo);
+
+    // A marker file that only gets created if `--exec=...` actually reaches and runs through
+    // `git rebase`'s merge backend — this is the injection `run_git(&["rebase", upstream])`
+    // (no `--` separator, no ref validation) was vulnerable to.
+    let marker = temp.path().join("PWNED");
+    let hostile = format!("--exec=touch {}", marker.display());
+
+    let error = zync_git_core::rebase_branch(temp.path(), &hostile).expect_err(
+        "an option-like upstream must be rejected before it ever reaches the `git` CLI",
+    );
+    assert!(
+        error.to_string().contains("not a valid revision"),
+        "error should explain the ref-validation failure: {error}"
+    );
+    assert!(
+        !marker.exists(),
+        "rebase_branch must never let an option-like upstream run arbitrary commands via --exec"
+    );
+
+    // Also try `--onto`, the other destructive-rewrite flag called out alongside `--exec`.
+    let onto_error = zync_git_core::rebase_branch(temp.path(), "--onto=HEAD")
+        .expect_err("--onto=... must also be rejected as an invalid revision");
+    assert!(onto_error.to_string().contains("not a valid revision"));
+
+    let repo = Repository::open(temp.path()).expect("reopen repo");
+    let head_after = repo.head().expect("head").target().expect("head target");
+    assert_eq!(
+        head_before, head_after,
+        "a rejected upstream must never move HEAD or rewrite history"
+    );
+    assert!(zync_git_core::status(temp.path())
+        .expect("status")
+        .is_empty());
+}
+
+#[test]
 fn revert_merge_commit_requires_mainline_and_succeeds_with_it() {
     let temp = tempfile::tempdir().expect("tempdir");
     let feature = repo_with_ff_possible_feature_branch(temp.path());
