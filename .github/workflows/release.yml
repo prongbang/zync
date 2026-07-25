@@ -147,33 +147,28 @@ jobs:
   binaries:
     name: Build binary (${{ matrix.target }})
     needs: [verify-version, create-release]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Every leg builds natively on a runner whose host arch/OS matches
+          # the target — cross-compiling git2/libgit2 (+ OpenSSL) C
+          # dependencies via `cross`/Docker sysroots was unreliable (v0.1.0's
+          # x86_64-apple-darwin and aarch64-unknown-linux-gnu legs both failed
+          # at the `Build zync-server` step). GitHub-hosted arm64 Linux and
+          # Intel macOS runners are free for public repos, so no cross tool
+          # is needed for any of the four targets.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            cross: false
-          # aarch64-linux is cross-compiled from the ubuntu-latest (x86_64)
-          # runner via `cross`, which supplies a Docker sysroot with the
-          # target's OpenSSL/libgit2 toolchain already wired up for pkg-config
-          # — plain `cargo build --target` would fail to link a gnu-target
-          # binary this way without a manually-installed cross toolchain.
+            runner: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            cross: true
-          # macos-latest runners are Apple Silicon; x86_64-apple-darwin is
-          # built by cross-compiling with the same Xcode toolchain (no
-          # separate cross tool needed for Apple targets).
+            runner: ubuntu-24.04-arm
           - target: x86_64-apple-darwin
-            os: macos-latest
-            cross: false
+            runner: macos-15-intel
           - target: aarch64-apple-darwin
-            os: macos-latest
-            cross: false
+            runner: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -194,18 +189,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross
-        if: matrix.cross
-        run: cargo install cross --locked --version 0.2.5
-
       - name: Build zync-server
         run: |
           set -euo pipefail
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release -p zync-server --features embed-ui --target ${{ matrix.target }}
-          else
-            cargo build --release -p zync-server --features embed-ui --target ${{ matrix.target }}
-          fi
+          cargo build --release -p zync-server --features embed-ui --target ${{ matrix.target }}
 
       - name: Package tarball and checksum
         run: |

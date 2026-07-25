@@ -8,6 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-25
+
+### Changed
+
+- The server executable is named `zync` and runs via a `zync serve`
+  subcommand (a `clap`-based CLI), rather than a bare server binary.
+- Removed remaining references to the Fork Git client from the docs.
+- `README.md` documents the first-run flow, including the default admin
+  sign-in.
+
+### Fixed
+
+- **Release pipeline: build every platform on a native runner.** The four
+  `binaries` release-workflow legs now build on a runner matching their
+  target's OS/arch (`ubuntu-latest`, `ubuntu-24.04-arm`, a native Intel
+  macOS runner, and a native Apple Silicon macOS runner) instead of
+  cross-compiling `x86_64-apple-darwin` and `aarch64-unknown-linux-gnu` from
+  a mismatched host. Cross-compiling git2/libgit2's (+ OpenSSL) C
+  dependencies via `cross`/Docker sysroots or Xcode's `-arch` cross-linking
+  was unreliable and caused both of those legs to fail to build in v0.1.0,
+  so that release shipped without `x86_64-apple-darwin` and
+  `aarch64-unknown-linux-gnu` binaries.
+- `install.sh` no longer resolves the latest version via the unauthenticated
+  GitHub REST API (which is rate-limited to 60 requests/hour per IP and was
+  getting exhausted); it now follows the `releases/latest` redirect instead.
+
 ## [0.1.0] - 2026-07-25
 
 First tagged release. Zync is a self-hosted, desktop-style Git workspace client: a Rust/Axum
@@ -77,5 +103,6 @@ plan phases P0-P6.
   menu) only support linear history; merge commits are rejected rather than
   guessed at.
 
-[Unreleased]: https://github.com/prongbang/zync/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/prongbang/zync/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/prongbang/zync/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/prongbang/zync/releases/tag/v0.1.0
