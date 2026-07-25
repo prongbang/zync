@@ -838,3 +838,277 @@ Secret-hygiene rules (binding on both crates, and the P4.3 audit):
 - The SSH-key-on-disk exposure is confined to `merge`/`rebase` pulls (0600, tmpfs, unlinked); everything else is
   in-memory. Force-with-lease keeps its safety via a manual remote-oid check on the libgit2 push.
 - New dependencies: `chacha20poly1305`, `base64`, `rand`/`getrandom` (server); `zeroize` (git-core).
+
+---
+
+## ADR-002: Authentication & multi-user
+
+Status: Accepted (2026-07-25). Scope: P3.1 decision record for P3.2 (server auth core), P3.3 (per-user
+authorization), P3.4 (frontend auth), and P3.5 (member management). Sequel to ADR-001, which already made
+credentials per-user (`credentials.user_id`) behind a hardcoded `DEFAULT_USER_ID = "owner"` seam this ADR
+turns into a request-derived identity.
+
+### Context
+
+Auth is a stub. `crate::auth::login` (`crates/server/src/auth/mod.rs`) takes an email + optional name,
+`INSERT OR IGNORE`s a user, and hands back a random `token`/`refresh_token` — **no password is ever checked**
+and any caller can mint a session for any email. `logout` deletes a session by a token passed in the request
+*body*. Nothing consumes the session: every route runs unauthenticated, `CorsLayer::permissive()` accepts any
+origin, and the `/ws/workspace/:id` upgrade (`crates/server/src/websocket/mod.rs`) performs no handshake auth
+at all. The whole server acts as the one seeded `owner` user — `credentials` hardcodes `DEFAULT_USER_ID`
+(`crates/server/src/credentials/mod.rs:25`), `workspace_for_repository` seeds `workspace_members` with a
+literal `"owner"`/`"Owner"` row, and repositories have no owner column.
+
+Zync is a self-hosted, single-tenant tool (Fork-for-teams, not a SaaS). It needs **real password auth,
+server-side sessions, and per-repository authorization** — while preserving today's zero-friction
+single-user LAN/dev experience so existing deploys don't break. Registration is **admin-invite, not open
+signup**: there is no public "create account" flow.
+
+### Decision 1 — Password auth (argon2id) + first-boot admin bootstrap
+
+`users` gains a password column; login verifies a password against it.
+
+```sql
+-- users: add (migration below preserves the existing seeded `owner` row)
+password_hash TEXT           -- argon2id PHC string; NULL only for the un-bootstrapped seed row
+created_at    TEXT           -- backfilled to now() for the existing row
+-- role vocabulary normalized to the global scale: 'admin' | 'user'
+-- (repo-scoped roles live in workspace_members — Decision 5, distinct axis)
+```
+
+- **Hashing: `argon2` crate, `Argon2::default()` = argon2id, v19, m=19456 KiB, t=2, p=1.** argon2id (not
+  bcrypt/scrypt/pbkdf2) is the current OWASP first choice — hybrid resistance to both GPU and side-channel
+  attack. Salt is a fresh 16 bytes from `OsRng` per hash; the full **PHC string** (`$argon2id$v=19$m=...`)
+  is stored in `password_hash`, so the params travel with the hash and can be tuned later without a schema
+  change. Verification uses constant-time `PasswordVerifier::verify_password`. Password hashing runs on a
+  blocking thread (`tokio::task::spawn_blocking`) — argon2 is deliberately CPU/memory-heavy and must not
+  block the async runtime, and this doubles as a natural throttle on the single-connection DB.
+- **Login is username/email + password.** `POST /auth/login { identifier, password }` looks up the user by
+  email (case-insensitive), verifies the hash, and on success issues a session cookie (Decision 2). It
+  **never auto-creates a user** (the current `INSERT OR IGNORE` is deleted). A failed lookup still runs a
+  verify against a fixed dummy hash so timing doesn't distinguish "no such user" from "wrong password", and
+  the response is a flat `401` with a generic body (`"invalid credentials"`) — no user-enumeration signal.
+- **First-boot admin bootstrap — env-first, printed one-time link as fallback.** On startup, if **no user
+  has a non-NULL `password_hash`** (i.e. only the un-bootstrapped seed exists):
+  1. **`ZYNC_ADMIN_USER` + `ZYNC_ADMIN_PASSWORD` set →** hash the password and set it on the seed `owner`
+     user (promoting it to `role='admin'`, updating its email to `ZYNC_ADMIN_USER`). Deterministic and
+     container-friendly, mirroring the `ZYNC_SECRET_KEY` env pattern from ADR-001 — this is the
+     **recommended path for Docker/compose/k8s**.
+  2. **Neither env var set →** generate a single-use, 24-hour **setup token** and log one loud `WARN` line
+     with a `/setup?token=…` URL. Visiting it (a minimal server-rendered/one-shot API flow) lets the
+     operator set the admin email + password once; the token is consumed and can never bootstrap again.
+     This is the path for a bare interactive host where baking a password into the environment is awkward.
+  - Once any admin exists, both mechanisms are inert. Bootstrap **only ever touches the un-bootstrapped
+    state** — it can't reset a live admin's password (that's an authed admin action), so leaving the env
+    vars set across restarts is safe.
+- **User creation is admin-only** (P3.5): `POST /auth/users` (guarded by `role='admin'`) creates a user with
+  an initial password; there is no self-service registration route.
+
+### Decision 2 — Opaque cookie sessions, sliding expiry, server-side revocation
+
+The client authenticates with an **HttpOnly cookie carrying an opaque, high-entropy session id**; all session
+state is server-side in `sessions`, so logout and expiry are real (not just client-forgotten JWTs).
+
+```sql
+-- sessions: replace the current (token, refresh_token, user_id, created_at) shape
+CREATE TABLE sessions (
+    id         TEXT PRIMARY KEY,   -- sha256(raw_token) hex — NOT the raw token
+    user_id    TEXT NOT NULL,
+    created_at TEXT NOT NULL,      -- absolute-lifetime anchor
+    last_used  TEXT NOT NULL,      -- sliding-window anchor; throttled writes (below)
+    expires_at TEXT NOT NULL,      -- now + idle TTL, bumped on refresh
+    FOREIGN KEY(user_id) REFERENCES users(id)
+);
+CREATE INDEX idx_sessions_expires_at ON sessions(expires_at);
+```
+
+- **The cookie value is a 256-bit random token (32 bytes `OsRng`, base64url); the DB stores only its
+  SHA-256.** This is the same "DB read ≠ usable secret" posture as ADR-001's write-only credentials: a leaked
+  DB backup yields session *hashes*, not live bearer tokens (SHA-256 is fine here — the token is
+  high-entropy, so there's nothing to brute-force). `refresh_token` is **dropped**: an opaque server-side
+  session that slides its own expiry needs no separate refresh token (that construct only earns its keep for
+  stateless JWTs).
+- **Cookie attributes.** Name `zync_session`; `HttpOnly` (JS can't read it — blunts XSS token theft);
+  `SameSite=Lax` (CSRF baseline, Decision 7); `Path=/`; `Secure` **on by default**, disableable via
+  `ZYNC_COOKIE_INSECURE=1` for plain-HTTP LAN/dev (documented as a weakening, like ADR-001's dev key). No
+  `Domain` attribute (host-only cookie). `Max-Age` mirrors the idle TTL and is re-sent on refresh.
+- **TTLs — sliding idle window under an absolute cap.**
+  - **Idle TTL = 7 days** (`expires_at = now + 7d`). A session unused for 7 days is dead.
+  - **Refresh window = 1 day.** On an authenticated request, if `now - last_used > 1d` (and the session is
+    still valid), bump `last_used = now`, `expires_at = now + 7d`, and re-set the cookie. The 1-day
+    threshold means at most one session-row write per active session per day — critical because the DB is a
+    single `Arc<Mutex<Connection>>` and we will not take that lock on every request.
+  - **Absolute lifetime cap = 30 days** from `created_at`. Past the cap, refresh is refused and the user
+    re-logs-in regardless of activity — bounds the damage window of a silently-stolen cookie.
+- **Revocation & sweep.** `POST /auth/logout` reads the session from the cookie (not the body), deletes the
+  row, and returns a `Set-Cookie` that clears `zync_session`. Expiry is enforced on read (an
+  `expires_at <= now` row is treated as absent and opportunistically deleted). A background `tokio` task
+  sweeps `DELETE FROM sessions WHERE expires_at <= now()` every ~30 min so dead rows don't accumulate. An
+  admin "revoke all sessions for user X" is a straight `DELETE ... WHERE user_id = ?` (P3.5, optional).
+
+### Decision 3 — `ZYNC_AUTH=disabled` escape hatch (preserve today's behavior)
+
+A single env var selects the auth mode, read once at startup into `AppState`:
+
+- **`ZYNC_AUTH=enabled` (default once P3 ships):** everything in this ADR is live.
+- **`ZYNC_AUTH=disabled`:** **exactly today's single-user/no-auth behavior.** Concretely: the auth
+  middleware (Decision 4) short-circuits and injects a **synthetic session for the seeded `owner` user**
+  (`AuthUser { id: "owner", role: "admin" }`) into every request; **all routes are open**; `/auth/login`
+  and `/auth/logout` become no-ops that succeed against the synthetic owner (so a frontend built for auth
+  still boots); the WebSocket ticket check (Decision 4) is bypassed; authorization checks (Decision 5)
+  all resolve to the owner and pass. No cookie is set or required. This is the LAN/dev/existing-deploy mode
+  — the same `DEFAULT_USER_ID = "owner"` identity, now flowing through the real request-user seam instead of
+  being hardcoded per handler. It is **not** a security feature; docs must state that `disabled` means "trust
+  every caller on the network" and is only appropriate behind a trusted boundary.
+
+The value is validated at boot (unknown value = refuse to start) so a typo can't silently open a server that
+the operator believed was locked.
+
+### Decision 4 — One auth middleware over every route; WebSocket via short-lived ticket
+
+- **`AuthUser` extractor + a `tower` middleware layer over the whole router.** A `middleware::from_fn_with_state`
+  layer runs before the merged route modules (`auth`, `repository`, `workspace`, `files`, `git`, `websocket`,
+  `collaboration`, `credentials` in `main.rs`). It (a) resolves `ZYNC_AUTH`; (b) in `disabled` mode injects
+  the synthetic owner; (c) in `enabled` mode reads `zync_session`, looks up the (unexpired) session, performs
+  the throttled sliding refresh, loads the user, and inserts an `AuthUser` into request extensions — or
+  returns **`401`** on missing/expired/unknown session. Handlers then take `AuthUser` via `Extension<AuthUser>`
+  (or a thin `FromRequestParts` newtype), replacing every hardcoded `DEFAULT_USER_ID`. Putting auth in one
+  layer (not per-handler) means a newly-added route is authenticated by default — you must *opt out*, not
+  remember to opt in.
+- **Unauthenticated allowlist (the only open routes):** `POST /auth/login`, `GET /health`, the setup-token
+  flow (`/setup*`), and the SPA static assets / index fallback (so the login page itself can load). The
+  allowlist is matched inside the middleware by exact path; **everything else requires a session**, including
+  `/auth/logout`, `/auth/me`, all `/repositories/*`, `/workspace/*`, `/files/*`, `/collaboration/*`,
+  `/credentials/*`, and the WS route.
+- **`GET /auth/me`** returns the current `AuthUser` (id, email, name, role) or `401` — the frontend's
+  session-probe on load and the seam for the 401-interceptor→login-redirect (P3.4).
+- **WebSocket auth — short-lived single-use ticket (recommended over cookie-on-WS).** The browser *does* send
+  cookies on a same-origin WS upgrade, so cookie auth "works" in production — but it is fragile exactly where
+  Zync runs: the dev Vite proxy, non-browser clients, and any future cross-origin embed don't reliably carry
+  the cookie on the upgrade, and putting a long-lived session token in the WS URL query would leak it into
+  access logs. So we standardize on a **ticket**: an authed `POST /auth/ws-ticket` (behind the normal
+  middleware, so it *is* cookie-authed) returns a single-use, ~30 s-TTL opaque ticket bound to
+  `(user_id, workspace_id)`, held in an in-memory `AppState` map (not the DB — it's ephemeral). The client
+  opens `/ws/workspace/:id?ticket=…`; `workspace_socket` validates the ticket **before `on_upgrade`**,
+  consumes it (single-use), checks it matches the path's workspace, resolves the `AuthUser`, and only then
+  upgrades — else `401`/close. Short TTL + single-use + ephemeral store bound the query-string exposure to
+  near-nothing. (A `Sec-WebSocket-Protocol` subprotocol carrying the ticket, keeping it out of the URL
+  entirely, is a clean refinement if the frontend WS client supports it — same ticket, different channel.)
+  One code path serves both prod and dev, independent of cookie propagation quirks.
+
+### Decision 5 — Per-user authorization: repo `owner_id` + `workspace_members` roles
+
+Two distinct role axes: a **global** role on `users` (`admin` | `user` — admin manages users/all repos) and a
+**per-repository** role via `workspace_members` (`owner` | `member` | `viewer`). This ADR standardizes the
+repo-scoped vocabulary (the code currently seeds a stray `"Owner"`; normalize to lowercase `owner`).
+
+```sql
+-- repositories: add
+owner_id TEXT REFERENCES users(id)   -- creator; backfilled to 'owner' (Decision 6)
+```
+
+- **Access model.** A user may act on a repository iff they are its `owner_id` **or** hold a
+  `workspace_members` row on that repo's workspace (or are a global `admin`, who sees all). Membership is the
+  unit of sharing; P3.5's member-management UI adds/removes `workspace_members` rows and picks the role.
+- **Roles.** `owner` = full control incl. repo delete, member management, owner transfer. `member` = all git
+  operations (read + write/mutate) but no member management. `viewer` = **read-only**: may hit read endpoints,
+  may not mutate.
+- **Enforcing read vs write at the route layer.** The git router already follows a clean invariant — **`GET`
+  is read, `POST`/`PUT`/`DELETE` mutate** (and, per CLAUDE.md, every mutating route ends with
+  `broadcast_git_change`). So a **repo-scope guard** (an extractor resolving `:id` → the caller's role on that
+  repo, layered on the `/repositories/:id/*` and `/workspace/:id/*` subtrees) maps **HTTP method → required
+  capability**: safe methods need `viewer+`; mutating methods need `member+`; owner-only actions
+  (repo delete, `POST /…/members*`) need `owner`. This reuses the existing `repository(&state, &id)` lookup
+  point. Non-members get `403` (distinct from the `401` for "not logged in"); a viewer attempting a `POST`
+  gets `403`.
+  - *Caveat, test-enforced:* method-based read/write is correct **only while the GET=read invariant holds**.
+    A future non-mutating `POST` (or a mutating `GET`) would misclassify. Guard it with a test that asserts
+    every registered mutating route uses a non-safe method (and, ideally, that the set of routes calling
+    `broadcast_git_change` equals the set the guard treats as writes). If a genuine read-only POST ever
+    appears, give it an explicit per-route capability tag rather than bending the rule.
+- **Credentials become truly per-user.** `DEFAULT_USER_ID` in `crate::credentials` is replaced by
+  `auth_user.id`; the already-user-scoped queries (`list_credentials_by_user`, `get_decryptable`,
+  `delete_credential` — all take `user_id` and were built IDOR-safe in ADR-001) now receive the real id, so
+  the credentials authorization story lands for free.
+
+### Decision 6 — Migration & back-compat
+
+Additive migration in the same `migrate()` batch (`ALTER TABLE … ADD COLUMN`; the `sessions` reshape is a
+drop+recreate since its rows are ephemeral and any live "sessions" are unauthenticated anyway):
+
+- **`users`:** add `password_hash TEXT` (NULL-able), `created_at TEXT`; backfill `created_at` for the seed
+  row; normalize `role` to `admin`/`user`. The seeded `owner` row survives with `password_hash = NULL` until
+  bootstrap (Decision 1) sets it — an un-bootstrapped `enabled` server has no one who can log in, which is
+  the correct fail-closed state until the operator bootstraps.
+- **`repositories`:** add `owner_id TEXT`; **backfill every existing repo's `owner_id = 'owner'`** and ensure
+  a `workspace_members(workspace_id, 'owner', 'owner')` row exists for each — so all pre-auth repositories
+  belong to the bootstrapped admin and nothing becomes orphaned/invisible when auth flips on.
+- **`sessions`:** drop and recreate with the new shape; existing rows are discarded (everyone re-logs-in
+  once — acceptable, they were never real sessions).
+- **The `DEFAULT_USER_ID = "owner"` seam** becomes request-derived: in `disabled` mode the middleware still
+  yields `"owner"` (identical behavior); in `enabled` mode it yields the real authed id. The literal `"owner"`
+  user id is retained as the bootstrap admin's id so the backfill lines up and no data migration of foreign
+  keys is needed.
+
+### Decision 7 — Threat notes & composition with P4
+
+- **CSRF.** `SameSite=Lax` is the primary mitigation: the browser withholds `zync_session` on cross-site
+  **sub-resource / form-POST** requests, so a malicious page can't drive a state-changing `POST` with the
+  victim's cookie. Lax (not Strict) is chosen so a top-level navigation *to* Zync still carries the cookie
+  (login-then-land UX). **Do we need CSRF tokens too?** Lax leaves a residual gap only for top-level
+  `GET`-triggered navigations, and all our mutations are non-GET, so **no synchronizer token for v1** —
+  but we add belt-and-suspenders that cost nothing: (a) require a custom header the browser only sends
+  same-origin (the frontend already calls JSON APIs via `fetch`, which can set `X-Requested-With` /
+  `Content-Type: application/json`; a simple cross-site form can't set those), and (b) the P4.2 same-origin
+  CORS lockdown, which independently blocks cross-origin credentialed reads. If we later add cookie-authed
+  cross-origin use, revisit with a double-submit token.
+- **Session fixation.** Sessions are server-minted only on successful login and the id is never
+  attacker-settable (no "accept a session id from the client"); on login we always create a **fresh** row.
+  Nothing to fixate.
+- **Cookie theft.** `HttpOnly` blocks XSS-based reads; `Secure` blocks network sniffing (behind TLS); storing
+  only `sha256(token)` blocks DB-leak reuse; the 30-day absolute cap and 7-day idle TTL bound a stolen
+  cookie's usefulness; admin revoke + logout give an active kill switch. Residual XSS that *acts through* the
+  cookie (rather than exfiltrating it) is mitigated by the P4.2 CSP.
+- **Brute force / enumeration.** Generic `401` + constant-time dummy-verify (Decision 1) blunt enumeration;
+  **rate-limiting `/auth/login` and `/auth/ws-ticket` is P4.2** (`tower_governor`) — this ADR leaves the
+  hooks (distinct routes, generic errors) so P4 can clamp them without reshaping auth.
+- **Composition with P4.** This ADR assumes and depends on P4.2 (replace `CorsLayer::permissive()` with a
+  same-origin default + `ZYNC_CORS_ORIGINS`, security headers incl. CSP, request-body limits) and P4.1
+  (`ZYNC_REPOS_ROOT` filesystem boundary — an authed non-admin still must not register `/etc`). Auth is
+  necessary but not sufficient; the two land adjacent by design and P3.7/P4.4 security reviews cover the seam.
+
+### Consequences
+
+- **P3.2 can start immediately** against: the `users.password_hash` + reshaped `sessions` schema, the
+  `zync_session` cookie contract (name/attrs/TTLs above), the `AuthUser` extractor + whole-router middleware,
+  `/auth/login`·`/auth/logout`·`/auth/me`·`/auth/ws-ticket`, the bootstrap logic, and the WS ticket handshake.
+- **P3.3** adds `repositories.owner_id`, the repo-scope role guard (method→capability), the migration backfill,
+  and swaps `DEFAULT_USER_ID` for `auth_user.id` in `credentials` (and anywhere else the owner id is assumed).
+- **New deploy env (document alongside `ZYNC_SECRET_KEY`/`ZYNC_REPOS_ROOT` in P5.5):** `ZYNC_AUTH`
+  (`enabled`|`disabled`, default `enabled`), `ZYNC_ADMIN_USER`/`ZYNC_ADMIN_PASSWORD` (first-boot bootstrap),
+  `ZYNC_COOKIE_INSECURE` (drop `Secure` for plain-HTTP LAN). The Docker image ships `ZYNC_AUTH=enabled` by
+  default (launch-checklist item).
+- **Behavior change:** `enabled` mode makes the frontend's current no-login flow break by design — P3.4 must
+  ship the login screen + 401 interceptor in the same release that flips the default. `disabled` mode is the
+  bridge that keeps existing LAN deploys working untouched.
+- **New dependencies (server):** `argon2`, `cookie` (or `axum-extra`'s `CookieJar`), `sha2`, `rand`; `tokio`
+  blocking pool already present for the argon2 offload.
+- **Not in scope (deferred):** OAuth/SSO, email-based password reset (admin resets in-app for now), 2FA,
+  per-branch ACLs, and audit logging — noted as post-v1 if demand appears.
+
+#### Task-by-task breakdown (maps to PLAN.md P3)
+
+- **P3.2 — Server auth core.** Schema (`users.password_hash`/`created_at`, `sessions` reshape); argon2id
+  hash/verify on `spawn_blocking`; cookie issue/clear/refresh (sliding + absolute cap); `sessions` sweep task;
+  `AuthUser` extractor + router-wide middleware with the unauthenticated allowlist; `/auth/login`,
+  `/auth/logout`, `/auth/me`; first-boot bootstrap (env + one-time-link); `ZYNC_AUTH=disabled` synthetic-owner
+  path; WS `/auth/ws-ticket` + handshake validation in `workspace_socket`.
+- **P3.3 — Per-user scoping.** `repositories.owner_id` + backfill; repo-scope role guard (viewer/member/owner
+  via method→capability) over `/repositories/:id/*`; normalize `workspace_members` role vocabulary; replace
+  `DEFAULT_USER_ID` with the request user in `credentials`; the "no GET mutates" regression test.
+- **P3.4 — Frontend auth.** Login screen; `api.ts` 401 interceptor → redirect to login; `/auth/me` session
+  probe on load; call `/auth/ws-ticket` before opening the workspace socket and pass the ticket in the WS
+  URL/subprotocol; user menu (logout, credentials entry); transparently no-op the login flow when the server
+  reports `disabled`.
+- **P3.5 — Member management UI.** Admin `POST /auth/users` (create user) + user list; per-repository
+  member add/remove + role picker writing `workspace_members`; owner-only guards on those routes.
