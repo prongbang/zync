@@ -50,6 +50,7 @@ import {
   type BranchCommand,
   type TagCommand,
 } from "./components/BranchSidebar"
+import { CommandPalette } from "./components/CommandPalette"
 import { CommitGraph } from "./components/CommitGraph"
 import { ConflictResolver } from "./components/ConflictResolver"
 import { DiffPanel } from "./components/DiffPanel"
@@ -57,6 +58,7 @@ import { FileHistorySheet } from "./components/FileHistorySheet"
 import { GitToolsPanel } from "./components/GitToolsPanel"
 import { RepoMinibar } from "./components/RepoMinibar"
 import { RepoStatsPanel } from "./components/RepoStatsPanel"
+import { ShortcutsDialog } from "./components/ShortcutsDialog"
 import { Toolbar } from "./components/Toolbar"
 import {
   AddRepositoryDialog,
@@ -74,6 +76,7 @@ import {
   TagDialog,
 } from "./components/dialogs"
 import { useIsMobile } from "./hooks/use-mobile"
+import { useShortcuts } from "./hooks/use-shortcuts"
 import { WORKDIR_REVISION } from "./lib/api"
 import { graphRows, statusLabel, type BlameRow } from "./lib/helpers"
 import { formatCommitTime, gravatarSrc, shortId } from "./lib/format"
@@ -110,6 +113,9 @@ export function App() {
   const [blame, setBlame] = useState<BlameRow[] | null>(null)
   const [dialog, setDialog] = useState<ActiveDialog>(null)
   const [addRepoOpen, setAddRepoOpen] = useState(false)
+  // P2.3 command palette + keyboard-shortcuts cheat sheet.
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
   // Commit search/filter (P1.3). historyResults is null until a full-history
   // search has run; non-null replaces CommitGraph's list with a flat results view.
   const [commitQuery, setCommitQuery] = useState("")
@@ -262,6 +268,52 @@ export function App() {
     if (path === "") return
     setFileHistoryTarget(path)
   }
+
+  // P2.3 — palette + shortcut handlers. Toasts the outcome of a remote op the
+  // same way the Toolbar buttons do (useWorkspace's remote actions resolve to a
+  // message / reject with the error).
+  function toastRemote(op: Promise<string>) {
+    op.then((message) => toast.add({ title: message, type: "success" })).catch(
+      (error) =>
+        toast.add({
+          title: error instanceof Error ? error.message : String(error),
+          type: "error",
+        }),
+    )
+  }
+
+  function focusCommitSearch() {
+    // The search field only renders in All Commits mode; focus it once painted.
+    setMode("commits")
+    requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLInputElement>('[data-testid="search-input"]')
+        ?.focus()
+    })
+  }
+
+  function selectCommitFromPalette(commitId: string) {
+    setSelectedCommit(commitId)
+    setMode("commits")
+    if (isMobile) setDetailSheetOpen(true)
+  }
+
+  function commitFromShortcut() {
+    if (!currentRepoId || !message.trim()) return
+    void ws.commit(message).then(() => setMessage(""))
+  }
+
+  const headBranch = ws.branches.find((b) => b.is_head)?.name ?? "HEAD"
+
+  useShortcuts({
+    onOpenPalette: () => setPaletteOpen((open) => !open),
+    onCommit: commitFromShortcut,
+    onFocusSearch: focusCommitSearch,
+    onRefresh: () => ws.refresh(),
+    onShowShortcuts: () => setShortcutsOpen(true),
+    hasRepo: currentRepoId !== null,
+  })
+
   const changedPaths = ws.gitStatus
     .filter((f) => f.staged || f.unstaged || f.untracked || f.conflicted)
     .map((f) => f.path)
@@ -1037,6 +1089,29 @@ export function App() {
           handleJumpToCommit(commitId)
         }}
       />
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        hasRepo={currentRepoId !== null}
+        repositories={ws.repositories}
+        activeRepoId={currentRepoId}
+        branches={ws.branches}
+        commits={ws.commits}
+        onOpenRepository={(id) => void ws.openRepository(id)}
+        onCheckoutBranch={(name) => void ws.checkoutBranch(name)}
+        onSelectCommit={selectCommitFromPalette}
+        onFetch={() => toastRemote(ws.fetchRemote())}
+        onFetchAll={() => toastRemote(ws.fetchRemote(true))}
+        onPull={(mode) => toastRemote(ws.pullRemote(mode))}
+        onPush={() => toastRemote(ws.pushRemote())}
+        onStash={() => void ws.createStash("WIP from Zync")}
+        onNewBranch={() => setDialog({ kind: "newBranch", at: headBranch })}
+        onNewTag={() => setDialog({ kind: "tag", target: "HEAD" })}
+        onFocusSearch={focusCommitSearch}
+        onRefresh={() => ws.refresh()}
+        onShowShortcuts={() => setShortcutsOpen(true)}
+      />
+      <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
     </div>
   )
 }
