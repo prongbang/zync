@@ -102,6 +102,17 @@ impl CollaborationState {
             workspace.locks.remove(path);
         }
     }
+
+    /// The `user_id` currently holding the lock on `path`, if any. Used to
+    /// authorize `unlock_file`, whose route carries no `:user_id` — only the
+    /// path being unlocked.
+    fn lock_owner(&self, workspace_id: &str, path: &str) -> Option<String> {
+        self.inner
+            .read()
+            .expect("collaboration lock")
+            .get(workspace_id)
+            .and_then(|workspace| workspace.locks.get(path).cloned())
+    }
 }
 
 async fn presence(
@@ -163,30 +174,56 @@ fn authorize_presence_actor(auth: &AuthUser, user_id: &str) -> Result<(), (Statu
 
 async fn lock_file(
     State(state): State<Arc<AppState>>,
+    auth: AuthUser,
     Path((workspace_id, path)): Path<(String, String)>,
-    Json(request): Json<serde_json::Value>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let user_id = request
-        .get("user_id")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "user_id is required".to_string()))?;
-    state.collaboration.set_lock(&workspace_id, &path, user_id);
+    state.collaboration.set_lock(&workspace_id, &path, &auth.id);
     let mut event = WorkspaceEvent::new("file_locked");
     event.path = Some(path);
-    event.user_id = Some(user_id.to_string());
+    event.user_id = Some(auth.id);
     state.hub.broadcast(&workspace_id, event);
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn unlock_file(
     State(state): State<Arc<AppState>>,
+    auth: AuthUser,
     Path((workspace_id, path)): Path<(String, String)>,
-) -> StatusCode {
+) -> Result<StatusCode, (StatusCode, String)> {
+    authorize_lock_actor(&auth, &state, &workspace_id, &path)?;
     state.collaboration.remove_lock(&workspace_id, &path);
     let mut event = WorkspaceEvent::new("file_unlocked");
     event.path = Some(path);
     state.hub.broadcast(&workspace_id, event);
-    StatusCode::NO_CONTENT
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// N1 (P4.4 security review): `lock_file`/`unlock_file` carry no `:user_id`
+/// in the route — `lock_file` used to take the actor straight from the
+/// request body (any member could lock a path *as* someone else), and
+/// `unlock_file` had no actor check at all (any member could clear anyone's
+/// lock). `lock_file` now always locks as the authenticated caller
+/// (`AuthUser`, ignoring any body-supplied identity); `unlock_file` may only
+/// be called by the lock's current holder or a global admin. Unlocking a
+/// path with no active lock is a no-op regardless of caller — nothing to
+/// authorize against.
+fn authorize_lock_actor(
+    auth: &AuthUser,
+    state: &AppState,
+    workspace_id: &str,
+    path: &str,
+) -> Result<(), (StatusCode, String)> {
+    if auth.role == ADMIN_ROLE {
+        return Ok(());
+    }
+    match state.collaboration.lock_owner(workspace_id, path) {
+        Some(owner) if owner == auth.id => Ok(()),
+        Some(_) => Err((
+            StatusCode::FORBIDDEN,
+            "cannot clear another user's lock".to_string(),
+        )),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -211,5 +248,81 @@ mod tests {
         assert_eq!(err.0, StatusCode::FORBIDDEN);
         // ...unless you are a global admin.
         assert!(authorize_presence_actor(&user("root", ADMIN_ROLE), "eve").is_ok());
+    }
+
+    fn test_state() -> Arc<AppState> {
+        Arc::new(AppState {
+            db: crate::db::Database::open(":memory:").expect("open in-memory db"),
+            hub: crate::websocket::WorkspaceHub::default(),
+            sync: crate::sync::WorkspaceSync::default(),
+            collaboration: CollaborationState::default(),
+            secrets: crate::crypto::KeyState::Unconfigured,
+            auth: crate::auth::AuthState::disabled_for_test(),
+            repos_root: crate::repos_root::ReposRoot::default(),
+        })
+    }
+
+    /// N1: `unlock_file`'s route has no `:user_id` — the actor is authorized
+    /// against whoever currently holds the lock (or nobody, which is a no-op).
+    #[test]
+    fn lock_actor_must_be_holder_or_admin() {
+        let state = test_state();
+        state.collaboration.set_lock("ws", "a.txt", "bob");
+
+        // The lock holder may clear their own lock.
+        assert!(authorize_lock_actor(&user("bob", "user"), &state, "ws", "a.txt").is_ok());
+        // Someone else may not.
+        let err =
+            authorize_lock_actor(&user("eve", "user"), &state, "ws", "a.txt").unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        // ...unless they are a global admin.
+        assert!(authorize_lock_actor(&user("root", ADMIN_ROLE), &state, "ws", "a.txt").is_ok());
+        // A path with no active lock has nothing to authorize against.
+        assert!(authorize_lock_actor(&user("eve", "user"), &state, "ws", "unlocked.txt").is_ok());
+    }
+
+    /// N1 end-to-end: `lock_file` always locks as the authenticated caller
+    /// (never a body-supplied identity), and `unlock_file` rejects a
+    /// non-owner, non-admin caller trying to clear someone else's lock.
+    #[tokio::test]
+    async fn lock_file_locks_as_caller_and_unlock_rejects_non_owner() {
+        let state = test_state();
+        let workspace_id = "ws".to_string();
+        let path = "a.txt".to_string();
+
+        lock_file(
+            State(state.clone()),
+            user("bob", "user"),
+            Path((workspace_id.clone(), path.clone())),
+        )
+        .await
+        .expect("bob can lock a.txt");
+        assert_eq!(
+            state.collaboration.lock_owner(&workspace_id, &path),
+            Some("bob".to_string())
+        );
+
+        let (status, _) = unlock_file(
+            State(state.clone()),
+            user("eve", "user"),
+            Path((workspace_id.clone(), path.clone())),
+        )
+        .await
+        .expect_err("eve must not be able to clear bob's lock");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            state.collaboration.lock_owner(&workspace_id, &path),
+            Some("bob".to_string()),
+            "lock must still be held after the rejected unlock"
+        );
+
+        unlock_file(
+            State(state.clone()),
+            user("bob", "user"),
+            Path((workspace_id.clone(), path.clone())),
+        )
+        .await
+        .expect("bob can clear his own lock");
+        assert_eq!(state.collaboration.lock_owner(&workspace_id, &path), None);
     }
 }
