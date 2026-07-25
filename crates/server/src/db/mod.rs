@@ -20,6 +20,15 @@ pub struct User {
     pub role: String,
 }
 
+/// A user together with its stored argon2 password hash (`None` for the
+/// un-bootstrapped seed row). Never serialized to a response — the hash stays
+/// server-side; only [`User`] is ever returned over HTTP.
+#[derive(Debug, Clone)]
+pub struct UserWithHash {
+    pub user: User,
+    pub password_hash: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepositoryRecord {
     pub id: String,
@@ -38,12 +47,17 @@ pub struct WorkspaceRecord {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionRecord {
-    pub token: String,
-    pub refresh_token: String,
+/// A server-side session row. `id` is the SHA-256 hex of the raw cookie token
+/// (never the raw token itself — see ADR-002 Decision 2), so a leaked DB yields
+/// session *hashes*, not live bearer tokens. Timestamps are RFC3339 strings;
+/// the auth layer parses them for the sliding-expiry logic.
+#[derive(Debug, Clone)]
+pub struct Session {
+    pub id: String,
     pub user_id: String,
     pub created_at: String,
+    pub last_used: String,
+    pub expires_at: String,
 }
 
 /// Masked credential projection — the only shape ever returned over HTTP.
@@ -106,6 +120,8 @@ impl Database {
 
     pub fn migrate(&self) -> anyhow::Result<()> {
         let conn = self.conn.lock().expect("database lock");
+        // Base tables (unchanged shape). `sessions` is handled separately below
+        // because its shape is reshaped for ADR-002 and its rows are ephemeral.
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS users (
@@ -141,14 +157,6 @@ impl Database {
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
 
-            CREATE TABLE IF NOT EXISTS sessions (
-                token TEXT PRIMARY KEY,
-                refresh_token TEXT NOT NULL,
-                user_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id)
-            );
-
             CREATE TABLE IF NOT EXISTS credentials (
                 id            TEXT PRIMARY KEY,
                 user_id       TEXT NOT NULL,
@@ -163,55 +171,209 @@ impl Database {
             );
             "#,
         )?;
+
+        // ADR-002 Decision 6 — additive migration. `ALTER TABLE ADD COLUMN` is
+        // idempotent here because it's guarded by a column-existence check, so
+        // this runs cleanly on both a fresh DB (base tables above lack these
+        // columns) and an already-populated one.
+        add_column_if_missing(&conn, "users", "password_hash", "TEXT")?;
+        add_column_if_missing(&conn, "users", "created_at", "TEXT")?;
+        add_column_if_missing(&conn, "repositories", "owner_id", "TEXT")?;
+
+        // `sessions` reshape (ADR-002 Decision 2/6). The old shape carried a
+        // `token`/`refresh_token`; those rows were never real (unauthenticated)
+        // sessions, so drop+recreate. Detecting the old shape by column keeps
+        // this a one-time migration — after the first boot the table already
+        // has the new shape and is left untouched (so restarts don't wipe live
+        // sessions).
+        if table_exists(&conn, "sessions")? && column_exists(&conn, "sessions", "token")? {
+            conn.execute_batch("DROP TABLE sessions;")?;
+        }
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS sessions (
+                id         TEXT PRIMARY KEY,
+                user_id    TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                last_used  TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+            "#,
+        )?;
+
+        // Backfill / normalize (ADR-002 Decision 6).
+        let now = Utc::now().to_rfc3339();
+        // Normalize the global role vocabulary to 'admin' | 'user'. The seeded
+        // owner is the bootstrap admin seat; any other legacy role collapses to
+        // 'user'.
+        conn.execute(
+            "UPDATE users SET role = 'admin' WHERE id = 'owner'",
+            params![],
+        )?;
+        conn.execute(
+            "UPDATE users SET role = 'user' WHERE role NOT IN ('admin', 'user')",
+            params![],
+        )?;
+        conn.execute(
+            "UPDATE users SET created_at = ?1 WHERE created_at IS NULL",
+            params![now],
+        )?;
+        // Every pre-auth repository belongs to the bootstrap admin so nothing
+        // becomes orphaned/invisible when auth flips on.
+        conn.execute(
+            "UPDATE repositories SET owner_id = 'owner' WHERE owner_id IS NULL",
+            params![],
+        )?;
+        // Normalize the repo-scoped role vocabulary (the code used to seed a
+        // stray 'Owner'; ADR-002 standardizes on lowercase 'owner').
+        conn.execute(
+            "UPDATE workspace_members SET role = 'owner' WHERE role = 'Owner'",
+            params![],
+        )?;
         Ok(())
     }
 
     pub fn seed_default_user(&self) -> anyhow::Result<()> {
         let conn = self.conn.lock().expect("database lock");
+        // The seed owner starts with password_hash = NULL — an un-bootstrapped
+        // `enabled` server has no one who can log in (fail-closed) until the
+        // first-boot bootstrap (env or setup token) sets the password.
         conn.execute(
-            "INSERT OR IGNORE INTO users (id, email, name, role) VALUES (?1, ?2, ?3, ?4)",
-            params!["owner", "owner@zync.local", "Workspace Owner", "Owner"],
+            "INSERT OR IGNORE INTO users (id, email, name, role, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                "owner",
+                "owner@zync.local",
+                "Workspace Owner",
+                "admin",
+                Utc::now().to_rfc3339()
+            ],
         )?;
         Ok(())
     }
 
-    pub fn login(&self, email: &str, name: Option<&str>) -> anyhow::Result<(User, SessionRecord)> {
-        let id = Uuid::new_v4().to_string();
-        let display_name = name.unwrap_or(email);
+    // ---- Auth: users ----
+
+    /// Look up a user by email (case-insensitive) together with its password
+    /// hash, for login verification. Returns `None` if no such user.
+    pub fn user_with_hash_by_email(&self, email: &str) -> anyhow::Result<Option<UserWithHash>> {
+        let conn = self.conn.lock().expect("database lock");
+        conn.query_row(
+            "SELECT id, email, name, role, password_hash FROM users WHERE lower(email) = lower(?1)",
+            params![email],
+            user_with_hash_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Load a user by id (used by the auth middleware and `/auth/me`).
+    pub fn user_by_id(&self, id: &str) -> anyhow::Result<Option<User>> {
+        let conn = self.conn.lock().expect("database lock");
+        conn.query_row(
+            "SELECT id, email, name, role FROM users WHERE id = ?1",
+            params![id],
+            user_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// True iff at least one user has a non-NULL `password_hash` — i.e. the
+    /// server has been bootstrapped (ADR-002 Decision 1). Used to gate the
+    /// first-boot admin bootstrap.
+    pub fn any_password_set(&self) -> anyhow::Result<bool> {
+        let conn = self.conn.lock().expect("database lock");
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM users WHERE password_hash IS NOT NULL",
+            params![],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Set the bootstrap admin's email + password hash on the seed `owner` row
+    /// and ensure it is `role = 'admin'`. Only ever called from the first-boot
+    /// bootstrap while the server is still un-bootstrapped.
+    pub fn set_admin_password(&self, email: &str, password_hash: &str) -> anyhow::Result<()> {
         let conn = self.conn.lock().expect("database lock");
         conn.execute(
-            "INSERT OR IGNORE INTO users (id, email, name, role) VALUES (?1, ?2, ?3, ?4)",
-            params![id, email, display_name, "Developer"],
+            "UPDATE users SET email = ?2, password_hash = ?3, role = 'admin' WHERE id = 'owner'",
+            params!["owner", email, password_hash],
         )?;
-        let user = conn.query_row(
-            "SELECT id, email, name, role FROM users WHERE email = ?1",
-            params![email],
+        Ok(())
+    }
+
+    // ---- Auth: sessions ----
+
+    /// Insert a freshly-minted session. `id` is `sha256(raw_token)` hex.
+    pub fn create_session(
+        &self,
+        id: &str,
+        user_id: &str,
+        created_at: &str,
+        last_used: &str,
+        expires_at: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().expect("database lock");
+        conn.execute(
+            "INSERT INTO sessions (id, user_id, created_at, last_used, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, user_id, created_at, last_used, expires_at],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch a session by its hashed id. Expiry is enforced by the caller (the
+    /// auth middleware), which parses the timestamps.
+    pub fn session_by_id(&self, id: &str) -> anyhow::Result<Option<Session>> {
+        let conn = self.conn.lock().expect("database lock");
+        conn.query_row(
+            "SELECT id, user_id, created_at, last_used, expires_at FROM sessions WHERE id = ?1",
+            params![id],
             |row| {
-                Ok(User {
+                Ok(Session {
                     id: row.get(0)?,
-                    email: row.get(1)?,
-                    name: row.get(2)?,
-                    role: row.get(3)?,
+                    user_id: row.get(1)?,
+                    created_at: row.get(2)?,
+                    last_used: row.get(3)?,
+                    expires_at: row.get(4)?,
                 })
             },
-        )?;
-        let session = SessionRecord {
-            token: Uuid::new_v4().to_string(),
-            refresh_token: Uuid::new_v4().to_string(),
-            user_id: user.id.clone(),
-            created_at: Utc::now().to_rfc3339(),
-        };
-        conn.execute(
-            "INSERT INTO sessions (token, refresh_token, user_id, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![session.token, session.refresh_token, session.user_id, session.created_at],
-        )?;
-        Ok((user, session))
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
-    pub fn logout(&self, token: &str) -> anyhow::Result<()> {
+    /// Bump a session's sliding window (throttled — the middleware only calls
+    /// this once the refresh window has elapsed).
+    pub fn touch_session(&self, id: &str, last_used: &str, expires_at: &str) -> anyhow::Result<()> {
         let conn = self.conn.lock().expect("database lock");
-        conn.execute("DELETE FROM sessions WHERE token = ?1", params![token])?;
+        conn.execute(
+            "UPDATE sessions SET last_used = ?2, expires_at = ?3 WHERE id = ?1",
+            params![id, last_used, expires_at],
+        )?;
         Ok(())
+    }
+
+    /// Delete a single session (logout, or opportunistic cleanup of an expired
+    /// row on read).
+    pub fn delete_session(&self, id: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().expect("database lock");
+        conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Background sweep: drop every session whose `expires_at` is at or before
+    /// `now`. `now` must use the same fixed RFC3339 format the auth layer writes
+    /// (seconds precision, `Z`) so the lexical comparison is monotonic.
+    pub fn sweep_expired_sessions(&self, now: &str) -> anyhow::Result<usize> {
+        let conn = self.conn.lock().expect("database lock");
+        let removed = conn.execute(
+            "DELETE FROM sessions WHERE expires_at <= ?1",
+            params![now],
+        )?;
+        Ok(removed)
     }
 
     pub fn list_repositories(&self) -> anyhow::Result<Vec<RepositoryRecord>> {
@@ -351,7 +513,7 @@ impl Database {
         )?;
         conn.execute(
             "INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role) VALUES (?1, ?2, ?3)",
-            params![workspace.id, "owner", "Owner"],
+            params![workspace.id, "owner", "owner"],
         )?;
         Ok(workspace)
     }
@@ -474,6 +636,60 @@ fn repository_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepositoryRe
         favorite: row.get::<_, i64>(4)? != 0,
         created_at: row.get(5)?,
     })
+}
+
+fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
+    Ok(User {
+        id: row.get(0)?,
+        email: row.get(1)?,
+        name: row.get(2)?,
+        role: row.get(3)?,
+    })
+}
+
+fn user_with_hash_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserWithHash> {
+    Ok(UserWithHash {
+        user: user_from_row(row)?,
+        password_hash: row.get(4)?,
+    })
+}
+
+fn table_exists(conn: &Connection, table: &str) -> anyhow::Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        params![table],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
+    // PRAGMA table_info can't be parameterized, but `table` is only ever a
+    // hard-coded literal from this module — never user input.
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Idempotent `ALTER TABLE ADD COLUMN`. SQLite errors if the column already
+/// exists, so guard with a `PRAGMA table_info` check first. `table`/`column`/
+/// `decl` are hard-coded literals from `migrate()`, never user input.
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> anyhow::Result<()> {
+    if !column_exists(conn, table, column)? {
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl};"))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,9 +1,11 @@
+use crate::auth::AuthMode;
 use crate::AppState;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        Path, Query, State,
     },
+    http::StatusCode,
     response::IntoResponse,
     routing::get,
     Router,
@@ -82,11 +84,38 @@ impl WorkspaceHub {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct WsHandshakeQuery {
+    ticket: Option<String>,
+}
+
+/// WebSocket handshake. Auth is via a short-lived single-use ticket in the
+/// query string (ADR-002 Decision 4) — the cookie auth middleware allowlists
+/// `/ws/` and defers to this check, because cookies don't propagate reliably
+/// onto a WS upgrade through the dev proxy / non-browser clients. The ticket is
+/// validated and consumed *before* `on_upgrade`; an invalid one is rejected
+/// with `401`. In `disabled` mode the ticket check is skipped entirely.
 async fn workspace_socket(
     State(state): State<Arc<AppState>>,
     Path(workspace_id): Path<String>,
+    Query(query): Query<WsHandshakeQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    if state.auth.mode != AuthMode::Disabled {
+        let valid = query
+            .ticket
+            .as_deref()
+            .and_then(|ticket| {
+                state
+                    .auth
+                    .tickets
+                    .consume(ticket, &workspace_id, chrono::Utc::now())
+            })
+            .is_some();
+        if !valid {
+            return (StatusCode::UNAUTHORIZED, "invalid or missing ws ticket").into_response();
+        }
+    }
     ws.on_upgrade(move |socket| handle_socket(state, workspace_id, socket))
 }
 

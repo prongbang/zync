@@ -27,6 +27,7 @@ pub struct AppState {
     pub sync: sync::WorkspaceSync,
     pub collaboration: collaboration::CollaborationState,
     pub secrets: crypto::KeyState,
+    pub auth: auth::AuthState,
 }
 
 #[tokio::main]
@@ -46,7 +47,14 @@ async fn main() -> anyhow::Result<()> {
         sync: sync::WorkspaceSync::default(),
         collaboration: collaboration::CollaborationState::default(),
         secrets: crypto::KeyState::load(),
+        // Validates ZYNC_AUTH at boot — an unknown value refuses to start.
+        auth: auth::AuthState::load()?,
     });
+
+    // First-boot admin bootstrap (env or one-time /setup link) and the periodic
+    // expired-session sweep (ADR-002).
+    auth::bootstrap(&state).await?;
+    auth::spawn_session_sweeper(state.clone());
 
     // Serve the built React app (Vite emits index.html + /assets/*). Unmatched
     // routes fall back to index.html with a 200 so client-side navigation and
@@ -68,6 +76,18 @@ async fn main() -> anyhow::Result<()> {
         .merge(websocket::routes())
         .merge(collaboration::routes())
         .merge(credentials::routes())
+        // One auth layer over every merged API route (ADR-002 Decision 4).
+        // Applied BEFORE `fallback_service` so the SPA fallback stays *outside*
+        // the layer: unmatched paths (client-side routes, static assets) are
+        // served by the unwrapped fallback and remain public, while every API
+        // route is closed-by-default — a newly-added route above is
+        // authenticated automatically, and `require_auth`'s allowlist is the
+        // only opt-out (no path-prefix guessing). Added before CORS so CORS
+        // remains outermost (preflight) and auth runs just before the handlers.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_auth,
+        ))
         .fallback_service(spa)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())

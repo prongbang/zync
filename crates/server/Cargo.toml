@@ -6,7 +6,9 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+argon2.workspace = true
 axum = { version = "0.7", features = ["macros", "ws"] }
+axum-extra.workspace = true
 base64.workspace = true
 chacha20poly1305.workspace = true
 chrono.workspace = true
@@ -16,6 +18,7 @@ rand.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
@@ -24,3 +27,6 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 zync-git-core = { path = "../git-core" }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

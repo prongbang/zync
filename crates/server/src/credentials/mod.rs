@@ -5,6 +5,7 @@
 //! to turn a remote URL into a `zync_git_core::CredentialSpec`.
 
 use crate::{
+    auth::AuthUser,
     crypto::{self, CryptoError},
     db::{CredentialSecretRow, CredentialSummary, Database},
     AppState,
@@ -18,11 +19,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
-
-/// Single-user server today — every route acts as this seeded user.
-/// TODO(P3): resolve the authenticated user from the request instead once
-/// real auth lands (see `crate::auth`).
-pub(crate) const DEFAULT_USER_ID: &str = "owner";
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -88,16 +84,18 @@ impl From<CredentialSummary> for CredentialResponse {
 
 async fn list_credentials(
     State(state): State<Arc<AppState>>,
+    auth: AuthUser,
 ) -> Result<Json<Vec<CredentialResponse>>, (StatusCode, String)> {
     let records = state
         .db
-        .list_credentials_by_user(DEFAULT_USER_ID)
+        .list_credentials_by_user(&auth.id)
         .map_err(internal_error)?;
     Ok(Json(records.into_iter().map(Into::into).collect()))
 }
 
 async fn create_credential(
     State(state): State<Arc<AppState>>,
+    auth: AuthUser,
     Json(request): Json<CreateCredentialRequest>,
 ) -> Result<(StatusCode, Json<CredentialResponse>), (StatusCode, String)> {
     if request.label.trim().is_empty() {
@@ -147,7 +145,7 @@ async fn create_credential(
     let record = state
         .db
         .insert_credential(
-            DEFAULT_USER_ID,
+            &auth.id,
             &request.label,
             &request.host_pattern,
             &request.kind,
@@ -162,11 +160,12 @@ async fn create_credential(
 
 async fn delete_credential(
     State(state): State<Arc<AppState>>,
+    auth: AuthUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     state
         .db
-        .delete_credential(&id, DEFAULT_USER_ID)
+        .delete_credential(&id, &auth.id)
         .map_err(internal_error)?;
     Ok(StatusCode::NO_CONTENT)
 }

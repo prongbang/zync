@@ -13,6 +13,8 @@ version = "0.1.0"
 
 [workspace.dependencies]
 anyhow = "1"
+argon2 = "0.5"
+axum-extra = { version = "0.9", features = ["cookie"] }
 base64 = "0.22"
 chacha20poly1305 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
@@ -20,6 +22,7 @@ futures-util = "0.3"
 git2 = "0.18"
 notify = "6"
 rand = "0.8"
+sha2 = "0.10"
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

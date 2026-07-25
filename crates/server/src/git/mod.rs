@@ -1,3 +1,4 @@
+use crate::auth::AuthUser;
 use crate::credentials;
 use crate::websocket::WorkspaceEvent;
 use crate::AppState;
@@ -462,17 +463,14 @@ fn cap_diff(patch: String, max_bytes: usize) -> String {
 
 async fn fetch(
     State(state): State<Arc<AppState>>,
+    auth: AuthUser,
     Path(id): Path<String>,
     Json(request): Json<RemoteRequest>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     let remote_name = request.remote.as_deref().unwrap_or("origin");
-    let spec = credentials::resolve_credential_spec(
-        &state,
-        credentials::DEFAULT_USER_ID,
-        &repository.path,
-        remote_name,
-    )?;
+    let spec =
+        credentials::resolve_credential_spec(&state, &auth.id, &repository.path, remote_name)?;
     let result = zync_git_core::fetch_with_credentials(
         &repository.path,
         request.remote.as_deref(),
@@ -487,6 +485,7 @@ async fn fetch(
 /// is returned) rather than partially succeeding silently.
 async fn fetch_all(
     State(state): State<Arc<AppState>>,
+    auth: AuthUser,
     Path(id): Path<String>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
@@ -497,12 +496,8 @@ async fn fetch_all(
 
     let mut results = Vec::with_capacity(remotes.len());
     for remote in &remotes {
-        let spec = credentials::resolve_credential_spec(
-            &state,
-            credentials::DEFAULT_USER_ID,
-            &repository.path,
-            &remote.name,
-        )?;
+        let spec =
+            credentials::resolve_credential_spec(&state, &auth.id, &repository.path, &remote.name)?;
         let fetch_result = zync_git_core::fetch_with_credentials(
             &repository.path,
             Some(remote.name.as_str()),
@@ -528,18 +523,15 @@ async fn fetch_all(
 
 async fn pull(
     State(state): State<Arc<AppState>>,
+    auth: AuthUser,
     Path(id): Path<String>,
     Json(request): Json<RemoteRequest>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     let remote_name = request.remote.as_deref().unwrap_or("origin");
     let mode = parse_pull_mode(request.mode.as_deref())?;
-    let spec = credentials::resolve_credential_spec(
-        &state,
-        credentials::DEFAULT_USER_ID,
-        &repository.path,
-        remote_name,
-    )?;
+    let spec =
+        credentials::resolve_credential_spec(&state, &auth.id, &repository.path, remote_name)?;
     let result = zync_git_core::pull_with_credentials(
         &repository.path,
         request.remote.as_deref(),
@@ -570,17 +562,14 @@ fn parse_pull_mode(mode: Option<&str>) -> Result<zync_git_core::PullMode, (Statu
 
 async fn push(
     State(state): State<Arc<AppState>>,
+    auth: AuthUser,
     Path(id): Path<String>,
     Json(request): Json<RemoteRequest>,
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     let remote_name = request.remote.as_deref().unwrap_or("origin");
-    let spec = credentials::resolve_credential_spec(
-        &state,
-        credentials::DEFAULT_USER_ID,
-        &repository.path,
-        remote_name,
-    )?;
+    let spec =
+        credentials::resolve_credential_spec(&state, &auth.id, &repository.path, remote_name)?;
 
     let result = if request.force_with_lease.unwrap_or(false) {
         let branch = resolve_push_branch(&repository.path, request.branch.as_deref())?;
@@ -690,6 +679,7 @@ async fn prune_remote(
 
 async fn delete_remote_branch(
     State(state): State<Arc<AppState>>,
+    auth: AuthUser,
     Path(id): Path<String>,
     Json(request): Json<RemoteRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
@@ -699,12 +689,7 @@ async fn delete_remote_branch(
         .branch
         .as_deref()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "branch is required".to_string()))?;
-    let spec = credentials::resolve_credential_spec(
-        &state,
-        credentials::DEFAULT_USER_ID,
-        &repository.path,
-        remote,
-    )?;
+    let spec = credentials::resolve_credential_spec(&state, &auth.id, &repository.path, remote)?;
     zync_git_core::delete_remote_branch_with_credentials(&repository.path, remote, branch, Some(&spec))
         .map_err(map_git_error)?;
     broadcast_git_change(&state, &id, &["branches"]);
@@ -713,6 +698,7 @@ async fn delete_remote_branch(
 
 async fn push_force_with_lease(
     State(state): State<Arc<AppState>>,
+    auth: AuthUser,
     Path(id): Path<String>,
     Json(request): Json<RemoteRequest>,
 ) -> Result<String, (StatusCode, String)> {
@@ -722,12 +708,7 @@ async fn push_force_with_lease(
         .branch
         .as_deref()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "branch is required".to_string()))?;
-    let spec = credentials::resolve_credential_spec(
-        &state,
-        credentials::DEFAULT_USER_ID,
-        &repository.path,
-        remote,
-    )?;
+    let spec = credentials::resolve_credential_spec(&state, &auth.id, &repository.path, remote)?;
     let result = zync_git_core::push_force_with_lease_with_credentials(
         &repository.path,
         remote,
@@ -914,6 +895,7 @@ async fn delete_tag(
 
 async fn push_tag(
     State(state): State<Arc<AppState>>,
+    auth: AuthUser,
     Path(id): Path<String>,
     Json(request): Json<PushTagRequest>,
 ) -> Result<String, (StatusCode, String)> {
@@ -922,12 +904,7 @@ async fn push_tag(
         return Err((StatusCode::BAD_REQUEST, "name is required".to_string()));
     }
     let remote = request.remote.as_deref().unwrap_or("origin");
-    let spec = credentials::resolve_credential_spec(
-        &state,
-        credentials::DEFAULT_USER_ID,
-        &repository.path,
-        remote,
-    )?;
+    let spec = credentials::resolve_credential_spec(&state, &auth.id, &repository.path, remote)?;
     let result = zync_git_core::push_tag_with_credentials(
         &repository.path,
         remote,
