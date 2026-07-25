@@ -945,6 +945,8 @@ export function App({
 
       <footer className="border-border text-muted-foreground flex h-7 shrink-0 items-center gap-2 border-t px-3 text-xs">
         <span
+          data-testid="live-sync-indicator"
+          data-connected={ws.liveSyncOk ? "true" : "false"}
           className={cn(
             "size-1.5 rounded-full",
             ws.liveSyncOk ? "bg-primary" : "bg-destructive",

@@ -106,9 +106,15 @@ async function main() {
     // before ever touching the fixture tab, avoids racing it. See the P0.10
     // e2e results write-up for the full repro of this real product race.
     await step('let the auto-opened default repository settle first', async () => {
+      // Wait on the persistent live-sync indicator (footer status dot) rather
+      // than the transient footer notice text: the notice is a single shared
+      // line that any subsequent op (a refresh toast, a later "Live sync
+      // connected") overwrites, so it's racy to assert on. The dot's
+      // data-connected flips to "true" on socket open and stays there until the
+      // socket drops or the workspace switches, which is exactly the "live sync
+      // is up" state this step means to await.
       await page
-        .getByTestId('notice')
-        .filter({ hasText: /Live sync (connected|reconnected)/i })
+        .locator('[data-testid="live-sync-indicator"][data-connected="true"]')
         .waitFor({ timeout: 15000 });
     });
 
@@ -123,17 +129,17 @@ async function main() {
         .waitFor({ timeout: 15000 });
     });
 
-    // Opening a repo kicks off both the data refresh we just waited on above
-    // and, once the workspace id resolves, a separate WebSocket connect
-    // (useWorkspace.ts's live-sync effect) whose `onopen` handler unconditionally
-    // overwrites the footer `notice` with "Live sync connected" - even if a
-    // remote op already set it to e.g. "Push complete" in the meantime. Waiting
-    // for that first connect here (a real, one-time event per repo switch)
-    // avoids racing it later against Fetch/Pull/Push notices below.
+    // Switching repos retires the previous workspace's socket (which resets the
+    // live-sync indicator to data-connected="false") and opens a fresh one for
+    // the fixture repo. Wait for that fresh socket to report connected before
+    // driving remote ops, so live updates are actually flowing. We assert on the
+    // persistent indicator dot rather than the transient footer notice: the
+    // notice is a single shared line a concurrent refresh/op toast can overwrite
+    // between the socket's onopen and our poll, making it flaky; the dot is
+    // sticky until the next drop/switch.
     await step('live sync: wait for websocket to connect before remote ops', async () => {
       await page
-        .getByTestId('notice')
-        .filter({ hasText: /Live sync (connected|reconnected)/i })
+        .locator('[data-testid="live-sync-indicator"][data-connected="true"]')
         .waitFor({ timeout: 15000 });
     });
 

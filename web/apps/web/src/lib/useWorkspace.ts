@@ -982,6 +982,12 @@ export function useWorkspace(): WorkspaceState {
       // switch / unmount) so a stale banner can't carry over to the next
       // workspace before its own socket has had a chance to connect.
       setLiveSyncReconnecting(false)
+      // Also drop the connected flag: the retiring socket's `onclose` fires as
+      // `isStale()` (so it deliberately no-ops), which would otherwise leave the
+      // footer indicator showing a stale green from the *previous* workspace
+      // until the next socket opens. Reset here so the live-sync dot honestly
+      // reflects "no socket yet" for the workspace we're switching to.
+      setLiveSyncOk(false)
     }
   }, [workspace?.workspace.id, refresh])
 
