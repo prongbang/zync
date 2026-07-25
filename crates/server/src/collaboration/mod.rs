@@ -1,4 +1,8 @@
-use crate::{websocket::WorkspaceEvent, AppState};
+use crate::{
+    auth::{AuthUser, ADMIN_ROLE},
+    websocket::WorkspaceEvent,
+    AppState,
+};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -109,9 +113,11 @@ async fn presence(
 
 async fn join(
     State(state): State<Arc<AppState>>,
+    auth: AuthUser,
     Path((workspace_id, user_id)): Path<(String, String)>,
     Json(request): Json<PresenceRequest>,
-) -> StatusCode {
+) -> Result<StatusCode, (StatusCode, String)> {
+    authorize_presence_actor(&auth, &user_id)?;
     let user = PresenceUser {
         user_id: user_id.clone(),
         name: request.name,
@@ -123,18 +129,36 @@ async fn join(
     let mut event = WorkspaceEvent::new("user_joined");
     event.user_id = Some(user_id);
     state.hub.broadcast(&workspace_id, event);
-    StatusCode::NO_CONTENT
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn leave(
     State(state): State<Arc<AppState>>,
+    auth: AuthUser,
     Path((workspace_id, user_id)): Path<(String, String)>,
-) -> StatusCode {
+) -> Result<StatusCode, (StatusCode, String)> {
+    authorize_presence_actor(&auth, &user_id)?;
     state.collaboration.remove_user(&workspace_id, &user_id);
     let mut event = WorkspaceEvent::new("user_left");
     event.user_id = Some(user_id);
     state.hub.broadcast(&workspace_id, event);
-    StatusCode::NO_CONTENT
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Presence is asserted under a `:user_id` in the path; a caller may only act as
+/// themselves (a global `admin` may act as anyone). This closes the presence
+/// spoof where any member could register/clear presence as another user. The
+/// repo-scope guard already ensures the caller is a member of the workspace's
+/// repository — this narrows *which* identity they can present as.
+fn authorize_presence_actor(auth: &AuthUser, user_id: &str) -> Result<(), (StatusCode, String)> {
+    if auth.role == ADMIN_ROLE || auth.id == user_id {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            "cannot act as another user".to_string(),
+        ))
+    }
 }
 
 async fn lock_file(
@@ -163,4 +187,29 @@ async fn unlock_file(
     event.path = Some(path);
     state.hub.broadcast(&workspace_id, event);
     StatusCode::NO_CONTENT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user(id: &str, role: &str) -> AuthUser {
+        AuthUser {
+            id: id.to_string(),
+            role: role.to_string(),
+        }
+    }
+
+    /// N6: presence is asserted under a `:user_id`; a caller may only present as
+    /// themselves, except a global admin who may act as anyone.
+    #[test]
+    fn presence_actor_must_be_self_or_admin() {
+        // Acting as yourself is allowed.
+        assert!(authorize_presence_actor(&user("bob", "user"), "bob").is_ok());
+        // Acting as someone else is forbidden...
+        let err = authorize_presence_actor(&user("bob", "user"), "eve").unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        // ...unless you are a global admin.
+        assert!(authorize_presence_actor(&user("root", ADMIN_ROLE), "eve").is_ok());
+    }
 }

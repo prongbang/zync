@@ -1,4 +1,4 @@
-use crate::auth::AuthMode;
+use crate::auth::{AuthMode, ADMIN_ROLE, OWNER_ID};
 use crate::AppState;
 use axum::{
     extract::{
@@ -94,15 +94,25 @@ struct WsHandshakeQuery {
 /// `/ws/` and defers to this check, because cookies don't propagate reliably
 /// onto a WS upgrade through the dev proxy / non-browser clients. The ticket is
 /// validated and consumed *before* `on_upgrade`; an invalid one is rejected
-/// with `401`. In `disabled` mode the ticket check is skipped entirely.
+/// with `401`. In `disabled` mode the ticket check is skipped entirely and the
+/// synthetic owner (a global admin) drives the socket.
+///
+/// The consumed ticket yields the connecting user, whose repo-scoped role we
+/// resolve once here to decide whether inbound (client→server) events may be
+/// re-broadcast: reads (server→client) work for any member incl. viewers, but
+/// only `member+` may *inject* events (N3 — otherwise a viewer with a valid
+/// ticket could forge `git_changed`/presence events for everyone).
 async fn workspace_socket(
     State(state): State<Arc<AppState>>,
     Path(workspace_id): Path<String>,
     Query(query): Query<WsHandshakeQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    if state.auth.mode != AuthMode::Disabled {
-        let valid = query
+    let user_id = if state.auth.mode == AuthMode::Disabled {
+        // No ticket in disabled mode; the synthetic owner drives the socket.
+        OWNER_ID.to_string()
+    } else {
+        match query
             .ticket
             .as_deref()
             .and_then(|ticket| {
@@ -110,16 +120,75 @@ async fn workspace_socket(
                     .auth
                     .tickets
                     .consume(ticket, &workspace_id, chrono::Utc::now())
-            })
-            .is_some();
-        if !valid {
-            return (StatusCode::UNAUTHORIZED, "invalid or missing ws ticket").into_response();
+            }) {
+            Some(user_id) => user_id,
+            None => {
+                return (StatusCode::UNAUTHORIZED, "invalid or missing ws ticket")
+                    .into_response()
+            }
         }
-    }
-    ws.on_upgrade(move |socket| handle_socket(state, workspace_id, socket))
+    };
+
+    let can_write = user_can_write_workspace(&state.db, &user_id, &workspace_id);
+    ws.on_upgrade(move |socket| handle_socket(state, workspace_id, can_write, socket))
 }
 
-async fn handle_socket(state: Arc<AppState>, workspace_id: String, socket: WebSocket) {
+/// Resolve whether `user_id` may inject events into `workspace_id`'s stream:
+/// a global `admin`, or a repo-scoped `owner`/`member` of the workspace's
+/// repository. Viewers (and any non-member) are read-only on the socket.
+fn user_can_write_workspace(db: &crate::db::Database, user_id: &str, workspace_id: &str) -> bool {
+    if let Ok(Some(user)) = db.user_by_id(user_id) {
+        if user.role == ADMIN_ROLE {
+            return true;
+        }
+    }
+    let Ok(Some(workspace)) = db.workspace(workspace_id) else {
+        return false;
+    };
+    matches!(
+        db.repo_role_for_user(&workspace.repository_id, user_id),
+        Ok(Some(role)) if role == "owner" || role == "member"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::user_can_write_workspace;
+    use crate::db::Database;
+
+    /// N3: only `member+`/`admin` may inject inbound socket events; viewers and
+    /// non-members are read-only.
+    #[test]
+    fn socket_write_access_is_member_plus() {
+        let db = Database::open(":memory:").expect("db");
+        // `owner` is the seeded global admin.
+        db.create_user("bob", "bob@z", "Bob", "user").unwrap();
+        db.create_user("mem", "mem@z", "Mem", "user").unwrap();
+        db.create_user("vwr", "vwr@z", "Vwr", "user").unwrap();
+        db.create_user("out", "out@z", "Out", "user").unwrap();
+        let repo = db.create_repository("p", "/tmp/p", None, "bob").unwrap();
+        let ws = db.workspace_for_repository(&repo.id, &repo.name).unwrap();
+        db.add_repo_member(&repo.id, "mem", "member").unwrap();
+        db.add_repo_member(&repo.id, "vwr", "viewer").unwrap();
+
+        assert!(user_can_write_workspace(&db, "owner", &ws.id), "global admin writes");
+        assert!(user_can_write_workspace(&db, "bob", &ws.id), "repo owner writes");
+        assert!(user_can_write_workspace(&db, "mem", &ws.id), "member writes");
+        assert!(!user_can_write_workspace(&db, "vwr", &ws.id), "viewer is read-only");
+        assert!(!user_can_write_workspace(&db, "out", &ws.id), "non-member is read-only");
+        assert!(
+            !user_can_write_workspace(&db, "mem", "no-such-ws"),
+            "unknown workspace denies write"
+        );
+    }
+}
+
+async fn handle_socket(
+    state: Arc<AppState>,
+    workspace_id: String,
+    can_write: bool,
+    socket: WebSocket,
+) {
     let sender = state.hub.sender(&workspace_id);
     let mut receiver = sender.subscribe();
     let (mut ws_sender, mut ws_receiver) = socket.split();
@@ -136,12 +205,17 @@ async fn handle_socket(state: Arc<AppState>, workspace_id: String, socket: WebSo
 
     while let Some(Ok(message)) = ws_receiver.next().await {
         match message {
-            Message::Text(text) => {
+            // Inbound client→server events are re-broadcast to every subscriber,
+            // so they are a write: a read-only viewer must not be able to inject
+            // forged events (N3). Drain-and-ignore their text frames instead of
+            // rebroadcasting; the outbound (read) path keeps working.
+            Message::Text(text) if can_write => {
                 if let Ok(mut event) = serde_json::from_str::<WorkspaceEvent>(&text) {
                     event.workspace_id = Some(workspace_id.clone());
                     let _ = sender.send(event);
                 }
             }
+            Message::Text(_) => {}
             Message::Close(_) => break,
             _ => {}
         }

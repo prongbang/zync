@@ -18,6 +18,17 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/repositories/:id", delete(remove_repository))
         .route("/repositories/:id/favorite", put(set_favorite))
         .route("/repositories/:id/open", post(open_repository))
+        // Member management (ADR-002 Decision 5). Owner/admin-only — enforced by
+        // the repo-scope authz guard, which treats the whole `/members` subtree
+        // as owner-only regardless of method.
+        .route(
+            "/repositories/:id/members",
+            get(list_members).post(add_member),
+        )
+        .route(
+            "/repositories/:id/members/:user_id",
+            put(update_member).delete(remove_member),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,14 +122,21 @@ async fn list_directories(
     }))
 }
 
+/// Lists only the repositories the caller can see (ADR-002 Decision 5): those
+/// they own or are a member of. A global `admin` sees all. This is the
+/// list-level counterpart to the repo-scope authz guard — a non-member can't
+/// even enumerate a repo they have no role on.
 async fn list_repositories(
     State(state): State<Arc<AppState>>,
+    auth: AuthUser,
 ) -> Result<Json<Vec<crate::db::RepositoryRecord>>, (StatusCode, String)> {
-    state
-        .db
-        .list_repositories()
-        .map(Json)
-        .map_err(internal_error)
+    let repositories = if auth.role == crate::auth::ADMIN_ROLE {
+        state.db.list_repositories()
+    } else {
+        state.db.list_repositories_for_user(&auth.id)
+    }
+    .map_err(internal_error)?;
+    Ok(Json(repositories))
 }
 
 async fn create_repository(
@@ -195,11 +213,27 @@ async fn create_repository(
         .map(zync_git_core::redact_url_userinfo);
     let repository =
         if let Some(existing) = state.db.repository_by_path(&path).map_err(internal_error)? {
+            // Registering a path that's already registered is an "open" of an
+            // existing repo — the caller must already have access to it, or this
+            // would let any authenticated user attach to (and mutate) a repo
+            // owned by someone else. Admins bypass (they see all).
+            if auth.role != crate::auth::ADMIN_ROLE
+                && state
+                    .db
+                    .repo_role_for_user(&existing.id, &auth.id)
+                    .map_err(internal_error)?
+                    .is_none()
+            {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "not authorized for this repository".to_string(),
+                ));
+            }
             existing
         } else {
             state
                 .db
-                .create_repository(&name, &path, stored_remote_url.as_deref())
+                .create_repository(&name, &path, stored_remote_url.as_deref(), &auth.id)
                 .map_err(internal_error)?
         };
     let workspace = state
@@ -270,6 +304,132 @@ async fn open_repository(
     }))
 }
 
+// ---- Member management (ADR-002 Decision 5) ----
+//
+// All four handlers are owner/admin-only; the repo-scope authz guard gates the
+// `/repositories/:id/members*` subtree before any of them run, so they trust
+// that the caller may manage members and focus on input validation + the
+// owner-protection invariant (the repo's `owner_id` can't be demoted or
+// removed here — owner transfer is a separate, later flow).
+
+#[derive(Debug, Deserialize)]
+struct AddMemberRequest {
+    /// User id or email of an existing user to grant access to.
+    user: String,
+    role: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateMemberRequest {
+    role: String,
+}
+
+/// The repo-scoped roles, most-privileged first. `owner` is assignable here so
+/// P3.5 can add co-owners; demoting/removing the repo's *own* `owner_id` is
+/// still refused below.
+fn validate_repo_role(role: &str) -> Result<(), (StatusCode, String)> {
+    match role {
+        "owner" | "member" | "viewer" => Ok(()),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "role must be 'owner', 'member', or 'viewer'".to_string(),
+        )),
+    }
+}
+
+async fn list_members(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::db::RepoMember>>, (StatusCode, String)> {
+    require_repository(&state, &id)?;
+    state
+        .db
+        .list_repo_members(&id)
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn add_member(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<AddMemberRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let repository = require_repository(&state, &id)?;
+    validate_repo_role(&request.role)?;
+    let user = state
+        .db
+        .find_user_by_identifier(request.user.trim())
+        .map_err(internal_error)?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "user not found".to_string()))?;
+    // Ensure the workspace (and thus the row the membership attaches to) exists
+    // before inserting — a repo registered but never opened has no workspace yet.
+    state
+        .db
+        .workspace_for_repository(&repository.id, &repository.name)
+        .map_err(internal_error)?;
+    state
+        .db
+        .add_repo_member(&id, &user.id, &request.role)
+        .map_err(internal_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn update_member(
+    State(state): State<Arc<AppState>>,
+    Path((id, user_id)): Path<(String, String)>,
+    Json(request): Json<UpdateMemberRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let repository = require_repository(&state, &id)?;
+    validate_repo_role(&request.role)?;
+    if repository.owner_id.as_deref() == Some(user_id.as_str()) {
+        return Err((
+            StatusCode::CONFLICT,
+            "cannot change the role of the repository owner".to_string(),
+        ));
+    }
+    let updated = state
+        .db
+        .set_repo_member_role(&id, &user_id, &request.role)
+        .map_err(internal_error)?;
+    if updated == 0 {
+        // No membership row matched — the target isn't a member. Report that
+        // rather than a misleading 204 success.
+        return Err((StatusCode::NOT_FOUND, "member not found".to_string()));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn remove_member(
+    State(state): State<Arc<AppState>>,
+    Path((id, user_id)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let repository = require_repository(&state, &id)?;
+    if repository.owner_id.as_deref() == Some(user_id.as_str()) {
+        return Err((
+            StatusCode::CONFLICT,
+            "cannot remove the repository owner".to_string(),
+        ));
+    }
+    state
+        .db
+        .remove_repo_member(&id, &user_id)
+        .map_err(internal_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Load a repository or 404 — shared by the member handlers so a bad `:id`
+/// still yields a clean not-found rather than a silent empty result.
+fn require_repository(
+    state: &AppState,
+    id: &str,
+) -> Result<crate::db::RepositoryRecord, (StatusCode, String)> {
+    state
+        .db
+        .repository(id)
+        .map_err(internal_error)?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "repository not found".to_string()))
+}
+
 fn internal_error(error: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
@@ -292,7 +452,7 @@ mod tests {
 
         let stored_remote_url = Some(remote_url).map(zync_git_core::redact_url_userinfo);
         let record = db
-            .create_repository("repo", "/tmp/repo", stored_remote_url.as_deref())
+            .create_repository("repo", "/tmp/repo", stored_remote_url.as_deref(), "owner")
             .expect("create_repository");
 
         assert_eq!(

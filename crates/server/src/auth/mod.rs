@@ -10,6 +10,7 @@
 //! user into every request, login/logout are no-ops, and the WS ticket check is
 //! skipped. Default is `enabled`.
 
+pub mod authz;
 pub mod password;
 pub mod session;
 pub mod ticket;
@@ -33,7 +34,10 @@ use zeroize::Zeroizing;
 /// migration backfill lines up (ADR-002 Decision 6) and `disabled` mode yields
 /// exactly today's `"owner"` identity.
 pub const OWNER_ID: &str = "owner";
-const OWNER_ROLE: &str = "admin";
+/// The global role that bypasses every repo-scope authorization check (ADR-002
+/// Decision 5). The synthetic `disabled`-mode principal and the bootstrap owner
+/// both carry it, so `disabled` mode retains full, unchecked access.
+pub const ADMIN_ROLE: &str = "admin";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
@@ -116,9 +120,9 @@ pub fn routes() -> Router<Arc<AppState>> {
 #[derive(Clone, Debug)]
 pub struct AuthUser {
     pub id: String,
-    /// Global role (`admin` | `user`). Carried now so it flows through every
-    /// handler; the method→capability authorization that reads it lands in P3.3.
-    #[allow(dead_code)]
+    /// Global role (`admin` | `user`). `admin` bypasses every repo-scope
+    /// authorization check (ADR-002 Decision 5); a normal `user`'s access is
+    /// resolved per-repository via `workspace_members`.
     pub role: String,
 }
 
@@ -211,7 +215,7 @@ pub async fn require_auth(
 fn owner_auth_user() -> AuthUser {
     AuthUser {
         id: OWNER_ID.to_string(),
-        role: OWNER_ROLE.to_string(),
+        role: ADMIN_ROLE.to_string(),
     }
 }
 
@@ -407,13 +411,37 @@ struct WsTicketResponse {
 
 /// `POST /auth/ws-ticket { workspace_id }` — mint a short-lived single-use
 /// ticket bound to `(user, workspace)` for the WS handshake (ADR-002 Decision 4).
+///
+/// Closes the P3.2 review's W1 IDOR: the ticket carries `workspace_id` in the
+/// request *body* (not a path segment), so the repo-scope authz guard — which
+/// keys off the URL — can't cover it. We therefore check membership here: the
+/// caller must be a member (any role) of the requested workspace's repository,
+/// or a global admin, before a ticket is minted. A non-member gets `403` and no
+/// ticket, so they can never reach the (otherwise ticket-only) WS handshake.
 async fn ws_ticket(
     State(state): State<Arc<AppState>>,
     auth: AuthUser,
     Json(request): Json<WsTicketRequest>,
-) -> Json<WsTicketResponse> {
+) -> Result<Json<WsTicketResponse>, (StatusCode, String)> {
+    if auth.role != ADMIN_ROLE {
+        let workspace = state
+            .db
+            .workspace(&request.workspace_id)
+            .map_err(internal_error)?
+            .ok_or((StatusCode::NOT_FOUND, "workspace not found".to_string()))?;
+        let role = state
+            .db
+            .repo_role_for_user(&workspace.repository_id, &auth.id)
+            .map_err(internal_error)?;
+        if role.is_none() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "not authorized for this workspace".to_string(),
+            ));
+        }
+    }
     let ticket = state.auth.tickets.mint(&auth.id, &request.workspace_id);
-    Json(WsTicketResponse { ticket })
+    Ok(Json(WsTicketResponse { ticket }))
 }
 
 // ---- First-boot setup token flow ----
@@ -760,6 +788,97 @@ mod tests {
             get("/some/client/route").await.unwrap().status(),
             StatusCode::OK
         );
+    }
+
+    /// W1 IDOR (P3.2 review): `ws_ticket` must refuse to mint a ticket for a
+    /// workspace whose repository the caller isn't a member of. Otherwise any
+    /// authenticated user could mint a valid `(self, someone-else's-workspace)`
+    /// ticket and ride it onto the otherwise-guarded WS stream.
+    #[tokio::test]
+    async fn ws_ticket_requires_workspace_membership() {
+        let state = app_state(AuthMode::Enabled);
+        // A repo owned by `bob`, with `mem` added as a member; `out` is a
+        // stranger. `owner` (seeded) is a global admin.
+        state
+            .db
+            .create_user("bob", "bob@zync.local", "Bob", "user")
+            .unwrap();
+        state
+            .db
+            .create_user("mem", "mem@zync.local", "Mem", "user")
+            .unwrap();
+        state
+            .db
+            .create_user("out", "out@zync.local", "Out", "user")
+            .unwrap();
+        let repo = state
+            .db
+            .create_repository("proj", "/tmp/proj", None, "bob")
+            .unwrap();
+        let workspace = state
+            .db
+            .workspace_for_repository(&repo.id, &repo.name)
+            .unwrap();
+        state.db.add_repo_member(&repo.id, "mem", "member").unwrap();
+
+        let mint = |user: &str| {
+            let state = state.clone();
+            let ws = workspace.id.clone();
+            let user = user.to_string();
+            async move {
+                ws_ticket(
+                    State(state),
+                    AuthUser {
+                        id: user,
+                        role: "user".to_string(),
+                    },
+                    Json(WsTicketRequest { workspace_id: ws }),
+                )
+                .await
+            }
+        };
+
+        // Owner (bob) and a member (mem) can mint.
+        assert!(mint("bob").await.is_ok());
+        assert!(mint("mem").await.is_ok());
+        // A non-member is forbidden — no ticket.
+        let err = mint("out").await.err().expect("non-member must be rejected");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+        // A global admin bypasses the membership check.
+        let admin = ws_ticket(
+            State(state.clone()),
+            AuthUser {
+                id: "owner".to_string(),
+                role: ADMIN_ROLE.to_string(),
+            },
+            Json(WsTicketRequest {
+                workspace_id: workspace.id.clone(),
+            }),
+        )
+        .await;
+        assert!(admin.is_ok());
+    }
+
+    /// A ticket for a workspace that doesn't exist is a `404`, not a `403` —
+    /// there's no repo to check membership against.
+    #[tokio::test]
+    async fn ws_ticket_for_unknown_workspace_is_404() {
+        let state = app_state(AuthMode::Enabled);
+        let err = ws_ticket(
+            State(state),
+            AuthUser {
+                id: "bob".to_string(),
+                role: "user".to_string(),
+            },
+            Json(WsTicketRequest {
+                workspace_id: "no-such-ws".to_string(),
+            }),
+        )
+        .await
+        .err()
+        .expect("unknown workspace must be rejected");
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
 
     #[test]

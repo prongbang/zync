@@ -76,14 +76,26 @@ async fn main() -> anyhow::Result<()> {
         .merge(websocket::routes())
         .merge(collaboration::routes())
         .merge(credentials::routes())
+        // Repo-scope authorization (ADR-002 Decision 5). This is the INNER of
+        // the two auth layers: because it's added before `require_auth` below,
+        // it wraps closer to the handlers and therefore runs *after*
+        // authentication has populated the request's `AuthUser`. It enforces
+        // per-repository roles (viewer/member/owner) on `/repositories/:id/*`
+        // and `/workspace/:id/*`; non-repo-scoped routes pass through untouched.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::authz::require_repo_authz,
+        ))
         // One auth layer over every merged API route (ADR-002 Decision 4).
         // Applied BEFORE `fallback_service` so the SPA fallback stays *outside*
         // the layer: unmatched paths (client-side routes, static assets) are
         // served by the unwrapped fallback and remain public, while every API
         // route is closed-by-default — a newly-added route above is
         // authenticated automatically, and `require_auth`'s allowlist is the
-        // only opt-out (no path-prefix guessing). Added before CORS so CORS
-        // remains outermost (preflight) and auth runs just before the handlers.
+        // only opt-out (no path-prefix guessing). This is the OUTER auth layer
+        // (added last → runs first), so authentication happens before the
+        // authorization layer above. Added before CORS so CORS remains outermost
+        // (preflight) and auth runs just before the handlers.
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

@@ -37,6 +37,22 @@ pub struct RepositoryRecord {
     pub remote_url: Option<String>,
     pub favorite: bool,
     pub created_at: String,
+    /// The repo's owner (creator) user id (ADR-002 Decision 5). `None` only on a
+    /// pre-auth row the backfill hasn't yet normalized; every row created or
+    /// migrated by this build carries an owner.
+    pub owner_id: Option<String>,
+}
+
+/// A member row on a repository's workspace, joined with the user's display
+/// fields for the member-management API (ADR-002 Decision 5 / P3.5). `email`/
+/// `name` are `None` if the member's user row is missing (shouldn't happen —
+/// membership FKs `users` — but the join stays lenient).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoMember {
+    pub user_id: String,
+    pub role: String,
+    pub email: Option<String>,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,6 +248,20 @@ impl Database {
             "UPDATE workspace_members SET role = 'owner' WHERE role = 'Owner'",
             params![],
         )?;
+        // Backfill the owner membership row (ADR-002 Decision 6 — the P3.2 review
+        // flagged this as missing). Every repository's workspace must carry an
+        // `owner` `workspace_members` row for its `owner_id`, or the repo owner
+        // would resolve to no repo-scoped role once the authz guard is live.
+        // Idempotent: `INSERT OR IGNORE` no-ops when the row already exists (e.g.
+        // the legacy hardcoded `('owner','owner')` row, which matches the
+        // backfilled `owner_id = 'owner'`).
+        conn.execute(
+            "INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role) \
+             SELECT w.id, r.owner_id, 'owner' \
+             FROM workspaces w JOIN repositories r ON r.id = w.repository_id \
+             WHERE r.owner_id IS NOT NULL",
+            params![],
+        )?;
         Ok(())
     }
 
@@ -301,6 +331,141 @@ impl Database {
         conn.execute(
             "UPDATE users SET email = ?2, password_hash = ?3, role = 'admin' WHERE id = 'owner'",
             params!["owner", email, password_hash],
+        )?;
+        Ok(())
+    }
+
+    /// Resolve a user by id or (case-insensitive) email — used to add a member
+    /// "by user identifier" (ADR-002 Decision 5). Returns `None` if neither
+    /// matches.
+    pub fn find_user_by_identifier(&self, identifier: &str) -> anyhow::Result<Option<User>> {
+        let conn = self.conn.lock().expect("database lock");
+        conn.query_row(
+            "SELECT id, email, name, role FROM users WHERE id = ?1 OR lower(email) = lower(?1) LIMIT 1",
+            params![identifier],
+            user_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Insert a user (no password — password-set is a separate bootstrap/admin
+    /// path). Used by tests and the future admin user-creation route (P3.5).
+    pub fn create_user(
+        &self,
+        id: &str,
+        email: &str,
+        name: &str,
+        role: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().expect("database lock");
+        conn.execute(
+            "INSERT INTO users (id, email, name, role, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, email, name, role, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    // ---- Authz: repo membership (ADR-002 Decision 5) ----
+
+    /// Resolve `user_id`'s effective repo-scoped role on `repository_id`, or
+    /// `None` if they have no access. `owner_id` is authoritative for ownership
+    /// (so the owner resolves to `owner` even if the membership row were somehow
+    /// missing); otherwise the `workspace_members` role via the repo's workspace.
+    /// A global `admin` is not consulted here — the guard grants admins full
+    /// access before calling this.
+    pub fn repo_role_for_user(
+        &self,
+        repository_id: &str,
+        user_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let conn = self.conn.lock().expect("database lock");
+        conn.query_row(
+            "SELECT role FROM ( \
+               SELECT 'owner' AS role, 0 AS rank FROM repositories \
+                 WHERE id = ?1 AND owner_id = ?2 \
+               UNION ALL \
+               SELECT wm.role, 1 AS rank FROM workspace_members wm \
+                 JOIN workspaces w ON w.id = wm.workspace_id \
+                 WHERE w.repository_id = ?1 AND wm.user_id = ?2 \
+             ) ORDER BY rank LIMIT 1",
+            params![repository_id, user_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// List the members of `repository_id`'s workspace, with each member's user
+    /// display fields (owner/member management — ADR-002 Decision 5 / P3.5).
+    pub fn list_repo_members(&self, repository_id: &str) -> anyhow::Result<Vec<RepoMember>> {
+        let conn = self.conn.lock().expect("database lock");
+        let mut stmt = conn.prepare(
+            "SELECT wm.user_id, wm.role, u.email, u.name FROM workspace_members wm \
+             JOIN workspaces w ON w.id = wm.workspace_id \
+             LEFT JOIN users u ON u.id = wm.user_id \
+             WHERE w.repository_id = ?1 \
+             GROUP BY wm.user_id \
+             ORDER BY wm.role, wm.user_id",
+        )?;
+        let rows = stmt.query_map(params![repository_id], |row| {
+            Ok(RepoMember {
+                user_id: row.get(0)?,
+                role: row.get(1)?,
+                email: row.get(2)?,
+                name: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Add (or update the role of) a member on `repository_id`'s workspace(s).
+    /// The caller must have ensured the workspace exists (via
+    /// `workspace_for_repository`). Upserts so re-adding an existing member just
+    /// changes their role.
+    pub fn add_repo_member(
+        &self,
+        repository_id: &str,
+        user_id: &str,
+        role: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().expect("database lock");
+        conn.execute(
+            "INSERT INTO workspace_members (workspace_id, user_id, role) \
+             SELECT id, ?2, ?3 FROM workspaces WHERE repository_id = ?1 \
+             ON CONFLICT(workspace_id, user_id) DO UPDATE SET role = excluded.role",
+            params![repository_id, user_id, role],
+        )?;
+        Ok(())
+    }
+
+    /// Change an existing member's role on `repository_id`. Returns the number of
+    /// membership rows updated — `0` means the user was not a member (the caller
+    /// surfaces that as a `404` rather than a misleading success).
+    pub fn set_repo_member_role(
+        &self,
+        repository_id: &str,
+        user_id: &str,
+        role: &str,
+    ) -> anyhow::Result<usize> {
+        let conn = self.conn.lock().expect("database lock");
+        let updated = conn.execute(
+            "UPDATE workspace_members SET role = ?3 \
+             WHERE user_id = ?2 AND workspace_id IN \
+               (SELECT id FROM workspaces WHERE repository_id = ?1)",
+            params![repository_id, user_id, role],
+        )?;
+        Ok(updated)
+    }
+
+    /// Remove a member from `repository_id`'s workspace(s).
+    pub fn remove_repo_member(&self, repository_id: &str, user_id: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().expect("database lock");
+        conn.execute(
+            "DELETE FROM workspace_members \
+             WHERE user_id = ?2 AND workspace_id IN \
+               (SELECT id FROM workspaces WHERE repository_id = ?1)",
+            params![repository_id, user_id],
         )?;
         Ok(())
     }
@@ -378,10 +543,36 @@ impl Database {
 
     pub fn list_repositories(&self) -> anyhow::Result<Vec<RepositoryRecord>> {
         let conn = self.conn.lock().expect("database lock");
-        let mut stmt = conn.prepare(
-            "SELECT id, name, path, remote_url, favorite, created_at FROM repositories ORDER BY favorite DESC, name ASC",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {REPOSITORY_COLUMNS} FROM repositories ORDER BY favorite DESC, name ASC",
+        ))?;
         let rows = stmt.query_map([], repository_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Repositories visible to `user_id` (ADR-002 Decision 5): those they own
+    /// (`owner_id`) plus those they hold a `workspace_members` row on. A global
+    /// `admin` should call [`list_repositories`] instead (it sees all).
+    pub fn list_repositories_for_user(
+        &self,
+        user_id: &str,
+    ) -> anyhow::Result<Vec<RepositoryRecord>> {
+        let conn = self.conn.lock().expect("database lock");
+        // DISTINCT because a repo the user both owns and is a member of would
+        // otherwise appear twice through the membership join.
+        let mut stmt = conn.prepare(&format!(
+            "SELECT DISTINCT {columns} FROM repositories r \
+             LEFT JOIN workspaces w ON w.repository_id = r.id \
+             LEFT JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = ?1 \
+             WHERE r.owner_id = ?1 OR wm.user_id = ?1 \
+             ORDER BY r.favorite DESC, r.name ASC",
+            columns = REPOSITORY_COLUMNS
+                .split(", ")
+                .map(|c| format!("r.{c}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ))?;
+        let rows = stmt.query_map(params![user_id], repository_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -390,6 +581,7 @@ impl Database {
         name: &str,
         path: &str,
         remote_url: Option<&str>,
+        owner_id: &str,
     ) -> anyhow::Result<RepositoryRecord> {
         let record = RepositoryRecord {
             id: Uuid::new_v4().to_string(),
@@ -398,11 +590,12 @@ impl Database {
             remote_url: remote_url.map(ToOwned::to_owned),
             favorite: false,
             created_at: Utc::now().to_rfc3339(),
+            owner_id: Some(owner_id.to_string()),
         };
         let conn = self.conn.lock().expect("database lock");
         conn.execute(
-            "INSERT INTO repositories (id, name, path, remote_url, favorite, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![record.id, record.name, record.path, record.remote_url, record.favorite as i64, record.created_at],
+            "INSERT INTO repositories (id, name, path, remote_url, favorite, created_at, owner_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![record.id, record.name, record.path, record.remote_url, record.favorite as i64, record.created_at, record.owner_id],
         )?;
         Ok(record)
     }
@@ -435,7 +628,7 @@ impl Database {
     pub fn repository(&self, id: &str) -> anyhow::Result<Option<RepositoryRecord>> {
         let conn = self.conn.lock().expect("database lock");
         conn.query_row(
-            "SELECT id, name, path, remote_url, favorite, created_at FROM repositories WHERE id = ?1",
+            &format!("SELECT {REPOSITORY_COLUMNS} FROM repositories WHERE id = ?1"),
             params![id],
             repository_from_row,
         )
@@ -446,7 +639,7 @@ impl Database {
     pub fn repository_by_path(&self, path: &str) -> anyhow::Result<Option<RepositoryRecord>> {
         let conn = self.conn.lock().expect("database lock");
         conn.query_row(
-            "SELECT id, name, path, remote_url, favorite, created_at FROM repositories WHERE path = ?1",
+            &format!("SELECT {REPOSITORY_COLUMNS} FROM repositories WHERE path = ?1"),
             params![path],
             repository_from_row,
         )
@@ -511,9 +704,15 @@ impl Database {
                 workspace.created_at
             ],
         )?;
+        // Seed the owner membership from the repository's real `owner_id`
+        // (ADR-002 Decision 5) rather than the old hardcoded literal — so the
+        // creator, not a synthetic `"owner"`, holds the owner seat. Falls back to
+        // no row if `owner_id` is somehow NULL (a pre-backfill row); the
+        // migration backfill and `create_repository` both guarantee it is set.
         conn.execute(
-            "INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role) VALUES (?1, ?2, ?3)",
-            params![workspace.id, "owner", "owner"],
+            "INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role) \
+             SELECT ?1, owner_id, 'owner' FROM repositories WHERE id = ?2 AND owner_id IS NOT NULL",
+            params![workspace.id, repository_id],
         )?;
         Ok(workspace)
     }
@@ -635,8 +834,13 @@ fn repository_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepositoryRe
         remote_url: row.get(3)?,
         favorite: row.get::<_, i64>(4)? != 0,
         created_at: row.get(5)?,
+        owner_id: row.get(6)?,
     })
 }
+
+/// The shared column list for every `RepositoryRecord` SELECT, so the column
+/// order stays in lockstep with [`repository_from_row`]'s positional `get`s.
+const REPOSITORY_COLUMNS: &str = "id, name, path, remote_url, favorite, created_at, owner_id";
 
 fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
     Ok(User {
@@ -734,6 +938,142 @@ mod tests {
             .get_decryptable(&record.id, "owner")
             .expect("get_decryptable")
             .is_none());
+    }
+
+    /// A freshly created repo + workspace yields an `owner` membership for the
+    /// creator, and `repo_role_for_user` resolves each role (or `None` for a
+    /// stranger). This is the data-layer core of the authz guard.
+    #[test]
+    fn repo_role_for_user_resolves_ownership_and_membership() {
+        let db = test_db();
+        db.create_user("bob", "bob@z", "Bob", "user").unwrap();
+        db.create_user("mem", "mem@z", "Mem", "user").unwrap();
+        db.create_user("vwr", "vwr@z", "Vwr", "user").unwrap();
+        let repo = db.create_repository("p", "/tmp/p", None, "bob").unwrap();
+        db.workspace_for_repository(&repo.id, &repo.name).unwrap();
+        db.add_repo_member(&repo.id, "mem", "member").unwrap();
+        db.add_repo_member(&repo.id, "vwr", "viewer").unwrap();
+
+        assert_eq!(
+            db.repo_role_for_user(&repo.id, "bob").unwrap().as_deref(),
+            Some("owner"),
+            "creator holds the owner seat"
+        );
+        assert_eq!(
+            db.repo_role_for_user(&repo.id, "mem").unwrap().as_deref(),
+            Some("member")
+        );
+        assert_eq!(
+            db.repo_role_for_user(&repo.id, "vwr").unwrap().as_deref(),
+            Some("viewer")
+        );
+        assert_eq!(db.repo_role_for_user(&repo.id, "out").unwrap(), None);
+    }
+
+    /// The owner membership backfill is idempotent: running `migrate()` again
+    /// (as every process restart does) neither errors nor duplicates the row,
+    /// and the owner still resolves to `owner`.
+    #[test]
+    fn owner_membership_backfill_is_idempotent() {
+        let db = test_db();
+        db.create_user("bob", "bob@z", "Bob", "user").unwrap();
+        let repo = db.create_repository("p", "/tmp/p", None, "bob").unwrap();
+        db.workspace_for_repository(&repo.id, &repo.name).unwrap();
+
+        db.migrate().unwrap();
+        db.migrate().unwrap();
+
+        let members = db.list_repo_members(&repo.id).unwrap();
+        let owners: Vec<_> = members
+            .iter()
+            .filter(|m| m.user_id == "bob" && m.role == "owner")
+            .collect();
+        assert_eq!(owners.len(), 1, "exactly one owner row after repeated migrate");
+        assert_eq!(
+            db.repo_role_for_user(&repo.id, "bob").unwrap().as_deref(),
+            Some("owner")
+        );
+    }
+
+    #[test]
+    fn list_repositories_for_user_filters_by_access() {
+        let db = test_db();
+        db.create_user("bob", "bob@z", "Bob", "user").unwrap();
+        db.create_user("out", "out@z", "Out", "user").unwrap();
+        let owned = db.create_repository("own", "/tmp/own", None, "bob").unwrap();
+        db.workspace_for_repository(&owned.id, &owned.name).unwrap();
+        let shared = db.create_repository("shr", "/tmp/shr", None, "out").unwrap();
+        db.workspace_for_repository(&shared.id, &shared.name).unwrap();
+        db.add_repo_member(&shared.id, "bob", "viewer").unwrap();
+        let hidden = db.create_repository("hid", "/tmp/hid", None, "out").unwrap();
+        db.workspace_for_repository(&hidden.id, &hidden.name).unwrap();
+
+        let visible: Vec<_> = db
+            .list_repositories_for_user("bob")
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert!(visible.contains(&owned.id), "sees owned repo");
+        assert!(visible.contains(&shared.id), "sees shared (member) repo");
+        assert!(!visible.contains(&hidden.id), "cannot see a repo it has no role on");
+        assert_eq!(visible.len(), 2);
+    }
+
+    #[test]
+    fn member_add_update_remove_round_trip() {
+        let db = test_db();
+        db.create_user("bob", "bob@z", "Bob", "user").unwrap();
+        db.create_user("mem", "mem@z", "Mem", "user").unwrap();
+        let repo = db.create_repository("p", "/tmp/p", None, "bob").unwrap();
+        db.workspace_for_repository(&repo.id, &repo.name).unwrap();
+
+        db.add_repo_member(&repo.id, "mem", "viewer").unwrap();
+        assert_eq!(
+            db.repo_role_for_user(&repo.id, "mem").unwrap().as_deref(),
+            Some("viewer")
+        );
+        // Re-add upserts the role.
+        db.add_repo_member(&repo.id, "mem", "member").unwrap();
+        assert_eq!(
+            db.repo_role_for_user(&repo.id, "mem").unwrap().as_deref(),
+            Some("member")
+        );
+        // Explicit role change reports one row updated.
+        assert_eq!(
+            db.set_repo_member_role(&repo.id, "mem", "viewer").unwrap(),
+            1
+        );
+        assert_eq!(
+            db.repo_role_for_user(&repo.id, "mem").unwrap().as_deref(),
+            Some("viewer")
+        );
+        // N5: changing the role of a non-member updates zero rows — the handler
+        // maps that to a 404 rather than a misleading success.
+        assert_eq!(
+            db.set_repo_member_role(&repo.id, "ghost", "member").unwrap(),
+            0
+        );
+        // Removal revokes access.
+        db.remove_repo_member(&repo.id, "mem").unwrap();
+        assert_eq!(db.repo_role_for_user(&repo.id, "mem").unwrap(), None);
+    }
+
+    #[test]
+    fn find_user_by_identifier_matches_id_or_email() {
+        let db = test_db();
+        db.create_user("bob", "bob@zync.local", "Bob", "user").unwrap();
+        assert_eq!(
+            db.find_user_by_identifier("bob").unwrap().map(|u| u.id),
+            Some("bob".to_string())
+        );
+        assert_eq!(
+            db.find_user_by_identifier("BOB@ZYNC.LOCAL")
+                .unwrap()
+                .map(|u| u.id),
+            Some("bob".to_string())
+        );
+        assert!(db.find_user_by_identifier("ghost").unwrap().is_none());
     }
 
     #[test]
