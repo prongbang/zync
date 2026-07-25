@@ -89,6 +89,11 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/repositories/:id/git/submodules/sync",
             post(submodule_sync),
         )
+        .route("/repositories/:id/git/submodules/add", post(submodule_add))
+        .route(
+            "/repositories/:id/git/submodules/remove",
+            post(submodule_remove),
+        )
         .route("/repositories/:id/git/lfs", get(lfs_summary))
         .route("/repositories/:id/git/lfs/install", post(lfs_install))
         .route("/repositories/:id/git/lfs/track", post(lfs_track))
@@ -171,6 +176,13 @@ struct LfsRequest {
     pattern: Option<String>,
     remote: Option<String>,
     branch: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubmoduleRequest {
+    path: String,
+    /// Add only.
+    url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1176,6 +1188,40 @@ async fn submodule_sync(
 ) -> Result<String, (StatusCode, String)> {
     let repository = repository(&state, &id)?;
     let result = zync_git_core::submodule_sync(repository.path).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff"]);
+    Ok(result)
+}
+
+async fn submodule_add(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<SubmoduleRequest>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let url = request
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "url is required".to_string()))?;
+    let path = request.path.trim();
+    if path.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "path is required".to_string()));
+    }
+    let result =
+        zync_git_core::submodule_add(repository.path, url, path).map_err(internal_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff"]);
+    Ok(result)
+}
+
+async fn submodule_remove(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<SubmoduleRequest>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let result =
+        zync_git_core::submodule_remove(repository.path, &request.path).map_err(internal_error)?;
     broadcast_git_change(&state, &id, &["status", "diff"]);
     Ok(result)
 }

@@ -1766,6 +1766,81 @@ pub fn submodule_sync(path: impl AsRef<Path>) -> anyhow::Result<String> {
     run_git(path.as_ref(), &["submodule", "sync", "--recursive"])
 }
 
+pub fn submodule_add(path: impl AsRef<Path>, url: &str, sub_path: &str) -> anyhow::Result<String> {
+    // `-c protocol.file.allow=always`: git 2.38+ refuses `file://`/local-path submodule clones
+    // by default (CVE-2022-39253 hardening). Zync's whole point is registering repos that live
+    // on the same host filesystem, so a user-supplied local/file:// submodule URL is exactly as
+    // trusted as any other repo path they've already registered — allow it explicitly rather
+    // than failing every same-host submodule add.
+    //
+    // `--`: terminates option parsing before the caller-supplied `url`/`sub_path` positionals,
+    // so a value that happens to start with `-` (e.g. a path like `-x`) can't be parsed as a
+    // `git submodule add` flag.
+    run_git(
+        path.as_ref(),
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--",
+            url,
+            sub_path,
+        ],
+    )
+}
+
+/// Removes a submodule the way `git` itself recommends (there is no single porcelain command
+/// for it): deinit its working tree, `git rm` the gitlink + `.gitmodules` entry, then best-effort
+/// clean up the cached `.git/modules/<name>` clone so re-adding the same path later doesn't hit
+/// a stale gitdir. Runs as two `run_git` calls plus a filesystem cleanup rather than one shellout
+/// so a deinit failure (e.g. uncommitted submodule changes) surfaces before anything is removed.
+pub fn submodule_remove(path: impl AsRef<Path>, sub_path: &str) -> anyhow::Result<String> {
+    let repo = Repository::open(path.as_ref())?;
+    let git_dir = repo.path().to_path_buf();
+
+    // `.git/modules/<key>` is keyed by the submodule's *name* (the `.gitmodules` section
+    // name), which is usually equal to its path but can differ if the submodule was renamed.
+    // Resolve it via git2 while `.gitmodules` still has the entry — `git rm` below deletes
+    // that entry, so `sub_path` would be the only handle left afterward. `find_submodule`
+    // accepts either the name or the path, so this also works for the common name == path
+    // case; falls back to `sub_path` if the submodule can't be looked up for any reason.
+    let modules_key = repo
+        .find_submodule(sub_path)
+        .ok()
+        .and_then(|submodule| submodule.name().map(ToOwned::to_owned))
+        .unwrap_or_else(|| sub_path.to_string());
+    drop(repo);
+
+    // `--`: terminates option parsing before `sub_path`, so a path starting with `-` can't be
+    // parsed as a flag (mirrors `submodule_add`'s guard).
+    let deinit_output = run_git(
+        path.as_ref(),
+        &["submodule", "deinit", "-f", "--", sub_path],
+    )?;
+    let rm_output = run_git(path.as_ref(), &["rm", "-f", "--", sub_path])?;
+
+    // Best-effort cleanup of the cached `.git/modules/<key>` clone. Canonicalize both the
+    // modules root and the resolved target and verify containment before deleting anything —
+    // relying on `modules_key` alone (sourced from repo data, but still worth double-checking
+    // before a filesystem-destructive call) would be an unnecessary trust assumption. Silently
+    // skips cleanup (does not error) when there's nothing cached to remove.
+    if let Ok(modules_root) = git_dir.join("modules").canonicalize() {
+        let target = modules_root.join(&modules_key);
+        if let Ok(canonical_target) = target.canonicalize() {
+            if !canonical_target.starts_with(&modules_root) {
+                anyhow::bail!("submodule cache path escapes .git/modules");
+            }
+            let _ = fs::remove_dir_all(canonical_target);
+        }
+        // else: nothing cached under `modules_key` — nothing to clean up.
+    }
+    // else: no `.git/modules` directory at all — nothing to clean up.
+
+    let combined = format!("{deinit_output}\n{rm_output}");
+    Ok(combined.trim().to_string())
+}
+
 pub fn lfs_summary(path: impl AsRef<Path>) -> anyhow::Result<LfsSummary> {
     let repo = Repository::open(path.as_ref())?;
     let root = repo

@@ -367,6 +367,35 @@ fn clone_repo_round_trip_via_libgit2_file_url() {
 }
 
 #[test]
+fn submodule_add_and_remove_round_trip() {
+    let sub_origin = tempfile::tempdir().expect("submodule origin tempdir");
+    init_repo_with_commit(sub_origin.path(), "lib.txt", "hello");
+    let sub_url = format!("file://{}", sub_origin.path().display());
+
+    let superproject = tempfile::tempdir().expect("superproject tempdir");
+    init_repo_with_commit(superproject.path(), "README.md", "hello");
+
+    zync_git_core::submodule_add(superproject.path(), &sub_url, "vendor/lib")
+        .expect("submodule add");
+
+    assert!(superproject.path().join(".gitmodules").exists());
+    assert!(superproject.path().join("vendor/lib/lib.txt").exists());
+
+    let modules = zync_git_core::submodules(superproject.path()).expect("list submodules");
+    assert_eq!(modules.len(), 1);
+    assert_eq!(modules[0].path, "vendor/lib");
+    assert_eq!(modules[0].url.as_deref(), Some(sub_url.as_str()));
+
+    zync_git_core::submodule_remove(superproject.path(), "vendor/lib")
+        .expect("submodule remove");
+
+    assert!(!superproject.path().join("vendor/lib").exists());
+    let modules_after_remove =
+        zync_git_core::submodules(superproject.path()).expect("list submodules after remove");
+    assert!(modules_after_remove.is_empty());
+}
+
+#[test]
 fn fetch_and_push_round_trip_via_libgit2() {
     let bare = tempfile::tempdir().expect("bare tempdir");
     Repository::init_bare(bare.path()).expect("init bare repo");

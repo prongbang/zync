@@ -43,6 +43,7 @@ import type {
   RevisionRequest,
   StashRequest,
   StashSummary,
+  SubmoduleRequest,
   SubmoduleSummary,
   TagRequest,
   TagSummary,
@@ -759,6 +760,26 @@ export class ZyncApi {
     return postText(
       this.url(`/repositories/${repositoryId}/git/submodules/sync`),
       {}
+    )
+  }
+
+  async submoduleAdd(
+    repositoryId: string,
+    url: string,
+    path: string
+  ): Promise<string> {
+    const request: SubmoduleRequest = { path, url }
+    return postText(
+      this.url(`/repositories/${repositoryId}/git/submodules/add`),
+      request
+    )
+  }
+
+  async submoduleRemove(repositoryId: string, path: string): Promise<string> {
+    const request: SubmoduleRequest = { path, url: null }
+    return postText(
+      this.url(`/repositories/${repositoryId}/git/submodules/remove`),
+      request
     )
   }
 

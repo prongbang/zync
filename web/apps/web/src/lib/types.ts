@@ -163,6 +163,12 @@ export interface SubmoduleSummary {
   head: string | null
 }
 
+export interface SubmoduleRequest {
+  path: string
+  /** Add only. */
+  url: string | null
+}
+
 export interface LfsSummary {
   configured: boolean
   tracked_patterns: string[]

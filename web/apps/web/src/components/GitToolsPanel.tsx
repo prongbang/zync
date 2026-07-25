@@ -1,16 +1,22 @@
 // React port of the "Files / Remotes / Submodules" and reflog sections of
 // crates/ui/src/components/panels.rs, condensed into a compact tabbed surface.
 //
-// The Remotes and Credentials tabs are live (P0.6 / P0.8): they fetch their
-// own data through the `zyncApi` singleton and refresh themselves after their
-// own mutations, so the panel stays self-contained. Reflog / Submodules / LFS
-// remain placeholder tabs wired to `onRefresh` until the orchestrator ports
-// them. Built on shadcn Tabs + Card + Field + DropdownMenu primitives per
-// web/.agents/skills/shadcn/SKILL.md.
+// Every tab is self-contained (P0.6 / P0.8 / P2.1 / P2.2): each fetches its
+// own data through the `zyncApi` singleton and refreshes itself after its own
+// mutations, calling `onRefresh` afterward so the rest of the workspace
+// (status/branches/etc.) picks up any side effect too. Built on shadcn Tabs +
+// Card + Field + DropdownMenu primitives per web/.agents/skills/shadcn/SKILL.md.
 //
-// Server note: there are no rename / set-url remote endpoints, so "Rename"
-// and "Edit URL" are composites over add + delete (add-first for rename so a
-// failure never loses the remote; delete-then-add with rollback for edit-URL).
+// Server notes:
+// - There are no rename / set-url remote endpoints, so "Rename" and "Edit
+//   URL" are composites over add + delete (add-first for rename so a failure
+//   never loses the remote; delete-then-add with rollback for edit-URL).
+// - Reflog checkout/branch/reset reuse the same revision-scoped endpoints as
+//   the commit graph's context menu (checkout/branches/reset), so results are
+//   identical whichever surface triggers them.
+// - Submodule init/update/sync are repo-wide (`git submodule <verb>
+//   --recursive`), not scoped to one row — add/remove are the only per-row
+//   mutations, and (per P2.2) had no server endpoint before this change.
 
 import {
   useCallback,
@@ -22,13 +28,18 @@ import {
   ArrowDown,
   ArrowDownToLine,
   ArrowUp,
+  Download,
+  GitBranchPlus,
   GitCommitHorizontal,
   HardDrive,
   KeyRound,
   Layers,
+  LogIn,
   MoreHorizontal,
   Plus,
+  PlayCircle,
   RefreshCw,
+  RotateCcw,
   Server,
   Trash2,
 } from "lucide-react"
@@ -62,6 +73,12 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@workspace/ui/components/empty"
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
+} from "@workspace/ui/components/input-group"
 import { Spinner } from "@workspace/ui/components/spinner"
 import {
   Tabs,
@@ -77,11 +94,22 @@ import {
 } from "@workspace/ui/components/tooltip"
 
 import { zyncApi } from "@/lib/api"
-import type { CredentialRecord, RemoteSummary } from "@/lib/types"
+import { formatCommitTime, shortId } from "@/lib/helpers"
+import type {
+  CredentialRecord,
+  LfsSummary,
+  ReflogEntrySummary,
+  RemoteSummary,
+  SubmoduleSummary,
+} from "@/lib/types"
 
+import { BranchAtRevisionDialog } from "./dialogs/BranchAtRevisionDialog"
 import { ConfirmDialog } from "./dialogs/ConfirmDialog"
 import { CredentialDialog } from "./dialogs/CredentialDialog"
+import { LfsPushDialog } from "./dialogs/LfsPushDialog"
 import { RemoteDialog } from "./dialogs/RemoteDialog"
+import { ResetDialog } from "./dialogs/ResetDialog"
+import { SubmoduleDialog } from "./dialogs/SubmoduleDialog"
 
 export type GitToolKind = "reflog" | "submodules" | "lfs" | "remotes"
 
@@ -113,11 +141,9 @@ export function GitToolsPanel({
             <TabsList>
               <TabsTrigger value="remotes">Remotes</TabsTrigger>
               <TabsTrigger value="credentials">Credentials</TabsTrigger>
-              {PLACEHOLDER_TABS.map((tab) => (
-                <TabsTrigger key={tab.kind} value={tab.kind}>
-                  {tab.label}
-                </TabsTrigger>
-              ))}
+              <TabsTrigger value="reflog">Reflog</TabsTrigger>
+              <TabsTrigger value="submodules">Submodules</TabsTrigger>
+              <TabsTrigger value="lfs">LFS</TabsTrigger>
             </TabsList>
           </div>
           <TabsContent value="remotes">
@@ -129,11 +155,24 @@ export function GitToolsPanel({
           <TabsContent value="credentials">
             <CredentialsTab />
           </TabsContent>
-          {PLACEHOLDER_TABS.map((tab) => (
-            <TabsContent key={tab.kind} value={tab.kind}>
-              <PlaceholderTabBody tab={tab} onRefresh={onRefresh} />
-            </TabsContent>
-          ))}
+          <TabsContent value="reflog">
+            <ReflogTab
+              repositoryId={repositoryId}
+              onWorkspaceRefresh={() => onRefresh("reflog")}
+            />
+          </TabsContent>
+          <TabsContent value="submodules">
+            <SubmodulesTab
+              repositoryId={repositoryId}
+              onWorkspaceRefresh={() => onRefresh("submodules")}
+            />
+          </TabsContent>
+          <TabsContent value="lfs">
+            <LfsTab
+              repositoryId={repositoryId}
+              onWorkspaceRefresh={() => onRefresh("lfs")}
+            />
+          </TabsContent>
         </Tabs>
       </CardContent>
     </Card>
@@ -753,77 +792,824 @@ function CredentialsTab(): ReactElement {
 }
 
 // ---------------------------------------------------------------------------
-// Placeholder tabs (reflog / submodules / LFS) — unchanged behavior.
+// Reflog tab (P2.1)
 // ---------------------------------------------------------------------------
 
-interface PlaceholderTabConfig {
-  kind: GitToolKind
-  label: string
-  icon: typeof GitCommitHorizontal
-  emptyTitle: string
-  emptyDescription: string
-}
+type ReflogRowAction = "checkout" | "branch" | "reset"
 
-const PLACEHOLDER_TABS: PlaceholderTabConfig[] = [
-  {
-    kind: "reflog",
-    label: "Reflog",
-    icon: GitCommitHorizontal,
-    emptyTitle: "No reflog entries loaded",
-    emptyDescription: "Refresh to load the reference log for this repository.",
-  },
-  {
-    kind: "submodules",
-    label: "Submodules",
-    icon: Layers,
-    emptyTitle: "No submodules loaded",
-    emptyDescription: "Refresh to list this repository's submodules.",
-  },
-  {
-    kind: "lfs",
-    label: "LFS",
-    icon: HardDrive,
-    emptyTitle: "No LFS data loaded",
-    emptyDescription:
-      "Refresh to check Git LFS configuration and tracked patterns.",
-  },
-]
+type ReflogDialogState =
+  | { kind: "branch" | "reset"; entry: ReflogEntrySummary }
+  | null
 
-function PlaceholderTabBody({
-  tab,
-  onRefresh,
+function ReflogTab({
+  repositoryId,
+  onWorkspaceRefresh,
 }: {
-  tab: PlaceholderTabConfig
-  onRefresh: (kind: GitToolKind) => void
+  repositoryId: string | null
+  onWorkspaceRefresh: () => void
 }): ReactElement {
-  const Icon = tab.icon
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-end">
-        <Button variant="outline" size="sm" onClick={() => onRefresh(tab.kind)}>
-          <RefreshCw data-icon="inline-start" />
-          Refresh
-        </Button>
-      </div>
+  const [entries, setEntries] = useState<ReflogEntrySummary[] | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [busy, setBusy] = useState<{
+    index: number
+    action: ReflogRowAction
+  } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [output, setOutput] = useState<string | null>(null)
+  const [dialog, setDialog] = useState<ReflogDialogState>(null)
+
+  const load = useCallback(async () => {
+    if (!repositoryId) return
+    setLoading(true)
+    setError(null)
+    try {
+      setEntries(await zyncApi.reflog(repositoryId))
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setLoading(false)
+    }
+  }, [repositoryId])
+
+  useEffect(() => {
+    setEntries(null)
+    setOutput(null)
+    setError(null)
+    void load()
+  }, [load])
+
+  // A reflog action never reloads the reflog itself (the actions all move
+  // HEAD/branches, they don't add a distinguishable entry worth re-fetching
+  // for) — it just surfaces the result and asks the rest of the workspace to
+  // refresh, mirroring the Remotes tab's `run` helper.
+  async function run(
+    index: number,
+    action: ReflogRowAction,
+    task: () => Promise<string | void>,
+    success: string,
+  ) {
+    setBusy({ index, action })
+    setError(null)
+    setOutput(null)
+    try {
+      const result = await task()
+      const text = typeof result === "string" ? result.trim() : ""
+      setOutput(text !== "" ? text : success)
+      onWorkspaceRefresh()
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  if (!repositoryId) {
+    return (
       <Empty className="border">
         <EmptyHeader>
           <EmptyMedia variant="icon">
-            <Icon />
+            <GitCommitHorizontal />
           </EmptyMedia>
-          <EmptyTitle>{tab.emptyTitle}</EmptyTitle>
-          <EmptyDescription>{tab.emptyDescription}</EmptyDescription>
+          <EmptyTitle>No repository connected</EmptyTitle>
+          <EmptyDescription>
+            Open a repository to view its reflog.
+          </EmptyDescription>
         </EmptyHeader>
-        <EmptyContent>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => onRefresh(tab.kind)}
-          >
-            <RefreshCw data-icon="inline-start" />
-            Load {tab.label.toLowerCase()}
-          </Button>
-        </EmptyContent>
       </Empty>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-end">
+        <Button
+          variant="ghost"
+          size="xs"
+          disabled={loading || busy !== null}
+          onClick={() => void load()}
+        >
+          {loading ? (
+            <Spinner data-icon="inline-start" />
+          ) : (
+            <RefreshCw data-icon="inline-start" />
+          )}
+          Refresh
+        </Button>
+      </div>
+
+      {error !== null && (
+        <Alert variant="destructive">
+          <AlertTitle>Reflog operation failed</AlertTitle>
+          <AlertDescription className="break-words">{error}</AlertDescription>
+        </Alert>
+      )}
+
+      {entries !== null && entries.length === 0 ? (
+        <Empty className="border">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <GitCommitHorizontal />
+            </EmptyMedia>
+            <EmptyTitle>No reflog entries</EmptyTitle>
+            <EmptyDescription>
+              HEAD has no recorded history yet.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      ) : (
+        <ul className="flex flex-col">
+          {(entries ?? []).map((entry) => {
+            const rowBusyAction =
+              busy !== null && busy.index === entry.index ? busy.action : null
+            return (
+              <li
+                key={entry.index}
+                data-testid="reflog-row"
+                data-reflog-index={entry.index}
+                className="flex items-center gap-1.5 border-b py-1.5"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <code className="text-muted-foreground font-mono text-xs">
+                      {shortId(entry.new_id)}
+                    </code>
+                    <span className="truncate text-xs">{entry.message}</span>
+                  </div>
+                  <div className="text-muted-foreground truncate text-xs">
+                    {entry.committer} · {formatCommitTime(entry.time)}
+                  </div>
+                </div>
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    render={
+                      <Button
+                        data-testid="reflog-more-btn"
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label={`Actions for reflog entry ${entry.index}`}
+                        disabled={busy !== null}
+                      />
+                    }
+                  >
+                    {rowBusyAction !== null ? <Spinner /> : <MoreHorizontal />}
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuGroup>
+                      <DropdownMenuItem
+                        onClick={() =>
+                          void run(
+                            entry.index,
+                            "checkout",
+                            () =>
+                              zyncApi.checkoutRevision(
+                                repositoryId,
+                                entry.new_id,
+                              ),
+                            `Checked out ${shortId(entry.new_id)}`,
+                          )
+                        }
+                      >
+                        <LogIn data-icon="inline-start" />
+                        Checkout revision
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={() =>
+                          setDialog({ kind: "branch", entry })
+                        }
+                      >
+                        <GitBranchPlus data-icon="inline-start" />
+                        New branch here…
+                      </DropdownMenuItem>
+                    </DropdownMenuGroup>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuGroup>
+                      <DropdownMenuItem
+                        variant="destructive"
+                        onClick={() => setDialog({ kind: "reset", entry })}
+                      >
+                        <RotateCcw data-icon="inline-start" />
+                        Reset here…
+                      </DropdownMenuItem>
+                    </DropdownMenuGroup>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+
+      {output !== null && (
+        <p
+          role="status"
+          className="text-muted-foreground font-mono text-xs whitespace-pre-wrap"
+        >
+          {output}
+        </p>
+      )}
+
+      {dialog?.kind === "branch" && (
+        <BranchAtRevisionDialog
+          open
+          revision={shortId(dialog.entry.new_id)}
+          onOpenChange={(open) => !open && setDialog(null)}
+          onSubmit={({ name, checkout }) => {
+            const entry = dialog.entry
+            void run(
+              entry.index,
+              "branch",
+              () =>
+                zyncApi.createBranchAt(
+                  repositoryId,
+                  name,
+                  entry.new_id,
+                  checkout,
+                ),
+              `Created branch ${name}`,
+            )
+          }}
+        />
+      )}
+      {dialog?.kind === "reset" && (
+        <ResetDialog
+          open
+          commit={shortId(dialog.entry.new_id)}
+          onOpenChange={(open) => !open && setDialog(null)}
+          onSubmit={({ mode }) => {
+            const entry = dialog.entry
+            void run(
+              entry.index,
+              "reset",
+              () =>
+                zyncApi.resetToRevision(
+                  repositoryId,
+                  entry.new_id,
+                  mode === "hard",
+                ),
+              `Reset (${mode}) to ${shortId(entry.new_id)}`,
+            )
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Submodules tab (P2.2)
+// ---------------------------------------------------------------------------
+
+type SubmoduleBulkAction = "init" | "update" | "sync" | "add"
+
+function SubmodulesTab({
+  repositoryId,
+  onWorkspaceRefresh,
+}: {
+  repositoryId: string | null
+  onWorkspaceRefresh: () => void
+}): ReactElement {
+  const [submodules, setSubmodules] = useState<SubmoduleSummary[] | null>(
+    null,
+  )
+  const [loading, setLoading] = useState(false)
+  const [busy, setBusy] = useState<SubmoduleBulkAction | null>(null)
+  const [removingPath, setRemovingPath] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [output, setOutput] = useState<string | null>(null)
+  const [addOpen, setAddOpen] = useState(false)
+  const [removeTarget, setRemoveTarget] = useState<SubmoduleSummary | null>(
+    null,
+  )
+
+  const load = useCallback(async () => {
+    if (!repositoryId) return
+    setLoading(true)
+    setError(null)
+    try {
+      setSubmodules(await zyncApi.submodules(repositoryId))
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setLoading(false)
+    }
+  }, [repositoryId])
+
+  useEffect(() => {
+    setSubmodules(null)
+    setOutput(null)
+    setError(null)
+    void load()
+  }, [load])
+
+  async function run(action: SubmoduleBulkAction, task: () => Promise<string>) {
+    setBusy(action)
+    setError(null)
+    setOutput(null)
+    try {
+      const result = await task()
+      setOutput(result.trim() !== "" ? result : "Done")
+      await load()
+      onWorkspaceRefresh()
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function removeSubmodule(target: SubmoduleSummary) {
+    if (!repositoryId) return
+    setRemovingPath(target.path)
+    setError(null)
+    setOutput(null)
+    try {
+      const result = await zyncApi.submoduleRemove(repositoryId, target.path)
+      setOutput(result.trim() !== "" ? result : `Removed ${target.path}`)
+      await load()
+      onWorkspaceRefresh()
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setRemovingPath(null)
+    }
+  }
+
+  if (!repositoryId) {
+    return (
+      <Empty className="border">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <Layers />
+          </EmptyMedia>
+          <EmptyTitle>No repository connected</EmptyTitle>
+          <EmptyDescription>
+            Open a repository to manage its submodules.
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    )
+  }
+
+  const anyBusy = busy !== null || removingPath !== null
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Button
+          data-testid="add-submodule-btn"
+          variant="outline"
+          size="xs"
+          disabled={anyBusy}
+          onClick={() => setAddOpen(true)}
+        >
+          {busy === "add" ? (
+            <Spinner data-icon="inline-start" />
+          ) : (
+            <Plus data-icon="inline-start" />
+          )}
+          Add submodule
+        </Button>
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="xs"
+            disabled={anyBusy}
+            onClick={() =>
+              void run("init", () => zyncApi.submoduleInit(repositoryId))
+            }
+          >
+            {busy === "init" ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <PlayCircle data-icon="inline-start" />
+            )}
+            Init
+          </Button>
+          <Button
+            variant="ghost"
+            size="xs"
+            disabled={anyBusy}
+            onClick={() =>
+              void run("update", () => zyncApi.submoduleUpdate(repositoryId))
+            }
+          >
+            {busy === "update" ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <Download data-icon="inline-start" />
+            )}
+            Update
+          </Button>
+          <Button
+            variant="ghost"
+            size="xs"
+            disabled={anyBusy}
+            onClick={() =>
+              void run("sync", () => zyncApi.submoduleSync(repositoryId))
+            }
+          >
+            {busy === "sync" ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <RefreshCw data-icon="inline-start" />
+            )}
+            Sync
+          </Button>
+          <Button
+            variant="ghost"
+            size="xs"
+            disabled={loading || anyBusy}
+            onClick={() => void load()}
+          >
+            {loading ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <RefreshCw data-icon="inline-start" />
+            )}
+            Refresh
+          </Button>
+        </div>
+      </div>
+
+      {error !== null && (
+        <Alert variant="destructive">
+          <AlertTitle>Submodule operation failed</AlertTitle>
+          <AlertDescription className="break-words">{error}</AlertDescription>
+        </Alert>
+      )}
+
+      {submodules !== null && submodules.length === 0 ? (
+        <Empty className="border">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <Layers />
+            </EmptyMedia>
+            <EmptyTitle>No submodules</EmptyTitle>
+            <EmptyDescription>
+              Add a submodule to track another repository inside this one.
+            </EmptyDescription>
+          </EmptyHeader>
+          <EmptyContent>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setAddOpen(true)}
+            >
+              <Plus data-icon="inline-start" />
+              Add submodule
+            </Button>
+          </EmptyContent>
+        </Empty>
+      ) : (
+        <ul className="flex flex-col">
+          {(submodules ?? []).map((submodule) => (
+            <li
+              key={submodule.path}
+              data-testid="submodule-row"
+              data-submodule-path={submodule.path}
+              className="flex items-center gap-1.5 border-b py-1.5"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5">
+                  <span className="truncate text-xs font-medium">
+                    {submodule.path}
+                  </span>
+                  {submodule.head && (
+                    <Badge variant="outline">
+                      <code className="font-mono">
+                        {shortId(submodule.head)}
+                      </code>
+                    </Badge>
+                  )}
+                </div>
+                <code className="text-muted-foreground block truncate font-mono text-xs">
+                  {submodule.url ?? "no URL"}
+                </code>
+              </div>
+              <Button
+                data-testid="remove-submodule-btn"
+                variant="ghost"
+                size="icon-xs"
+                aria-label={`Remove submodule ${submodule.path}`}
+                disabled={anyBusy}
+                onClick={() => setRemoveTarget(submodule)}
+              >
+                {removingPath === submodule.path ? <Spinner /> : <Trash2 />}
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {output !== null && (
+        <p
+          role="status"
+          className="text-muted-foreground font-mono text-xs whitespace-pre-wrap"
+        >
+          {output}
+        </p>
+      )}
+
+      <SubmoduleDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        onSubmit={({ url, path }) =>
+          void run("add", () => zyncApi.submoduleAdd(repositoryId, url, path))
+        }
+      />
+      {removeTarget !== null && (
+        <ConfirmDialog
+          open
+          onOpenChange={(open) => !open && setRemoveTarget(null)}
+          title="Remove Submodule"
+          description="Deinitializes the submodule's working tree and removes it from .gitmodules. The submodule's own history and remote repository are not touched."
+          subject={`${removeTarget.path} — ${removeTarget.url ?? "no URL"}`}
+          confirmLabel="Remove Submodule"
+          destructive
+          testId="remove-submodule-dialog"
+          onConfirm={() => void removeSubmodule(removeTarget)}
+        />
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// LFS tab (P2.2)
+// ---------------------------------------------------------------------------
+
+type LfsAction = "install" | "track" | "pull" | "push"
+
+function LfsTab({
+  repositoryId,
+  onWorkspaceRefresh,
+}: {
+  repositoryId: string | null
+  onWorkspaceRefresh: () => void
+}): ReactElement {
+  const [summary, setSummary] = useState<LfsSummary | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [busy, setBusy] = useState<LfsAction | null>(null)
+  const [untrackBusy, setUntrackBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [output, setOutput] = useState<string | null>(null)
+  const [pattern, setPattern] = useState("")
+  const [pushOpen, setPushOpen] = useState(false)
+  const [untrackTarget, setUntrackTarget] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    if (!repositoryId) return
+    setLoading(true)
+    setError(null)
+    try {
+      setSummary(await zyncApi.lfsSummary(repositoryId))
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setLoading(false)
+    }
+  }, [repositoryId])
+
+  useEffect(() => {
+    setSummary(null)
+    setOutput(null)
+    setError(null)
+    void load()
+  }, [load])
+
+  async function run(action: LfsAction, task: () => Promise<string>) {
+    setBusy(action)
+    setError(null)
+    setOutput(null)
+    try {
+      const result = await task()
+      setOutput(result.trim() !== "" ? result : "Done")
+      await load()
+      onWorkspaceRefresh()
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function untrack(patternToRemove: string) {
+    if (!repositoryId) return
+    setUntrackBusy(patternToRemove)
+    setError(null)
+    setOutput(null)
+    try {
+      const result = await zyncApi.lfsUntrack(repositoryId, patternToRemove)
+      setOutput(result.trim() !== "" ? result : `Untracked ${patternToRemove}`)
+      await load()
+      onWorkspaceRefresh()
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setUntrackBusy(null)
+    }
+  }
+
+  if (!repositoryId) {
+    return (
+      <Empty className="border">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <HardDrive />
+          </EmptyMedia>
+          <EmptyTitle>No repository connected</EmptyTitle>
+          <EmptyDescription>
+            Open a repository to manage Git LFS.
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    )
+  }
+
+  const anyBusy = busy !== null || untrackBusy !== null
+  const trimmedPattern = pattern.trim()
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-between gap-2">
+        <Button
+          variant="outline"
+          size="xs"
+          disabled={anyBusy}
+          onClick={() =>
+            void run("install", () => zyncApi.lfsInstall(repositoryId))
+          }
+        >
+          {busy === "install" ? (
+            <Spinner data-icon="inline-start" />
+          ) : (
+            <PlayCircle data-icon="inline-start" />
+          )}
+          Install LFS
+        </Button>
+        <Button
+          variant="ghost"
+          size="xs"
+          disabled={loading || anyBusy}
+          onClick={() => void load()}
+        >
+          {loading ? (
+            <Spinner data-icon="inline-start" />
+          ) : (
+            <RefreshCw data-icon="inline-start" />
+          )}
+          Refresh
+        </Button>
+      </div>
+
+      {error !== null && (
+        <Alert variant="destructive">
+          <AlertTitle>LFS operation failed</AlertTitle>
+          <AlertDescription className="break-words">{error}</AlertDescription>
+        </Alert>
+      )}
+
+      {summary !== null && !summary.configured && (
+        <Alert>
+          <AlertTitle>Git LFS is not configured</AlertTitle>
+          <AlertDescription>
+            No patterns are tracked in .gitattributes yet. Install LFS and
+            track a pattern below (e.g. *.psd) to get started.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      <InputGroup>
+        <InputGroupInput
+          data-testid="lfs-pattern-input"
+          placeholder="*.psd"
+          aria-label="LFS pattern to track"
+          value={pattern}
+          disabled={anyBusy}
+          onChange={(event) => setPattern(event.target.value)}
+        />
+        <InputGroupAddon align="inline-end">
+          <InputGroupButton
+            data-testid="lfs-track-btn"
+            size="xs"
+            disabled={anyBusy || trimmedPattern === ""}
+            onClick={() =>
+              void run("track", () =>
+                zyncApi.lfsTrack(repositoryId, trimmedPattern).then((result) => {
+                  setPattern("")
+                  return result
+                }),
+              )
+            }
+          >
+            {busy === "track" ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <Plus data-icon="inline-start" />
+            )}
+            Track
+          </InputGroupButton>
+        </InputGroupAddon>
+      </InputGroup>
+
+      {summary !== null && summary.tracked_patterns.length === 0 ? (
+        <Empty className="border">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <HardDrive />
+            </EmptyMedia>
+            <EmptyTitle>No tracked patterns</EmptyTitle>
+            <EmptyDescription>
+              Track a file pattern above to start storing matching files in
+              LFS.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      ) : (
+        <ul className="flex flex-col">
+          {(summary?.tracked_patterns ?? []).map((trackedPattern) => (
+            <li
+              key={trackedPattern}
+              data-testid="lfs-pattern-row"
+              data-pattern={trackedPattern}
+              className="flex items-center gap-1.5 border-b py-1.5"
+            >
+              <code className="min-w-0 flex-1 truncate font-mono text-xs">
+                {trackedPattern}
+              </code>
+              <Button
+                data-testid="lfs-untrack-btn"
+                variant="ghost"
+                size="icon-xs"
+                aria-label={`Untrack ${trackedPattern}`}
+                disabled={anyBusy}
+                onClick={() => setUntrackTarget(trackedPattern)}
+              >
+                {untrackBusy === trackedPattern ? <Spinner /> : <Trash2 />}
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="flex items-center gap-1.5">
+        <Button
+          variant="outline"
+          size="xs"
+          disabled={anyBusy}
+          onClick={() => void run("pull", () => zyncApi.lfsPull(repositoryId))}
+        >
+          {busy === "pull" ? (
+            <Spinner data-icon="inline-start" />
+          ) : (
+            <ArrowDown data-icon="inline-start" />
+          )}
+          Pull
+        </Button>
+        <Button
+          variant="outline"
+          size="xs"
+          disabled={anyBusy}
+          onClick={() => setPushOpen(true)}
+        >
+          {busy === "push" ? (
+            <Spinner data-icon="inline-start" />
+          ) : (
+            <ArrowUp data-icon="inline-start" />
+          )}
+          Push
+        </Button>
+      </div>
+
+      {output !== null && (
+        <p
+          role="status"
+          className="text-muted-foreground font-mono text-xs whitespace-pre-wrap"
+        >
+          {output}
+        </p>
+      )}
+
+      <LfsPushDialog
+        open={pushOpen}
+        onOpenChange={setPushOpen}
+        onSubmit={({ remote, branch }) =>
+          void run("push", () => zyncApi.lfsPush(repositoryId, remote, branch))
+        }
+      />
+      {untrackTarget !== null && (
+        <ConfirmDialog
+          open
+          onOpenChange={(open) => !open && setUntrackTarget(null)}
+          title="Untrack Pattern"
+          description={`Stop tracking ${untrackTarget} with Git LFS?`}
+          subject={untrackTarget}
+          confirmLabel="Untrack"
+          destructive
+          testId="untrack-lfs-pattern-dialog"
+          onConfirm={() => void untrack(untrackTarget)}
+        />
+      )}
     </div>
   )
 }
