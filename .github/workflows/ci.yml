@@ -57,6 +57,9 @@ jobs:
       - name: cargo test zync-git-core
         run: cargo test -p zync-git-core
 
+      - name: cargo test zync-server
+        run: cargo test -p zync-server
+
   web-check:
     name: Web typecheck
     runs-on: ubuntu-latest
