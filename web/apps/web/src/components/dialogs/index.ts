@@ -2,6 +2,8 @@
 // controlled open state in, typed payload out on submit.
 
 export { AddRepositoryDialog } from "./AddRepositoryDialog"
+export { BisectStartDialog } from "./BisectStartDialog"
+export type { BisectStartPayload } from "./BisectStartDialog"
 export { NewBranchDialog } from "./NewBranchDialog"
 export type { LocalChangesMode, NewBranchPayload } from "./NewBranchDialog"
 export { TagDialog } from "./TagDialog"

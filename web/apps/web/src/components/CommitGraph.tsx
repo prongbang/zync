@@ -47,6 +47,9 @@ export type CommitMenuAction =
   | "save-patch"
   | "compare-local"
   | "copy-sha"
+  | "bisect-start"
+  | "bisect-good"
+  | "bisect-bad"
 
 // Fixed row/lane geometry — any change here must keep every row exactly 34px
 // tall or the windowing math below drifts (see CLAUDE.md "Virtualized commit
@@ -153,6 +156,7 @@ function CommitRow({
   row,
   selected,
   dimmed,
+  bisectActive,
   onSelect,
   onMenuAction,
 }: {
@@ -163,6 +167,9 @@ function CommitRow({
    * per CLAUDE.md's "never invent state styling" rule (no new color, just a
    * reduced-opacity utility class). */
   dimmed?: boolean
+  /** P2.6 — a bisect session is currently active; shows "Mark Good"/"Mark Bad" for this
+   * specific commit alongside the always-available "Start Bisect from Here...". */
+  bisectActive?: boolean
   onSelect: (id: string) => void
   onMenuAction: (action: CommitMenuAction, commitId: string) => void
 }) {
@@ -289,6 +296,23 @@ function CommitRow({
             Copy Commit SHA
           </ContextMenuItem>
         </ContextMenuGroup>
+        <ContextMenuSeparator />
+        <ContextMenuGroup>
+          <ContextMenuLabel>Bisect</ContextMenuLabel>
+          {bisectActive ? (
+            <>
+              <ContextMenuItem onClick={() => fire("bisect-good")}>
+                Mark as Good
+              </ContextMenuItem>
+              <ContextMenuItem onClick={() => fire("bisect-bad")}>
+                Mark as Bad
+              </ContextMenuItem>
+            </>
+          ) : null}
+          <ContextMenuItem onClick={() => fire("bisect-start")}>
+            Start Bisect from Here...
+          </ContextMenuItem>
+        </ContextMenuGroup>
       </ContextMenuContent>
     </ContextMenu>
   )
@@ -329,6 +353,8 @@ export function CommitGraph(props: {
   onSearchAllHistory: () => void
   onClearHistoryResults: () => void
   searchingHistory: boolean
+  /** P2.6 — a bisect session is currently active; passed through to every row's context menu. */
+  bisectActive?: boolean
 }): React.ReactElement {
   const {
     rows,
@@ -342,6 +368,7 @@ export function CommitGraph(props: {
     onSearchAllHistory,
     onClearHistoryResults,
     searchingHistory,
+    bisectActive,
   } = props
 
   const listRef = useRef<HTMLOListElement>(null)
@@ -521,6 +548,7 @@ export function CommitGraph(props: {
                 matchedIds !== null &&
                 !matchedIds.has(row.commit.id)
               }
+              bisectActive={bisectActive}
               onSelect={onSelect}
               onMenuAction={onMenuAction}
             />

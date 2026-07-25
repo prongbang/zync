@@ -258,6 +258,26 @@ pub struct RebaseResult {
     pub dropped: Vec<String>,
 }
 
+/// Snapshot of a `git bisect` session (P2.6). `git bisect` has no dedicated status subcommand —
+/// this is assembled from `repo.path()/BISECT_START` (existence = a session is active, the same
+/// signal `git bisect` itself relies on internally) plus `git bisect log` (parsed for the
+/// recorded bad/good/skip revisions) and `repo.head()` for the commit currently checked out for
+/// testing. See [`bisect_status`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BisectStatus {
+    pub in_progress: bool,
+    /// HEAD's target while a bisect is in progress — the commit the caller should build/test next.
+    pub current_commit: Option<String>,
+    pub bad: Option<String>,
+    pub good: Vec<String>,
+    pub skipped: Vec<String>,
+    /// Rough "roughly N steps left" estimate in the spirit of git's own bisect output, derived
+    /// from a revwalk over the commits still reachable from `bad` after hiding every `good`
+    /// commit. `None` until both a bad and at least one good commit are recorded — the range
+    /// can't be narrowed before that either way.
+    pub steps_remaining: Option<usize>,
+}
+
 pub fn open_repo(path: impl AsRef<Path>) -> anyhow::Result<RepoInfo> {
     let repo = Repository::open(path.as_ref())?;
     repo_info(&repo)
@@ -2082,6 +2102,174 @@ pub fn rebase_abort(path: impl AsRef<Path>) -> anyhow::Result<String> {
 
 pub fn rebase_skip(path: impl AsRef<Path>) -> anyhow::Result<String> {
     run_git(path.as_ref(), &["rebase", "--skip"])
+}
+
+/// Starts a new `git bisect` session. `bad`/`good` are user-supplied revisions from an HTTP
+/// request body (effectively unauthenticated — auth is a stub); each is validated with
+/// `repo.revparse_single` BEFORE the shellout — a value like `--exec=<cmd>` or
+/// `--term-bad=<x>`/`--no-checkout` does not resolve to a real object, so it fails cleanly here
+/// rather than reaching `git bisect`'s own option parser.
+///
+/// Unlike `rebase`/`lfs`/`submodule`, `git bisect start`/`good`/`bad`/`skip` do NOT honor a `--`
+/// separator before a rev the way most other porcelain does (verified empirically): with `--`,
+/// `git bisect start` silently reinterprets the following positionals as *pathspecs* instead of
+/// revisions (leaving bad/good unset rather than erroring), and `git bisect good/bad -- <rev>`
+/// errors outright ("Bad rev input: --"). So the guard here is two-layer without `--`: every
+/// value must first `revparse_single` successfully, AND (defense in depth, mirroring
+/// `pull_via_cli`'s guard for the same "no `--` available" situation) must not begin with `-` —
+/// closing the narrow gap where a ref name is technically valid-but-dash-prefixed (e.g. a branch
+/// literally named `-x`) and could otherwise be misread as a flag by `git bisect`'s own parser.
+pub fn bisect_start(path: impl AsRef<Path>, bad: &str, good: &[String]) -> anyhow::Result<String> {
+    let path = path.as_ref();
+    reject_dash_prefixed("bad", bad)?;
+    let repo = Repository::open(path)?;
+    repo.revparse_single(bad)
+        .map_err(|_| anyhow::anyhow!("'{bad}' is not a valid revision"))?;
+    for rev in good {
+        reject_dash_prefixed("good", rev)?;
+        repo.revparse_single(rev)
+            .map_err(|_| anyhow::anyhow!("'{rev}' is not a valid revision"))?;
+    }
+    drop(repo);
+
+    let mut args: Vec<&str> = vec!["bisect", "start", bad];
+    args.extend(good.iter().map(String::as_str));
+    run_git(path, &args)
+}
+
+/// Marks the commit currently checked out (or an explicit `rev`) as good. See [`bisect_start`]
+/// for the validate-then-reject-dash-prefix injection guard shared by every bisect mutation here.
+pub fn bisect_good(path: impl AsRef<Path>, rev: Option<&str>) -> anyhow::Result<String> {
+    bisect_mark(path, "good", rev)
+}
+
+/// Marks the commit currently checked out (or an explicit `rev`) as bad. See [`bisect_start`].
+pub fn bisect_bad(path: impl AsRef<Path>, rev: Option<&str>) -> anyhow::Result<String> {
+    bisect_mark(path, "bad", rev)
+}
+
+/// Skips the commit currently checked out (or an explicit `rev`) — it can't be tested. See
+/// [`bisect_start`].
+pub fn bisect_skip(path: impl AsRef<Path>, rev: Option<&str>) -> anyhow::Result<String> {
+    bisect_mark(path, "skip", rev)
+}
+
+fn bisect_mark(path: impl AsRef<Path>, verb: &str, rev: Option<&str>) -> anyhow::Result<String> {
+    let path = path.as_ref();
+    let args: Vec<&str> = match rev {
+        Some(rev) => {
+            reject_dash_prefixed("rev", rev)?;
+            let repo = Repository::open(path)?;
+            repo.revparse_single(rev)
+                .map_err(|_| anyhow::anyhow!("'{rev}' is not a valid revision"))?;
+            drop(repo);
+            vec!["bisect", verb, rev]
+        }
+        None => vec!["bisect", verb],
+    };
+    run_git(path, &args)
+}
+
+/// Rejects a caller-supplied positional that begins with `-` before it ever reaches a `run_git`
+/// shellout — see [`bisect_start`] for why this (rather than a `--` separator) is the guard for
+/// every bisect rev argument.
+///
+/// `#[doc(hidden)] pub` (same reasoning as [`set_upstream_args`]): every real call site pairs
+/// this with a `revparse_single` check that already rejects an option-like value like
+/// `--exec=...` on its own, so a purely behavioral test through `bisect_start`/`bisect_good` etc.
+/// can't tell this guard apart from "removed entirely" — it would still pass. Exposing the pure
+/// function lets a test assert the guard itself: a value revparse would happily accept (e.g. a
+/// ref literally named `-x`) but that still begins with `-`.
+#[doc(hidden)]
+pub fn reject_dash_prefixed(label: &str, value: &str) -> anyhow::Result<()> {
+    if value.starts_with('-') {
+        anyhow::bail!("invalid {label} '{value}': must not begin with '-'");
+    }
+    Ok(())
+}
+
+/// Aborts the bisect session and restores the branch/commit that was checked out before
+/// `bisect_start`. No caller-supplied arguments — nothing to validate.
+pub fn bisect_reset(path: impl AsRef<Path>) -> anyhow::Result<String> {
+    run_git(path.as_ref(), &["bisect", "reset"])
+}
+
+/// Reports the current bisect session — see [`BisectStatus`]. `git bisect log` takes no
+/// caller-supplied arguments (it's a fixed, no-flag invocation), so there is no injection surface
+/// in this function; it exists purely to turn `git`'s own bisect bookkeeping into structured data
+/// for the UI banner.
+pub fn bisect_status(path: impl AsRef<Path>) -> anyhow::Result<BisectStatus> {
+    let path = path.as_ref();
+    let repo = Repository::open(path)?;
+    let in_progress = repo.path().join("BISECT_START").exists();
+    if !in_progress {
+        return Ok(BisectStatus::default());
+    }
+
+    let current_commit = head_oid(&repo);
+    // `git bisect log` prints a `# bad: [<sha>] <subject>` / `# good: [<sha>] <subject>` /
+    // `# skip: [<sha>] <subject>` comment line for every commit marked so far — including the
+    // initial bad/good pair passed to `bisect_start` itself (which never appears as a `git
+    // bisect bad/good <sha>` *command* line the way later marks do). Parsing these comment lines
+    // uniformly covers every case without special-casing the first two.
+    let log = run_git(path, &["bisect", "log"]).unwrap_or_default();
+
+    let mut bad: Option<String> = None;
+    let mut good: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for line in log.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix('#') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let (label, rest) = match rest.split_once(':') {
+            Some(parts) => parts,
+            None => continue,
+        };
+        let Some(sha) = rest
+            .trim_start()
+            .strip_prefix('[')
+            .and_then(|s| s.split(']').next())
+        else {
+            continue;
+        };
+        match label {
+            "bad" => bad = Some(sha.to_string()),
+            "good" => good.push(sha.to_string()),
+            "skip" => skipped.push(sha.to_string()),
+            _ => {}
+        }
+    }
+
+    let steps_remaining = bad.as_deref().and_then(|bad_rev| {
+        if good.is_empty() {
+            return None;
+        }
+        let bad_oid = Oid::from_str(bad_rev).ok()?;
+        let mut walk = repo.revwalk().ok()?;
+        walk.push(bad_oid).ok()?;
+        for rev in &good {
+            if let Ok(oid) = Oid::from_str(rev) {
+                let _ = walk.hide(oid);
+            }
+        }
+        let remaining = walk.filter_map(|oid| oid.ok()).count();
+        Some(if remaining <= 1 {
+            0
+        } else {
+            (remaining as f64).log2().ceil() as usize
+        })
+    });
+
+    Ok(BisectStatus {
+        in_progress,
+        current_commit,
+        bad,
+        good,
+        skipped,
+        steps_remaining,
+    })
 }
 
 pub fn conflicts(path: impl AsRef<Path>) -> anyhow::Result<Vec<ConflictSummary>> {

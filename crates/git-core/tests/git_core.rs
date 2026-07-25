@@ -1149,3 +1149,195 @@ fn search_commits_matches_message_author_sha_and_file_path() {
     assert_eq!(by_path.len(), 1);
     assert_eq!(by_path[0].id, base_id);
 }
+
+/// End-to-end bisect flow (P2.6) over a 5-commit linear history where `bug.txt` first appears at
+/// commit index 3: `bisect_start` marks commit 0 good / commit 4 bad, then each subsequent
+/// `bisect_good`/`bisect_bad` call is driven purely by whether `bug.txt` exists in the working
+/// tree git itself checked out for the current candidate — the same signal a human running
+/// `git bisect` would use. Asserts the session converges on the actual culprit commit, HEAD moves
+/// as the bisect narrows the range, and `bisect_reset` restores the original branch.
+#[test]
+fn bisect_converges_on_linear_history_and_moves_head() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    Repository::init(temp.path()).expect("init repo");
+
+    // Built via the public `add`/`commit` API (each opens its own fresh `Repository::open` per
+    // CLAUDE.md convention) rather than a hand-rolled index/tree dance reusing one long-lived
+    // `Repository` handle across iterations — the latter caches its `git_index` in memory and
+    // never observes `add`'s separate on-disk write without an explicit forced re-read.
+    let mut commits: Vec<String> = Vec::new();
+    for i in 0..5 {
+        fs::write(temp.path().join("marker.txt"), format!("commit {i}")).expect("write marker");
+        let mut files = vec!["marker.txt".to_string()];
+        if i >= 3 {
+            fs::write(temp.path().join("bug.txt"), "boom").expect("write bug marker");
+            files.push("bug.txt".to_string());
+        }
+        zync_git_core::add(temp.path(), &files).expect("add files");
+        let oid = zync_git_core::commit(
+            temp.path(),
+            &format!("commit {i}"),
+            "Zync Test",
+            "zync@test.local",
+        )
+        .expect("commit");
+        commits.push(oid);
+    }
+
+    let good_commit = commits[0].clone();
+    let bad_commit = commits[4].clone();
+    let culprit = commits[3].clone();
+
+    let original_branch = zync_git_core::open_repo(temp.path())
+        .expect("open repo")
+        .current_branch
+        .expect("on a named branch before bisect");
+    let head_before_bisect = Repository::open(temp.path())
+        .expect("reopen repo")
+        .head()
+        .expect("head")
+        .target()
+        .expect("head target");
+
+    let not_started = zync_git_core::bisect_status(temp.path()).expect("status before start");
+    assert!(!not_started.in_progress);
+
+    zync_git_core::bisect_start(temp.path(), &bad_commit, &[good_commit.clone()])
+        .expect("bisect start");
+
+    let mut status = zync_git_core::bisect_status(temp.path()).expect("status after start");
+    assert!(status.in_progress);
+    assert_eq!(status.bad.as_deref(), Some(bad_commit.as_str()));
+    assert_eq!(status.good, vec![good_commit.clone()]);
+    let first_candidate = status.current_commit.clone().expect("a commit to test");
+    // git checks out the midpoint candidate as part of `bisect start` — HEAD must have moved off
+    // both endpoints onto one of the commits still in play.
+    assert_ne!(first_candidate, bad_commit);
+    assert!(commits.contains(&first_candidate));
+
+    // Drive the bisect to convergence purely from working-tree evidence, bounded so a bug here
+    // can't hang the suite instead of failing it.
+    for _ in 0..10 {
+        let has_bug = temp.path().join("bug.txt").exists();
+        if has_bug {
+            zync_git_core::bisect_bad(temp.path(), None).expect("mark bad");
+        } else {
+            zync_git_core::bisect_good(temp.path(), None).expect("mark good");
+        }
+        status = zync_git_core::bisect_status(temp.path()).expect("status mid-bisect");
+        if status.steps_remaining == Some(0) || status.bad.as_deref() == Some(culprit.as_str()) {
+            break;
+        }
+    }
+
+    assert_eq!(
+        status.bad.as_deref(),
+        Some(culprit.as_str()),
+        "bisect should converge on the commit that introduced bug.txt"
+    );
+
+    let head_during_bisect = Repository::open(temp.path())
+        .expect("reopen repo")
+        .head()
+        .expect("head")
+        .target()
+        .expect("head target");
+    assert_ne!(
+        head_during_bisect, head_before_bisect,
+        "HEAD must have moved off the pre-bisect branch tip while narrowing the range"
+    );
+    assert_eq!(
+        Repository::open(temp.path()).expect("reopen repo").state(),
+        git2::RepositoryState::Bisect
+    );
+
+    zync_git_core::bisect_reset(temp.path()).expect("bisect reset");
+
+    let after_reset = zync_git_core::open_repo(temp.path()).expect("open repo after reset");
+    assert_eq!(
+        after_reset.current_branch.as_deref(),
+        Some(original_branch.as_str())
+    );
+    assert_eq!(after_reset.head, Some(head_before_bisect.to_string()));
+    assert!(
+        !zync_git_core::bisect_status(temp.path())
+            .expect("status after reset")
+            .in_progress
+    );
+}
+
+/// Direct unit test of the pure `reject_dash_prefixed` guard itself, independent of
+/// `revparse_single`. `bisect_rejects_option_like_rev_and_creates_no_marker` below exercises the
+/// two guards together through the real `bisect_start`/`bisect_good` entry points, but
+/// `--exec=touch ...` is ALSO rejected by `revparse_single` on its own — so that test alone can't
+/// tell "the dash guard was removed" apart from "the dash guard is still there": it would keep
+/// passing either way. This asserts the guard function directly: a value `revparse_single` would
+/// happily accept if it reached that check (a plain rev like `"HEAD"`) is fine, while a
+/// dash-prefixed value (`"-x"`, which can't be constructed as a real git ref without `--` — see
+/// `bisect_start`'s doc comment on why `--` isn't a usable separator for bisect) is rejected on
+/// its own, with no revparse involved at all.
+#[test]
+fn reject_dash_prefixed_rejects_leading_dash_independent_of_revparse() {
+    zync_git_core::reject_dash_prefixed("rev", "HEAD").expect("a plain rev must be accepted");
+    let error = zync_git_core::reject_dash_prefixed("rev", "-x")
+        .expect_err("a dash-prefixed value must be rejected regardless of revparse");
+    assert!(error.to_string().contains("must not begin with '-'"));
+}
+
+/// `bisect_start`/`bisect_good`/`bisect_bad`/`bisect_skip` all validate every caller-supplied
+/// revision before ever shelling out to `git bisect`: `--`-separating the rev the way
+/// `rebase_branch`/`submodule_add` do turns out NOT to work for `git bisect` (verified
+/// empirically — see the doc comment on `bisect_start`), so the guard here is a leading-`-`
+/// rejection plus a `repo.revparse_single` check. This asserts an option-like value
+/// (`--exec=<cmd>`, the same flag the rebase-branch injection hardening guards against) is
+/// rejected — never reaching `git`, so the injected command never runs — for the `bad` argument,
+/// the `good` list, and an explicit `bisect_bad` rev.
+#[test]
+fn bisect_rejects_option_like_rev_and_creates_no_marker() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    init_repo_with_commit(temp.path(), "README.md", "hello");
+
+    let marker = temp.path().join("PWNED");
+    let hostile = format!("--exec=touch {}", marker.display());
+
+    let bad_err = zync_git_core::bisect_start(temp.path(), &hostile, &[])
+        .expect_err("an option-like bad revision must be rejected before it reaches git");
+    assert!(bad_err.to_string().contains("invalid") || bad_err.to_string().contains("not a valid revision"));
+    assert!(!marker.exists());
+    assert!(
+        !zync_git_core::bisect_status(temp.path())
+            .expect("status")
+            .in_progress,
+        "a rejected bad revision must never start a bisect session"
+    );
+
+    let head = zync_git_core::open_repo(temp.path())
+        .expect("open repo")
+        .head
+        .expect("head");
+
+    let good_err = zync_git_core::bisect_start(temp.path(), &head, &[hostile.clone()])
+        .expect_err("an option-like good revision must be rejected before it reaches git");
+    assert!(good_err.to_string().contains("invalid") || good_err.to_string().contains("not a valid revision"));
+    assert!(!marker.exists());
+    assert!(
+        !zync_git_core::bisect_status(temp.path())
+            .expect("status")
+            .in_progress,
+        "a rejected good revision must never start a bisect session"
+    );
+
+    // A real session for the explicit-rev guard on bisect_bad/good/skip.
+    zync_git_core::bisect_start(temp.path(), &head, &[]).expect("start with bad only");
+    let mark_err = zync_git_core::bisect_bad(temp.path(), Some(&hostile))
+        .expect_err("an option-like explicit rev must be rejected");
+    assert!(
+        mark_err.to_string().contains("invalid") || mark_err.to_string().contains("not a valid revision")
+    );
+    assert!(
+        !marker.exists(),
+        "bisect must never let an option-like revision execute a command via --exec"
+    );
+
+    zync_git_core::bisect_reset(temp.path()).expect("cleanup: bisect reset");
+}

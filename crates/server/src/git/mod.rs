@@ -112,6 +112,12 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
         .route("/repositories/:id/git/rebase/abort", post(rebase_abort))
         .route("/repositories/:id/git/rebase/skip", post(rebase_skip))
+        .route("/repositories/:id/git/bisect/start", post(bisect_start))
+        .route("/repositories/:id/git/bisect/good", post(bisect_good))
+        .route("/repositories/:id/git/bisect/bad", post(bisect_bad))
+        .route("/repositories/:id/git/bisect/skip", post(bisect_skip))
+        .route("/repositories/:id/git/bisect/reset", post(bisect_reset))
+        .route("/repositories/:id/git/bisect/status", get(bisect_status))
         .route("/repositories/:id/git/cherry-pick", post(cherry_pick))
         .route(
             "/repositories/:id/git/cherry-pick/abort",
@@ -248,6 +254,21 @@ struct RebaseStepRequest {
     action: zync_git_core::RebaseAction,
     #[serde(default)]
     message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BisectStartRequest {
+    bad: String,
+    #[serde(default)]
+    good: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BisectMarkRequest {
+    /// Explicit revision to mark (good/bad/skip); when absent, marks the commit currently
+    /// checked out (the normal `git bisect good`/`bad`/`skip` behavior).
+    #[serde(default)]
+    rev: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1424,6 +1445,79 @@ async fn rebase_skip(
         ],
     );
     Ok(result)
+}
+
+/// Starts a `git bisect` session. `bad`/`good` come straight from the request body — validated
+/// (and, since `git bisect` doesn't honor a `--` separator the way most other porcelain does,
+/// leading-dash-rejected) by `zync_git_core::bisect_start` itself before any shellout; see that
+/// function's doc comment for why. Bisect moves HEAD (checking out the first candidate to test),
+/// so this broadcasts the same scopes a checkout/rebase does.
+async fn bisect_start(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<BisectStartRequest>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let result = zync_git_core::bisect_start(repository.path, &request.bad, &request.good)
+        .map_err(map_git_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff", "commits", "branches"]);
+    Ok(result)
+}
+
+async fn bisect_good(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<BisectMarkRequest>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let result = zync_git_core::bisect_good(repository.path, request.rev.as_deref())
+        .map_err(map_git_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff", "commits", "branches"]);
+    Ok(result)
+}
+
+async fn bisect_bad(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<BisectMarkRequest>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let result = zync_git_core::bisect_bad(repository.path, request.rev.as_deref())
+        .map_err(map_git_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff", "commits", "branches"]);
+    Ok(result)
+}
+
+async fn bisect_skip(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<BisectMarkRequest>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let result = zync_git_core::bisect_skip(repository.path, request.rev.as_deref())
+        .map_err(map_git_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff", "commits", "branches"]);
+    Ok(result)
+}
+
+async fn bisect_reset(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<String, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    let result = zync_git_core::bisect_reset(repository.path).map_err(map_git_error)?;
+    broadcast_git_change(&state, &id, &["status", "diff", "commits", "branches"]);
+    Ok(result)
+}
+
+async fn bisect_status(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<zync_git_core::BisectStatus>, (StatusCode, String)> {
+    let repository = repository(&state, &id)?;
+    zync_git_core::bisect_status(repository.path)
+        .map(Json)
+        .map_err(internal_error)
 }
 
 async fn stashes(

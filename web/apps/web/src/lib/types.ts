@@ -369,3 +369,22 @@ export interface StashRequest {
   index: number | null
   pop: boolean | null
 }
+
+// Mirrors zync_git_core::BisectStatus (P2.6).
+export interface BisectStatus {
+  in_progress: boolean
+  current_commit: string | null
+  bad: string | null
+  good: string[]
+  skipped: string[]
+  steps_remaining: number | null
+}
+
+export interface BisectStartRequest {
+  bad: string
+  good: string[]
+}
+
+export interface BisectMarkRequest {
+  rev: string | null
+}

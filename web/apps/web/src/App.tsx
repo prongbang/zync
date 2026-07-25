@@ -50,6 +50,7 @@ import {
   type BranchCommand,
   type TagCommand,
 } from "./components/BranchSidebar"
+import { BisectBanner } from "./components/BisectBanner"
 import { CommandPalette } from "./components/CommandPalette"
 import { CommitGraph } from "./components/CommitGraph"
 import { ConflictResolver } from "./components/ConflictResolver"
@@ -62,6 +63,7 @@ import { ShortcutsDialog } from "./components/ShortcutsDialog"
 import { Toolbar } from "./components/Toolbar"
 import {
   AddRepositoryDialog,
+  BisectStartDialog,
   BranchMergeChooserDialog,
   DeleteDialog,
   DeleteTagDialog,
@@ -105,6 +107,7 @@ type ActiveDialog =
   | { kind: "revertParent"; commitId: string; parents: string[] }
   | { kind: "interactiveRebase"; commitId: string }
   | { kind: "branchMergeChooser"; source: string; target: string }
+  | { kind: "bisectStart"; commitId: string }
   | null
 
 export function App() {
@@ -516,6 +519,7 @@ export function App() {
               onSearchAllHistory={() => void handleSearchAllHistory()}
               onClearHistoryResults={handleClearHistoryResults}
               searchingHistory={searchingHistory}
+              bisectActive={ws.bisectStatus?.in_progress ?? false}
               onMenuAction={(action, commitId) => {
                 const commit = ws.commits.find((c) => c.id === commitId)
                 switch (action) {
@@ -540,6 +544,15 @@ export function App() {
                     break
                   case "interactive-rebase":
                     setDialog({ kind: "interactiveRebase", commitId })
+                    break
+                  case "bisect-start":
+                    setDialog({ kind: "bisectStart", commitId })
+                    break
+                  case "bisect-good":
+                    void ws.bisectGood(commitId)
+                    break
+                  case "bisect-bad":
+                    void ws.bisectBad(commitId)
                     break
                   case "edit":
                   case "squash":
@@ -817,6 +830,16 @@ export function App() {
         </Button>
       </header>
 
+      {ws.bisectStatus?.in_progress && (
+        <BisectBanner
+          status={ws.bisectStatus}
+          onGood={() => void ws.bisectGood()}
+          onBad={() => void ws.bisectBad()}
+          onSkip={() => void ws.bisectSkip()}
+          onReset={() => void ws.bisectReset()}
+        />
+      )}
+
       {isMobile ? (
         <div className="flex min-h-0 flex-1 flex-col">{centerMain}</div>
       ) : (
@@ -1047,6 +1070,14 @@ export function App() {
               `Rebased ${p.steps.length} commit${p.steps.length === 1 ? "" : "s"} onto ${shortId(p.base)}`,
             )
           }
+        />
+      )}
+      {dialog?.kind === "bisectStart" && (
+        <BisectStartDialog
+          open
+          bad={dialog.commitId}
+          onOpenChange={(o) => !o && setDialog(null)}
+          onSubmit={(p) => void ws.bisectStart(p.bad, [p.good])}
         />
       )}
       {dialog?.kind === "reset" && (

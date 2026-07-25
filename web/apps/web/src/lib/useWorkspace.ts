@@ -22,6 +22,7 @@ import {
   type BlameRow,
 } from "./helpers"
 import type {
+  BisectStatus,
   BranchSummary,
   CommitSummary,
   ConflictSummary,
@@ -55,6 +56,10 @@ export type WorkspaceState = {
   commits: CommitSummary[]
   stashes: StashSummary[]
   conflicts: ConflictSummary[]
+  /** P2.6 — non-null `in_progress` means a `git bisect` session is active; drives the bisect
+   * status banner. Refetched alongside `gitStatus` (piggybacks the existing "status" scope
+   * rather than adding a new scope bit — see `broadcast_git_change`'s bisect scopes). */
+  bisectStatus: BisectStatus | null
   diff: string
   notice: string
   liveSyncOk: boolean
@@ -153,6 +158,15 @@ export type WorkspaceState = {
     successNotice: string,
   ) => Promise<void>
   resetToCommit: (commitId: string, hard: boolean) => Promise<void>
+  /** Starts a `git bisect` session (P2.6) marking `bad` as bad and every entry in `good` as
+   * good. Rejects (via `run`'s notice) if either resolves to an invalid revision — validated
+   * server-side by `zync_git_core::bisect_start` before any shellout. */
+  bisectStart: (bad: string, good: string[]) => Promise<void>
+  bisectGood: (rev?: string) => Promise<void>
+  bisectBad: (rev?: string) => Promise<void>
+  bisectSkip: (rev?: string) => Promise<void>
+  /** Aborts the bisect session and restores the branch checked out before `bisectStart`. */
+  bisectReset: () => Promise<void>
   loadStats: () => Promise<void>
   repoStats: RepoStats | null
   /** Full-history commit search (P1.3) — for matches outside the loaded graph
@@ -190,6 +204,7 @@ export function useWorkspace(): WorkspaceState {
   const [commits, setCommits] = useState<CommitSummary[]>([])
   const [stashes, setStashes] = useState<StashSummary[]>([])
   const [conflicts, setConflicts] = useState<ConflictSummary[]>([])
+  const [bisectStatus, setBisectStatus] = useState<BisectStatus | null>(null)
   const [diff, setDiff] = useState("")
   const [notice, setNotice] = useState("Ready")
   const [liveSyncOk, setLiveSyncOk] = useState(false)
@@ -250,6 +265,12 @@ export function useWorkspace(): WorkspaceState {
       }
       run(SCOPE_WORKSPACE, async () => setWorkspace(await api.workspace(workspaceId)))
       run(SCOPE_STATUS, async () => setGitStatus(await api.status(repositoryId)))
+      // Bisect has no dedicated scope bit — piggybacks "status" (see broadcast_git_change's
+      // bisect scopes: ["status", "commits", "branches"]) so other connected clients/tabs still
+      // pick up a bisect mutation over the websocket without a new SCOPE_* bit.
+      run(SCOPE_STATUS, async () =>
+        setBisectStatus(await api.bisectStatus(repositoryId)),
+      )
       run(SCOPE_BRANCHES, async () => setBranches(await api.branches(repositoryId)))
       run(SCOPE_TAGS, async () => setTags(await api.tags(repositoryId)))
       run(SCOPE_GRAPH, async () =>
@@ -287,6 +308,7 @@ export function useWorkspace(): WorkspaceState {
         setDiff("")
         setSelectedCommitDiff("")
         setSelectedCommitDiffError(null)
+        setBisectStatus(null)
         setNotice("Workspace opened and watcher attached")
         // Fetch + set `workspace` inline (awaited here) rather than through the
         // fire-and-forget `refresh` below — `workspace` is what the auto-open effect
@@ -342,6 +364,7 @@ export function useWorkspace(): WorkspaceState {
           setGitStatus([])
           setStashes([])
           setConflicts([])
+          setBisectStatus(null)
           setDiff("")
           setSelectedFile("")
           setSelectedCommitDiff("")
@@ -758,6 +781,54 @@ export function useWorkspace(): WorkspaceState {
     [run],
   )
 
+  // Bisect (P2.6). All five share the SCOPE_STATUS-piggybacked bisect-status refresh set up in
+  // `refresh` above, matching the server's `broadcast_git_change(&["status", "commits",
+  // "branches"])` scopes for every bisect mutation.
+  const bisectStart = useCallback(
+    (bad: string, good: string[]) =>
+      run(
+        (id) =>
+          api
+            .bisectStart(id, bad, good)
+            .then((message) => message || `Bisect started (bad ${shortId(bad)})`),
+        SCOPE_STATUS | SCOPE_GRAPH | SCOPE_BRANCHES,
+      ),
+    [run],
+  )
+  const bisectGood = useCallback(
+    (rev?: string) =>
+      run(
+        (id) =>
+          api.bisectGood(id, rev).then((message) => message || "Marked good"),
+        SCOPE_STATUS | SCOPE_GRAPH | SCOPE_BRANCHES,
+      ),
+    [run],
+  )
+  const bisectBad = useCallback(
+    (rev?: string) =>
+      run(
+        (id) => api.bisectBad(id, rev).then((message) => message || "Marked bad"),
+        SCOPE_STATUS | SCOPE_GRAPH | SCOPE_BRANCHES,
+      ),
+    [run],
+  )
+  const bisectSkip = useCallback(
+    (rev?: string) =>
+      run(
+        (id) => api.bisectSkip(id, rev).then((message) => message || "Skipped"),
+        SCOPE_STATUS | SCOPE_GRAPH | SCOPE_BRANCHES,
+      ),
+    [run],
+  )
+  const bisectReset = useCallback(
+    () =>
+      run(
+        (id) => api.bisectReset(id).then((message) => message || "Bisect reset"),
+        SCOPE_STATUS | SCOPE_GRAPH | SCOPE_BRANCHES,
+      ),
+    [run],
+  )
+
   const loadStats = useCallback(async () => {
     const repositoryId = repoIdRef.current
     if (!repositoryId) return
@@ -870,6 +941,7 @@ export function useWorkspace(): WorkspaceState {
     commits,
     stashes,
     conflicts,
+    bisectStatus,
     diff,
     notice,
     liveSyncOk,
@@ -914,6 +986,11 @@ export function useWorkspace(): WorkspaceState {
     runInteractiveRebase,
     runInteractiveRebasePlan,
     resetToCommit,
+    bisectStart,
+    bisectGood,
+    bisectBad,
+    bisectSkip,
+    bisectReset,
     loadStats,
     repoStats,
     searchCommits,

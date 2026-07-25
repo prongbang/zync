@@ -6,6 +6,9 @@
 // already correct.
 
 import type {
+  BisectMarkRequest,
+  BisectStartRequest,
+  BisectStatus,
   BlameLine,
   BranchRequest,
   BranchSummary,
@@ -992,6 +995,52 @@ export class ZyncApi {
       this.url(`/repositories/${repositoryId}/git/stashes/drop`),
       request
     )
+  }
+
+  // ---- Bisect (P2.6) ----
+
+  async bisectStatus(repositoryId: string): Promise<BisectStatus> {
+    return getJson(this.url(`/repositories/${repositoryId}/git/bisect/status`))
+  }
+
+  async bisectStart(
+    repositoryId: string,
+    bad: string,
+    good: string[]
+  ): Promise<string> {
+    const request: BisectStartRequest = { bad, good }
+    return postText(
+      this.url(`/repositories/${repositoryId}/git/bisect/start`),
+      request
+    )
+  }
+
+  async bisectGood(repositoryId: string, rev?: string | null): Promise<string> {
+    const request: BisectMarkRequest = { rev: rev ?? null }
+    return postText(
+      this.url(`/repositories/${repositoryId}/git/bisect/good`),
+      request
+    )
+  }
+
+  async bisectBad(repositoryId: string, rev?: string | null): Promise<string> {
+    const request: BisectMarkRequest = { rev: rev ?? null }
+    return postText(
+      this.url(`/repositories/${repositoryId}/git/bisect/bad`),
+      request
+    )
+  }
+
+  async bisectSkip(repositoryId: string, rev?: string | null): Promise<string> {
+    const request: BisectMarkRequest = { rev: rev ?? null }
+    return postText(
+      this.url(`/repositories/${repositoryId}/git/bisect/skip`),
+      request
+    )
+  }
+
+  async bisectReset(repositoryId: string): Promise<string> {
+    return postText(this.url(`/repositories/${repositoryId}/git/bisect/reset`), {})
   }
 }
 
