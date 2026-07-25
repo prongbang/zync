@@ -802,7 +802,21 @@ fn credential_spec_debug_never_prints_sentinel_secret() {
 /// `base`) carrying one additional commit that adds `feature.txt` — `main` is left behind, so a
 /// fast-forward of `main` onto `feature` is possible. Returns (repo root, feature branch name).
 fn repo_with_ff_possible_feature_branch(path: &std::path::Path) -> String {
-    Repository::init(path).expect("init repo");
+    let repo = Repository::init(path).expect("init repo");
+    // The no-ff merge and revert-merge paths shell out to the `git` CLI, which
+    // needs a committer identity. Set it in the repo's *local* config so these
+    // tests are hermetic — they must not depend on the machine's global git
+    // config (a fresh CI runner has none, which otherwise fails the merge).
+    {
+        let mut config = repo.config().expect("repo config");
+        config
+            .set_str("user.name", "Zync Test")
+            .expect("set user.name");
+        config
+            .set_str("user.email", "zync@test.local")
+            .expect("set user.email");
+    }
+    drop(repo);
     fs::write(path.join("base.txt"), "base").expect("write base");
     zync_git_core::add(path, &["base.txt".to_string()]).expect("add base");
     zync_git_core::commit(path, "Base", "Zync Test", "zync@test.local").expect("base commit");
