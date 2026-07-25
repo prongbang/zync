@@ -656,10 +656,11 @@ export function branchGroupRows(
   for (const branch of rows) {
     const slash = branch.name.indexOf("/")
     const groupName = slash === -1 ? "" : branch.name.slice(0, slash)
-    if (groupName === "") {
-      grouped.push(["", [branch]])
-      continue
-    }
+    // All un-namespaced (root-level) branches share a single "" group, same as
+    // any other namespace — otherwise each root branch would produce its own
+    // ["", [branch]] tuple, and callers keying off the group name (e.g.
+    // BranchSidebar's `key={group || "__root__"}`) would collide on duplicate
+    // React keys.
     const existing = grouped.find(([name]) => name === groupName)
     if (existing) existing[1].push(branch)
     else grouped.push([groupName, [branch]])
@@ -695,7 +696,17 @@ export function quickRebasePlan(
   if (target.parents.length !== 1)
     throw new Error("Quick actions need a commit with exactly one parent")
   const base = target.parents[0]
-  const steps: RebaseStepRequest[] = [{ commit: targetId, action, message }]
+  // "reword" is a UI-only intent, not a server-side RebaseAction (git-core's
+  // RebaseAction enum only has pick/squash/fixup/drop/edit). Interactive
+  // rebase's Pick step already accepts an optional message override
+  // (crates/git-core/src/lib.rs `replay_commit`'s `ReplayMode::Pick(Option<String>)`),
+  // so a reword is sent on the wire as `{ action: "pick", message }` — same
+  // mapping InteractiveRebaseDialog uses for its per-row "reword" action.
+  const wireStep: RebaseStepRequest =
+    action === "reword"
+      ? { commit: targetId, action: "pick", message }
+      : { commit: targetId, action, message }
+  const steps: RebaseStepRequest[] = [wireStep]
   for (let i = index - 1; i >= 0; i--) {
     const descendant = commits[i]
     if (descendant.parents.length > 1)
