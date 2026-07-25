@@ -177,9 +177,283 @@ fn is_unique_constraint_violation(err: &rusqlite::Error) -> bool {
     )
 }
 
+/// Connection-level pragmas applied once, right after opening (P5.1).
+///
+/// - `journal_mode = WAL`: readers no longer block writers (and vice versa)
+///   the way rollback-journal mode does. This server serializes all access
+///   through a single `Arc<Mutex<Connection>>` anyway, so WAL's concurrency
+///   benefit is mostly for *external* readers of the same file — an
+///   `sqlite3 zync.db` shell, a future backup/admin CLI (P5.2) — which would
+///   otherwise contend with the server's writer lock.
+/// - `synchronous = NORMAL`: the documented safe pairing with WAL (SQLite
+///   docs: "safe from corruption... but may lose the most recent commits" only
+///   on a full OS/power failure, not an application crash). `FULL` is
+///   unnecessary overhead once WAL is on.
+/// - `busy_timeout = 5000`: any transient `SQLITE_BUSY` (e.g. a checkpoint in
+///   progress) retries for up to 5s instead of failing the request
+///   immediately — matters more once more than one process/connection ever
+///   touches the file (backups, tooling), but is a no-cost safety margin now.
+/// - `foreign_keys = ON`: OFF by default in SQLite for backward
+///   compatibility. Without it every `FOREIGN KEY` clause in this schema
+///   (`workspaces.repository_id`, `sessions.user_id`, etc.) is silently
+///   decorative and never enforced.
+fn apply_pragmas(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA busy_timeout = 5000;
+         PRAGMA foreign_keys = ON;
+         PRAGMA synchronous = NORMAL;",
+    )?;
+
+    // Verify WAL actually engaged rather than trusting the statement not
+    // erroring — `journal_mode` is one of the pragmas that reports back the
+    // mode SQLite actually ended up in, which can differ from what was
+    // requested (an in-memory database, used throughout this module's tests,
+    // can never use WAL and correctly reports `memory`; some exotic
+    // filesystems that don't support shared memory / mmap silently fall back
+    // too). Only warn — this is an operational concern, not a reason to
+    // refuse to boot.
+    let journal_mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+    if journal_mode != "wal" && journal_mode != "memory" {
+        tracing::warn!(
+            journal_mode = %journal_mode,
+            "sqlite did not engage WAL journal mode; concurrent access may block"
+        );
+    }
+    Ok(())
+}
+
+/// A single, ordered, atomically-applied schema change. `apply` runs inside a
+/// transaction that only commits (bumping `PRAGMA user_version` to
+/// `version`) if it returns `Ok` — see [`run_migrations`].
+struct Migration {
+    version: i64,
+    name: &'static str,
+    apply: fn(&Connection) -> anyhow::Result<()>,
+}
+
+/// Every migration this build knows about, oldest first, tracked via
+/// `PRAGMA user_version` rather than a separate `schema_version` table.
+///
+/// Why `user_version` over a table: it's a single integer already built into
+/// the SQLite file header, so bumping it is just another statement inside
+/// the same transaction as the migration's DDL/DML — there's no separate
+/// table whose row can itself drift out of sync with the schema it claims to
+/// describe, and no risk of "the migration committed but the bookkeeping
+/// insert didn't" (or vice versa) since both happen atomically. A
+/// `schema_version` table would add an audit trail (timestamps, names) that
+/// nothing here reads back programmatically; `PRAGMA user_version` is the
+/// simpler tool that fits what this project actually needs: one current
+/// version number.
+///
+/// Migration 1 is deliberately the *entire* schema as it exists today — the
+/// P0-P4 accumulation of `CREATE TABLE IF NOT EXISTS` + idempotent
+/// `ALTER TABLE ADD COLUMN`s this file already had before P5.1, unchanged.
+/// That is what makes upgrading an already-deployed database safe: such a
+/// database has every table/column migration 1 would create, so running it
+/// again is a structural no-op (every `CREATE TABLE`/`ADD COLUMN` is
+/// existence-guarded) — the *only* effect on that database is stamping
+/// `user_version = 1`, exactly the "detect + stamp without re-creating"
+/// behavior an existing deployment needs. A brand-new database has none of
+/// this yet, so the same migration *builds* the whole schema there. Either
+/// way, after migration 1 both databases are byte-for-byte the same shape.
+/// Any future schema change is a new migration appended here with the next
+/// version number — migration 1's body must never be edited once shipped.
+const MIGRATIONS: &[Migration] = &[Migration {
+    version: 1,
+    name: "baseline schema (P0-P4 accumulated ad-hoc schema)",
+    apply: migration_001_baseline,
+}];
+
+/// Applies every migration in `migrations` whose version is greater than the
+/// database's current `PRAGMA user_version`, in ascending order. Each
+/// migration runs inside its own transaction (`Connection::transaction`):
+/// `apply` runs, then `user_version` is bumped to that migration's version,
+/// then the transaction commits — a `Transaction` that goes out of scope
+/// without an explicit `commit()` rolls back automatically, so a migration
+/// that returns `Err` (whether from the SQL itself or a later step in the
+/// same closure/fn) leaves *both* its own writes and the version bump
+/// undone. The error propagates to the caller (`Database::open`, and from
+/// there `main`), so a broken migration refuses to boot rather than running
+/// against a half-migrated schema.
+fn run_migrations(conn: &mut Connection, migrations: &[Migration]) -> anyhow::Result<()> {
+    let current_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    for migration in migrations {
+        if migration.version <= current_version {
+            continue;
+        }
+        let tx = conn.transaction()?;
+        (migration.apply)(&tx).map_err(|err| {
+            anyhow::anyhow!(
+                "migration {} ({}) failed, refusing to boot: {err}",
+                migration.version,
+                migration.name
+            )
+        })?;
+        tx.pragma_update(None, "user_version", migration.version)?;
+        tx.commit()?;
+        tracing::info!(
+            version = migration.version,
+            name = migration.name,
+            "applied database migration"
+        );
+    }
+    Ok(())
+}
+
+/// Migration 1 — see [`MIGRATIONS`] for why this is the full current schema
+/// rather than an incremental step. Verbatim behavior of the pre-P5.1
+/// `Database::migrate` body: base tables, additive `ALTER TABLE`s, the
+/// one-time `sessions` reshape (ADR-002 Decision 2/6), and the role/owner
+/// backfill (ADR-002 Decision 6) — all still guarded so they're no-ops on a
+/// database that already has this shape.
+fn migration_001_baseline(conn: &Connection) -> anyhow::Result<()> {
+    // Base tables (unchanged shape). `sessions` is handled separately below
+    // because its shape is reshaped for ADR-002 and its rows are ephemeral.
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            email TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            role TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS repositories (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            path TEXT NOT NULL UNIQUE,
+            remote_url TEXT,
+            favorite INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS workspaces (
+            id TEXT PRIMARY KEY,
+            repository_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(repository_id) REFERENCES repositories(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS workspace_members (
+            workspace_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            PRIMARY KEY(workspace_id, user_id),
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS credentials (
+            id            TEXT PRIMARY KEY,
+            user_id       TEXT NOT NULL,
+            label         TEXT NOT NULL,
+            host_pattern  TEXT NOT NULL,
+            kind          TEXT NOT NULL CHECK (kind IN ('https_token', 'ssh_key')),
+            username      TEXT,
+            secret_cipher BLOB NOT NULL,
+            secret_nonce  BLOB NOT NULL,
+            created_at    TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        "#,
+    )?;
+
+    // ADR-002 Decision 6 — additive migration. `ALTER TABLE ADD COLUMN` is
+    // idempotent here because it's guarded by a column-existence check, so
+    // this runs cleanly on both a fresh DB (base tables above lack these
+    // columns) and an already-populated one.
+    add_column_if_missing(conn, "users", "password_hash", "TEXT")?;
+    add_column_if_missing(conn, "users", "created_at", "TEXT")?;
+    add_column_if_missing(conn, "repositories", "owner_id", "TEXT")?;
+
+    // `sessions` reshape (ADR-002 Decision 2/6). The old shape carried a
+    // `token`/`refresh_token`; those rows were never real (unauthenticated)
+    // sessions, so drop+recreate. Detecting the old shape by column keeps
+    // this a one-time migration — after the first boot the table already
+    // has the new shape and is left untouched (so restarts don't wipe live
+    // sessions).
+    if table_exists(conn, "sessions")? && column_exists(conn, "sessions", "token")? {
+        conn.execute_batch("DROP TABLE sessions;")?;
+    }
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS sessions (
+            id         TEXT PRIMARY KEY,
+            user_id    TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_used  TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+        "#,
+    )?;
+
+    // Backfill / normalize (ADR-002 Decision 6).
+    let now = Utc::now().to_rfc3339();
+    // Normalize the global role vocabulary to 'admin' | 'user'. The seeded
+    // owner is the bootstrap admin seat; any other legacy role collapses to
+    // 'user'.
+    conn.execute(
+        "UPDATE users SET role = 'admin' WHERE id = 'owner'",
+        params![],
+    )?;
+    conn.execute(
+        "UPDATE users SET role = 'user' WHERE role NOT IN ('admin', 'user')",
+        params![],
+    )?;
+    conn.execute(
+        "UPDATE users SET created_at = ?1 WHERE created_at IS NULL",
+        params![now],
+    )?;
+    // Every pre-auth repository belongs to the bootstrap admin so nothing
+    // becomes orphaned/invisible when auth flips on.
+    conn.execute(
+        "UPDATE repositories SET owner_id = 'owner' WHERE owner_id IS NULL",
+        params![],
+    )?;
+    // Normalize the repo-scoped role vocabulary (the code used to seed a
+    // stray 'Owner'; ADR-002 standardizes on lowercase 'owner').
+    conn.execute(
+        "UPDATE workspace_members SET role = 'owner' WHERE role = 'Owner'",
+        params![],
+    )?;
+    // Backfill the owner membership row (ADR-002 Decision 6 — the P3.2 review
+    // flagged this as missing). Every repository's workspace must carry an
+    // `owner` `workspace_members` row for its `owner_id`, or the repo owner
+    // would resolve to no repo-scoped role once the authz guard is live.
+    // Idempotent: `INSERT OR IGNORE` no-ops when the row already exists (e.g.
+    // the legacy hardcoded `('owner','owner')` row, which matches the
+    // backfilled `owner_id = 'owner'`).
+    //
+    // Latent coupling (flagged in P5.1 review): this INSERT selects
+    // `r.owner_id` straight into `workspace_members.user_id`, which has a
+    // `FOREIGN KEY REFERENCES users(id)` — with `foreign_keys = ON` (P5.1)
+    // that insert is rejected outright if the referenced user row doesn't
+    // exist. Today that's always satisfied: every pre-auth repository's
+    // `owner_id` was just backfilled to `'owner'` above, and `'owner'` is
+    // guaranteed to exist by `seed_default_user` (called right after
+    // `migrate()` in `Database::open`, and idempotently on every boot). Any
+    // future change that reorders `seed_default_user` after `migrate()`, or
+    // adds a `delete_user` that can remove a row still referenced by
+    // `repositories.owner_id`, must preserve this referent or this backfill
+    // (and the FK it relies on) breaks.
+    conn.execute(
+        "INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role) \
+         SELECT w.id, r.owner_id, 'owner' \
+         FROM workspaces w JOIN repositories r ON r.id = w.repository_id \
+         WHERE r.owner_id IS NOT NULL",
+        params![],
+    )?;
+    Ok(())
+}
+
 impl Database {
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let conn = Connection::open(path)?;
+        apply_pragmas(&conn)?;
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -188,135 +462,13 @@ impl Database {
         Ok(db)
     }
 
+    /// Runs every pending migration (see [`MIGRATIONS`] / [`run_migrations`]).
+    /// A no-op once the database is already at the latest version — safe to
+    /// call on every boot (and, as the existing tests do, more than once in a
+    /// row).
     pub fn migrate(&self) -> anyhow::Result<()> {
-        let conn = self.conn.lock().expect("database lock");
-        // Base tables (unchanged shape). `sessions` is handled separately below
-        // because its shape is reshaped for ADR-002 and its rows are ephemeral.
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS users (
-                id TEXT PRIMARY KEY,
-                email TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-                role TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS repositories (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                path TEXT NOT NULL UNIQUE,
-                remote_url TEXT,
-                favorite INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS workspaces (
-                id TEXT PRIMARY KEY,
-                repository_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(repository_id) REFERENCES repositories(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS workspace_members (
-                workspace_id TEXT NOT NULL,
-                user_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                PRIMARY KEY(workspace_id, user_id),
-                FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
-                FOREIGN KEY(user_id) REFERENCES users(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS credentials (
-                id            TEXT PRIMARY KEY,
-                user_id       TEXT NOT NULL,
-                label         TEXT NOT NULL,
-                host_pattern  TEXT NOT NULL,
-                kind          TEXT NOT NULL CHECK (kind IN ('https_token', 'ssh_key')),
-                username      TEXT,
-                secret_cipher BLOB NOT NULL,
-                secret_nonce  BLOB NOT NULL,
-                created_at    TEXT NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id)
-            );
-            "#,
-        )?;
-
-        // ADR-002 Decision 6 — additive migration. `ALTER TABLE ADD COLUMN` is
-        // idempotent here because it's guarded by a column-existence check, so
-        // this runs cleanly on both a fresh DB (base tables above lack these
-        // columns) and an already-populated one.
-        add_column_if_missing(&conn, "users", "password_hash", "TEXT")?;
-        add_column_if_missing(&conn, "users", "created_at", "TEXT")?;
-        add_column_if_missing(&conn, "repositories", "owner_id", "TEXT")?;
-
-        // `sessions` reshape (ADR-002 Decision 2/6). The old shape carried a
-        // `token`/`refresh_token`; those rows were never real (unauthenticated)
-        // sessions, so drop+recreate. Detecting the old shape by column keeps
-        // this a one-time migration — after the first boot the table already
-        // has the new shape and is left untouched (so restarts don't wipe live
-        // sessions).
-        if table_exists(&conn, "sessions")? && column_exists(&conn, "sessions", "token")? {
-            conn.execute_batch("DROP TABLE sessions;")?;
-        }
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS sessions (
-                id         TEXT PRIMARY KEY,
-                user_id    TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                last_used  TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
-            "#,
-        )?;
-
-        // Backfill / normalize (ADR-002 Decision 6).
-        let now = Utc::now().to_rfc3339();
-        // Normalize the global role vocabulary to 'admin' | 'user'. The seeded
-        // owner is the bootstrap admin seat; any other legacy role collapses to
-        // 'user'.
-        conn.execute(
-            "UPDATE users SET role = 'admin' WHERE id = 'owner'",
-            params![],
-        )?;
-        conn.execute(
-            "UPDATE users SET role = 'user' WHERE role NOT IN ('admin', 'user')",
-            params![],
-        )?;
-        conn.execute(
-            "UPDATE users SET created_at = ?1 WHERE created_at IS NULL",
-            params![now],
-        )?;
-        // Every pre-auth repository belongs to the bootstrap admin so nothing
-        // becomes orphaned/invisible when auth flips on.
-        conn.execute(
-            "UPDATE repositories SET owner_id = 'owner' WHERE owner_id IS NULL",
-            params![],
-        )?;
-        // Normalize the repo-scoped role vocabulary (the code used to seed a
-        // stray 'Owner'; ADR-002 standardizes on lowercase 'owner').
-        conn.execute(
-            "UPDATE workspace_members SET role = 'owner' WHERE role = 'Owner'",
-            params![],
-        )?;
-        // Backfill the owner membership row (ADR-002 Decision 6 — the P3.2 review
-        // flagged this as missing). Every repository's workspace must carry an
-        // `owner` `workspace_members` row for its `owner_id`, or the repo owner
-        // would resolve to no repo-scoped role once the authz guard is live.
-        // Idempotent: `INSERT OR IGNORE` no-ops when the row already exists (e.g.
-        // the legacy hardcoded `('owner','owner')` row, which matches the
-        // backfilled `owner_id = 'owner'`).
-        conn.execute(
-            "INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role) \
-             SELECT w.id, r.owner_id, 'owner' \
-             FROM workspaces w JOIN repositories r ON r.id = w.repository_id \
-             WHERE r.owner_id IS NOT NULL",
-            params![],
-        )?;
-        Ok(())
+        let mut conn = self.conn.lock().expect("database lock");
+        run_migrations(&mut conn, MIGRATIONS)
     }
 
     pub fn seed_default_user(&self) -> anyhow::Result<()> {
@@ -1010,6 +1162,288 @@ mod tests {
 
     fn test_db() -> Database {
         Database::open(":memory:").expect("open in-memory db")
+    }
+
+    // ---- P5.1: pragmas + versioned migrations ----
+
+    /// The pragmas set in `apply_pragmas` actually engage on a real,
+    /// file-backed database (an in-memory database can never report `wal` —
+    /// that path is exercised separately by every other test in this module,
+    /// which all use `:memory:` and must keep working unaffected).
+    #[test]
+    fn pragmas_engage_wal_and_foreign_keys_on_a_file_backed_db() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pragmas.db");
+        let db = Database::open(&path).expect("open file-backed db");
+
+        let conn = db.conn.lock().expect("database lock");
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("journal_mode");
+        assert_eq!(journal_mode, "wal", "WAL must actually engage on disk");
+
+        let foreign_keys: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .expect("foreign_keys");
+        assert_eq!(foreign_keys, 1, "foreign_keys must be ON");
+
+        let busy_timeout: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("busy_timeout");
+        assert_eq!(busy_timeout, 5000);
+
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .expect("synchronous");
+        assert_eq!(synchronous, 1, "synchronous=NORMAL reports as 1");
+    }
+
+    /// A brand-new database runs migration 1 end to end and lands at the
+    /// latest version with every table present.
+    #[test]
+    fn fresh_db_migrates_to_latest_version_with_all_tables() {
+        let db = test_db();
+        let conn = db.conn.lock().expect("database lock");
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("user_version");
+        assert_eq!(
+            version,
+            MIGRATIONS.last().unwrap().version,
+            "fresh db lands exactly at the latest known migration version"
+        );
+
+        for table in [
+            "users",
+            "repositories",
+            "workspaces",
+            "workspace_members",
+            "credentials",
+            "sessions",
+        ] {
+            assert!(
+                table_exists(&conn, table).unwrap(),
+                "fresh db must have table `{table}`"
+            );
+        }
+    }
+
+    /// The trickiest case: a database that predates versioned migrations
+    /// entirely — built by running migration 1's exact SQL directly, with no
+    /// `PRAGMA user_version` ever stamped, exactly what every zync.db on disk
+    /// from before this change looks like — must be recognized as
+    /// already-baseline, stamped at version 1, and left with its data intact.
+    /// No `CREATE TABLE`/`ALTER TABLE` may run destructively against it, and
+    /// opening it must not error.
+    #[test]
+    fn existing_ad_hoc_schema_db_is_stamped_without_data_loss() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("legacy.db");
+
+        {
+            let conn = Connection::open(&path).expect("open legacy db");
+            migration_001_baseline(&conn).expect("build legacy ad-hoc schema");
+            conn.execute(
+                "INSERT INTO users (id, email, name, role, password_hash, created_at) \
+                 VALUES ('legacy-user', 'legacy@zync.local', 'Legacy User', 'admin', \
+                 '$argon2id$legacyhash', ?1)",
+                params![Utc::now().to_rfc3339()],
+            )
+            .expect("insert legacy user");
+            conn.execute(
+                "INSERT INTO repositories (id, name, path, remote_url, favorite, created_at, owner_id) \
+                 VALUES ('legacy-repo', 'legacy', '/tmp/legacy', NULL, 0, ?1, 'legacy-user')",
+                params![Utc::now().to_rfc3339()],
+            )
+            .expect("insert legacy repo");
+            // Deliberately no `PRAGMA user_version` write: this file sits at
+            // SQLite's implicit default of 0, same as any database that has
+            // never had a versioned migration run against it.
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 0, "sanity check: legacy db starts unstamped");
+        }
+
+        let db = Database::open(&path).expect("opening an existing ad-hoc-schema db must not error");
+
+        let conn = db.conn.lock().expect("database lock");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            version, 1,
+            "existing ad-hoc-schema db is stamped at the baseline version, not left unstamped"
+        );
+        drop(conn);
+
+        let user = db
+            .find_user_by_identifier("legacy-user")
+            .unwrap()
+            .expect("legacy user survives the upgrade");
+        assert_eq!(user.email, "legacy@zync.local");
+        let repo = db
+            .repository("legacy-repo")
+            .unwrap()
+            .expect("legacy repo survives the upgrade");
+        assert_eq!(repo.owner_id.as_deref(), Some("legacy-user"));
+        assert_eq!(repo.path, "/tmp/legacy");
+    }
+
+    /// A migration that fails partway through must roll back its own writes
+    /// and must not advance `user_version` — the next boot retries it from
+    /// the last good version rather than resuming from a half-applied state.
+    #[test]
+    fn failing_migration_rolls_back_and_does_not_advance_version() {
+        fn ok_step(conn: &Connection) -> anyhow::Result<()> {
+            conn.execute_batch("CREATE TABLE step_one (id INTEGER PRIMARY KEY);")?;
+            Ok(())
+        }
+        fn failing_step(conn: &Connection) -> anyhow::Result<()> {
+            // Partial DDL before the deliberate failure — this must not
+            // survive the rollback.
+            conn.execute_batch("CREATE TABLE step_two (id INTEGER PRIMARY KEY);")?;
+            anyhow::bail!("deliberate migration failure")
+        }
+        let migrations = [
+            Migration {
+                version: 1,
+                name: "step one",
+                apply: ok_step,
+            },
+            Migration {
+                version: 2,
+                name: "step two (fails)",
+                apply: failing_step,
+            },
+        ];
+
+        let mut conn = Connection::open_in_memory().expect("open in-memory db");
+        let result = run_migrations(&mut conn, &migrations);
+        assert!(result.is_err(), "a failing migration must return Err");
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            version, 1,
+            "version stops at the last successfully applied migration"
+        );
+        assert!(
+            table_exists(&conn, "step_one").unwrap(),
+            "the successful migration's DDL persists"
+        );
+        assert!(
+            !table_exists(&conn, "step_two").unwrap(),
+            "the failing migration's DDL must be rolled back, not partially applied"
+        );
+
+        // Retrying with the same migration list resumes from version 1 and
+        // fails again the same way — it doesn't skip the broken migration.
+        let retry = run_migrations(&mut conn, &migrations);
+        assert!(retry.is_err(), "retrying a still-broken migration still refuses to boot");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+    }
+
+    /// Positive path of the one-time `sessions` reshape (ADR-002 Decision
+    /// 2/6): a real OLD token-shaped `sessions` table (with a `token` column,
+    /// the pre-auth shape) plus a live row must be reshaped to the new
+    /// `id`/`expires_at` shape, and the stale old-shape row must not survive
+    /// — it belonged to a schema with no sliding-expiry columns, so it can't
+    /// be carried forward meaningfully.
+    #[test]
+    fn sessions_reshape_guard_drops_the_old_token_shape() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE users (
+                 id TEXT PRIMARY KEY,
+                 email TEXT NOT NULL UNIQUE,
+                 name TEXT NOT NULL,
+                 role TEXT NOT NULL
+             );
+             CREATE TABLE sessions (
+                 id TEXT PRIMARY KEY,
+                 user_id TEXT NOT NULL,
+                 token TEXT NOT NULL,
+                 refresh_token TEXT,
+                 created_at TEXT NOT NULL
+             );
+             INSERT INTO users (id, email, name, role)
+                 VALUES ('owner', 'owner@zync.local', 'Owner', 'admin');
+             INSERT INTO sessions (id, user_id, token, refresh_token, created_at)
+                 VALUES ('stale-old-session', 'owner', 'stale-raw-token', NULL, '2024-01-01T00:00:00Z');",
+        )
+        .expect("seed a real old token-shaped sessions table + row");
+
+        migration_001_baseline(&conn).expect("migration must reshape the old sessions table");
+
+        assert!(
+            column_exists(&conn, "sessions", "id").unwrap()
+                && column_exists(&conn, "sessions", "expires_at").unwrap(),
+            "sessions table must have the new shape (id/expires_at) after migration"
+        );
+        assert!(
+            !column_exists(&conn, "sessions", "token").unwrap(),
+            "the old `token` column must be gone after the reshape"
+        );
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "the stale old-shape session row must not survive the one-time reshape"
+        );
+    }
+
+    /// The other half of the same guard property: a `sessions` table already
+    /// in the NEW (current) shape, holding a real live session row, must
+    /// NOT be dropped by a repeated migration run. This is the regression
+    /// the Warning called out — weakening the guard to `table_exists`
+    /// alone (dropping the check that it's specifically the *old* shape)
+    /// would wipe every live session on every boot, and only this test
+    /// would catch it: the fresh-db and existing-ad-hoc-schema tests above
+    /// never insert a session row through the new shape.
+    #[test]
+    fn sessions_reshape_guard_never_drops_a_current_shape_table() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        migration_001_baseline(&conn).expect("build baseline schema");
+        conn.execute(
+            "INSERT INTO users (id, email, name, role, created_at) \
+             VALUES ('bob', 'bob@zync.local', 'Bob', 'user', ?1)",
+            params![Utc::now().to_rfc3339()],
+        )
+        .expect("insert user");
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO sessions (id, user_id, created_at, last_used, expires_at) \
+             VALUES ('live-session', 'bob', ?1, ?1, ?1)",
+            params![now],
+        )
+        .expect("insert a live, current-shape session row");
+
+        // Simulate a later boot re-running the same migration body directly.
+        // In production this specific call is skipped once `PRAGMA
+        // user_version` is stamped (see `run_migrations`'s version gate),
+        // but that gate is a separate safety net — this test pins the
+        // guard's own property regardless of it: it must key off the
+        // table's *shape* (the `token` column), not merely its existence.
+        migration_001_baseline(&conn).expect("re-running the migration body must not error");
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE id = 'live-session'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "a current-shape session row must survive a repeated migration run"
+        );
     }
 
     /// P4.3 closing-pass regression test: `UserWithHash` used to derive a plain `Debug` that would
