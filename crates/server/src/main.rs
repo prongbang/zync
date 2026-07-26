@@ -81,7 +81,7 @@ async fn serve() -> anyhow::Result<()> {
     // format, and nested under the current span's fields in JSON.
     let env_filter = || {
         tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "zync_server=info,tower_http=info".into())
+            .unwrap_or_else(|_| "zync=info,tower_http=info".into())
     };
     let json_logs = std::env::var("ZYNC_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))

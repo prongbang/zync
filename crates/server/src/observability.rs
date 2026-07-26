@@ -258,9 +258,22 @@ pub async fn metrics_middleware(
     req: Request,
     next: Next,
 ) -> Response {
+    let method = req.method().clone();
+    let uri = req.uri().clone();
     let start = Instant::now();
     let res = next.run(req).await;
-    state.metrics.record_request(res.status(), start.elapsed());
+    let latency = start.elapsed();
+    state.metrics.record_request(res.status(), latency);
+    // Per-request access log. Emitted here (not via TraceLayer's span, whose
+    // fields don't render into the on_response event) so the line actually
+    // carries method + path, in both the human and json formats.
+    tracing::info!(
+        %method,
+        %uri,
+        status = res.status().as_u16(),
+        latency_ms = latency.as_millis() as u64,
+        "request"
+    );
     res
 }
 
