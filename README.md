@@ -28,8 +28,22 @@ version or install location with `ZYNC_VERSION` and `ZYNC_INSTALL_DIR`.
 
 ### First run / sign in
 
-Zync requires a login by default. Set `ZYNC_ADMIN_USER` (the login email) and
-`ZYNC_ADMIN_PASSWORD` on first start to create the admin account:
+Zync requires a login by default. Two ways to start it:
+
+**Quick local run, no login (single-user)** — the simplest way to try Zync on
+your own machine:
+
+```sh
+ZYNC_SECRET_KEY="$(openssl rand -base64 32)" ZYNC_AUTH=disabled zync serve
+```
+
+Then open <http://127.0.0.1:58271> — it opens straight in, no sign-in. This
+mode has no authentication, so only use it on a trusted machine / localhost —
+don't expose it on a network without auth.
+
+**With a login (multi-user, or anything reachable beyond localhost)** — set
+`ZYNC_ADMIN_USER` (the login email) and `ZYNC_ADMIN_PASSWORD` on first start
+to create the admin account:
 
 ```sh
 ZYNC_SECRET_KEY="$(openssl rand -base64 32)" \
@@ -41,9 +55,9 @@ ZYNC_SECRET_KEY="$(openssl rand -base64 32)" \
 Then open <http://127.0.0.1:58271> and sign in with that email and password.
 The admin is created once, in `zync.db` (path via `ZYNC_DB`) — later starts
 ignore `ZYNC_ADMIN_*`, so don't delete the DB or change `ZYNC_SECRET_KEY`
-afterwards. Skip the login entirely with `ZYNC_AUTH=disabled`, or, if you
-start without `ZYNC_ADMIN_*`, follow the one-time `/setup?token=...` link
-(valid ~24h) that the server logs on boot.
+afterwards. If you start without `ZYNC_ADMIN_*` (and without
+`ZYNC_AUTH=disabled`), follow the one-time `/setup?token=...` link (valid
+~24h) that the server logs on boot instead.
 
 ### Docker
 
