@@ -7,7 +7,8 @@ RUN cd apps/web && bun run build
 FROM rust:1-bookworm AS server-builder
 WORKDIR /app
 COPY . .
-RUN cargo build --release -p zync-server
+COPY --from=web-builder /app/web/apps/web/dist /app/web/apps/web/dist
+RUN cargo build --release -p zync-server --features embed-ui
 
 FROM debian:bookworm-slim
 RUN apt-get update \
@@ -27,11 +28,9 @@ RUN groupadd --system --gid 10001 zync \
 
 WORKDIR /app
 COPY --from=server-builder /app/target/release/zync /usr/local/bin/zync
-COPY --from=web-builder /app/web/apps/web/dist /app/public
 RUN mkdir -p /data /workspaces \
     && chown -R zync:zync /app /data /workspaces
 ENV ZYNC_BIND=0.0.0.0:58271
-ENV ZYNC_STATIC_DIR=/app/public
 USER zync
 EXPOSE 58271
 CMD ["zync", "serve"]
