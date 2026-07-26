@@ -59,6 +59,19 @@ afterwards. If you start without `ZYNC_ADMIN_*` (and without
 `ZYNC_AUTH=disabled`), follow the one-time `/setup?token=...` link (valid
 ~24h) that the server logs on boot instead.
 
+**From another machine on your LAN** — the server only binds to
+`127.0.0.1` by default. Set `ZYNC_BIND=0.0.0.0:58271` to accept connections
+from the network, then open `http://<host-ip>:58271` from another device.
+Only do this on a trusted LAN — with `ZYNC_AUTH=disabled` that also means
+anyone on the network has full unauthenticated access. With a login over
+plain HTTP, also set `ZYNC_COOKIE_INSECURE=1` (the session cookie is
+`Secure` by default); for real exposure, prefer a TLS reverse proxy, see
+[docs/DEPLOY.md](docs/DEPLOY.md).
+
+```sh
+ZYNC_SECRET_KEY="$(openssl rand -base64 32)" ZYNC_AUTH=disabled ZYNC_BIND=0.0.0.0:58271 zync serve
+```
+
 ### Docker
 
 ```sh
